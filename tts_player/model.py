@@ -11,3 +11,11 @@ class Sentence:
     token: str
     index: int
     path: Path
+
+
+@dataclass
+class Message:
+    """Сообщение: предложения одного (session_id, token) по возрастанию recv_ns."""
+    session_id: str
+    token: str
+    sentences: list[Sentence]
