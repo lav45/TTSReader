@@ -209,6 +209,29 @@ class QueueHistoryTest(unittest.TestCase):
         self.assertEqual([a, b], self.queue.release())
         self.assertFalse(message.audio.exists())
 
+    def switched_message(self):
+        """Три предложения по 0,5 с, играет второе — приходит склейка 1,5 с."""
+        sentences = [self.add((i + 1) * 1_000_000_000, 0.5, token="a", index=i)
+                     for i in range(3)]
+        self.queue.next_item()
+        self.queue.next_item()
+        message = self.queue.attach(self.entry(1.5), self.store)
+        self.assertIsNotNone(message.audio)
+        return message, sentences
+
+    def test_switched_message_finished_returns_nothing_and_deletes_files(self):
+        message, sentences = self.switched_message()
+        self.assertIsNone(self.queue.next_item())
+        self.assertEqual([], self.queue.release())
+        self.assertFalse(message.audio.exists())
+        self.assertFalse(any(s.path.exists() for s in sentences))
+
+    def test_release_during_switched_audio_returns_all_sentences(self):
+        message, sentences = self.switched_message()
+        self.assertEqual(sentences, self.queue.release())
+        self.assertFalse(message.audio.exists())
+        self.assertTrue(all(s.path.exists() for s in sentences))
+
     def test_eviction_deletes_audio(self):
         self.add(1_000_000_000, 1.0, token="m0")
         message = self.queue.attach(self.entry(1.0), self.store)

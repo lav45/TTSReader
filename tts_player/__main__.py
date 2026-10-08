@@ -42,7 +42,6 @@ class Player:
         self._playback.on_finished = self._on_finished
         self._playback.on_error = self._on_error
         self._inbox = Inbox(runtime_dir, self._on_sentence)
-        self._store = Path(runtime_dir) / "tts-player" / "store"
         self._history = History(history_dir, history_db, self._on_entry)
         self._history_dir = history_dir
         self._idle = True
@@ -79,7 +78,7 @@ class Player:
             self._play_next()
 
     def _on_entry(self, entry: HistoryEntry) -> None:
-        message = self._queue.attach(entry, self._store)
+        message = self._queue.attach(entry, self._inbox.store)
         if message is None:
             return
         if message.audio is None:
@@ -114,6 +113,9 @@ class Player:
 
     def _retry(self) -> bool:
         self._retry_id = 0
+        # Повтор ставится только из on_error играющего файла, а _target сбрасывается
+        # лишь в _play_next без элемента — пока повтор ждёт, _play_next не зовётся.
+        assert self._target is not None, "повтор без играющего файла"
         path, start_s = self._target
         self._playback.play(path, start_s=start_s)
         return GLib.SOURCE_REMOVE

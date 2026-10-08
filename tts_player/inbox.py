@@ -40,6 +40,11 @@ class Inbox:
         self._on_sentence = on_sentence
         self._monitor: Gio.FileMonitor | None = None
 
+    @property
+    def store(self) -> Path:
+        """Каталог предложений этого запуска; сюда же очередь копирует склейки."""
+        return self._store
+
     def start(self) -> None:
         self._inbox.mkdir(parents=True, exist_ok=True)
         self._store.mkdir(parents=True, exist_ok=True)

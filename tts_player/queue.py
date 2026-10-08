@@ -19,6 +19,8 @@ class MessageQueue:
 
     Последнее выданное next_item() (предложение или сообщение со склейкой) считается
     играющим до следующего вызова next_item(): тот означает, что оно закончено (проиграно или пропущено).
+    Склейка, привязанная attach() к сообщению, чьё предложение играет, делает играющим
+    само сообщение: плеер переходит на склейку, и дальше оно живёт как выданное Message.
     """
     TAIL = 5
     DURATION_TOLERANCE_S = 0.05
@@ -32,6 +34,7 @@ class MessageQueue:
         self._started: list[Message] = []
         self._current: Message | None = None
         self._playing: Sentence | Message | None = None
+        self._audio_played: set[Message] = set()  # играли склейкой: выданы Message или переведены attach()
         self._evicted: set[tuple[str, str]] = set()
         self._durations: dict[Path, float] = {}
 
@@ -65,6 +68,8 @@ class MessageQueue:
         self._playing = self._pick()
         if isinstance(self._playing, Sentence):
             self._handed.add(self._playing)
+        elif self._playing is not None:
+            self._audio_played.add(self._playing)
         return self._playing
 
     def release(self) -> list[Sentence]:
@@ -74,9 +79,9 @@ class MessageQueue:
         и не начатых сообщений. Файлы остальных (законченные, опоздавшие к уже
         законченным сообщениям) удаляются. Прерванное сообщение со склейкой (играющее
         или текущее) отдаётся всеми предложениями: копия audio удаляется, после
-        перезапуска оно играется по предложениям. Склейка, после выдачи которой
-        next_item() вызывали снова, доиграна: её файлы удаляются, предложения не
-        возвращаются.
+        перезапуска оно играется по предложениям. Склейка, после выдачи которой (или
+        перехода на неё через attach()) next_item() вызывали снова, доиграна: её файлы
+        удаляются, предложения не возвращаются.
         """
         pending = self._interrupted()
         for message in self._messages:
@@ -99,14 +104,8 @@ class MessageQueue:
         return sorted(pending, key=lambda s: s.recv_ns)
 
     def _finished_audio(self, message: Message) -> bool:
-        """Текущее сообщение с audio, выданное как Message, уже не играющее.
-
-        Вызов next_item() после выдачи Message означает, что склейка доиграна.
-        Признак: ни одно предложение сообщения не выдавалось (audio прикрепили
-        к сообщению, игравшемуся по предложениям, — их остаток не терять).
-        """
-        return (message.audio is not None and message is not self._playing
-                and not any(s in self._handed for s in message.sentences))
+        """Сообщение играло склейкой и уже не играет: next_item() после неё звали снова."""
+        return message in self._audio_played and message is not self._playing
 
     def _interrupted(self) -> list[Sentence]:
         if isinstance(self._playing, Message):
@@ -151,6 +150,7 @@ class MessageQueue:
 
     def _drop(self, message: Message) -> None:
         self._messages.remove(message)
+        self._audio_played.discard(message)
         self._evicted.add((message.session_id, message.token))
         for sentence in message.sentences:
             self._handed.discard(sentence)
@@ -183,7 +183,10 @@ class MessageQueue:
         длительности (допуск DURATION_TOLERANCE_S) склейка копируется в store/ и
         становится audio; иначе (или при сбое копирования) audio остаётся None, а
         сообщение доигрывается по предложениям. created_at/project заполняются
-        в любом случае. С audio сообщение next_item() предложениями больше не выдаёт.
+        в любом случае. С audio сообщение next_item() предложениями больше не выдаёт;
+        если играло его предложение, играющим становится само сообщение (переход на
+        склейку): следующий next_item() заканчивает его целиком, release() до этого
+        возвращает все его предложения.
         """
         message = self._candidate(entry)
         if message is None:
@@ -207,6 +210,9 @@ class MessageQueue:
             return message
         message.audio = target
         message.duration_s = entry.duration_s
+        if self._playing in message.sentences:
+            self._playing = message
+            self._audio_played.add(message)
         return message
 
     def locate(self, message: Message, position_s: float) -> tuple[Path, float]:
