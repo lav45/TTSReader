@@ -18,7 +18,13 @@ class Message:
     """Сообщение: предложения одного (session_id, token) по возрастанию recv_ns.
 
     Сравнивается по идентичности: два объекта — два разных сообщения очереди.
+    audio — копия склейки демона в store/ (None, пока её нет или длительности
+    разошлись); created_at/project/duration_s — из записи истории, до неё None.
     """
     session_id: str
     token: str
     sentences: list[Sentence]
+    audio: Path | None = None
+    created_at: float | None = None
+    project: str | None = None
+    duration_s: float | None = None

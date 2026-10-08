@@ -1,8 +1,15 @@
 """Очередь сообщений: порядок по recv_ns, выдача предложений и хвост проигранных."""
 import bisect
 import logging
+import shutil
+import wave
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from tts_player.model import Message, Sentence
+
+if TYPE_CHECKING:
+    from tts_player.history import HistoryEntry
 
 log = logging.getLogger("tts_player.queue")
 
@@ -14,6 +21,7 @@ class MessageQueue:
     вызова next_sentence(): тот означает, что оно закончено (проиграно или пропущено).
     """
     TAIL = 5
+    DURATION_TOLERANCE_S = 0.05
 
     def __init__(self) -> None:
         self._forget()
@@ -25,6 +33,7 @@ class MessageQueue:
         self._current: Message | None = None
         self._playing: Sentence | None = None
         self._evicted: set[tuple[str, str]] = set()
+        self._durations: dict[Path, float] = {}
 
     @property
     def current(self) -> Message | None:
@@ -45,6 +54,12 @@ class MessageQueue:
         self._messages.sort(key=lambda m: m.sentences[0].recv_ns)
 
     def next_sentence(self) -> Sentence | None:
+        """Следующее предложение к проигрыванию или None.
+
+        Сообщение с audio (склейкой) предложениями не выдаётся: его играет Player
+        из audio. Сообщение, чья склейка не сошлась по длительности (audio None),
+        выдаётся по предложениям как обычно, даже если attach() его уже обработал.
+        """
         self._playing = self._pick()
         if self._playing is not None:
             self._handed.add(self._playing)
@@ -66,6 +81,8 @@ class MessageQueue:
             for sentence in message.sentences:
                 if sentence not in pending:
                     self._unlink(sentence)
+        for message in self._messages:
+            self._unlink_audio(message)
         self._forget()
         return sorted(pending, key=lambda s: s.recv_ns)
 
@@ -78,7 +95,9 @@ class MessageQueue:
             if message in self._started:
                 continue
             self._start(message)
-            return self._unplayed(message)
+            sentence = self._unplayed(message)
+            if sentence is not None:
+                return sentence
         return None
 
     def _find(self, session_id: str, token: str) -> Message | None:
@@ -88,6 +107,8 @@ class MessageQueue:
         return None
 
     def _unplayed(self, message: Message) -> Sentence | None:
+        if message.audio is not None:
+            return None
         for sentence in message.sentences:
             if sentence not in self._handed:
                 return sentence
@@ -105,12 +126,100 @@ class MessageQueue:
         for sentence in message.sentences:
             self._handed.discard(sentence)
             self._unlink(sentence)
+        self._unlink_audio(message)
         log.info("сообщение %s/%s удалено из хвоста", message.session_id, message.token)
 
     def _unlink(self, sentence: Sentence) -> None:
+        self._durations.pop(sentence.path, None)
+        self._unlink_path(sentence.path)
+
+    def _unlink_audio(self, message: Message) -> None:
+        if message.audio is not None:
+            self._unlink_path(message.audio)
+
+    @staticmethod
+    def _unlink_path(path: Path) -> None:
         try:
-            sentence.path.unlink()
+            path.unlink()
         except FileNotFoundError:
-            log.debug("файл уже удалён: %s", sentence.path)
+            log.debug("файл уже удалён: %s", path)
         except OSError:
-            log.exception("не удалось удалить файл %s", sentence.path)
+            log.exception("не удалось удалить файл %s", path)
+
+    def attach(self, entry: "HistoryEntry", store: Path) -> Message | None:
+        """Привязывает склейку демона к сообщению её сессии; None, если сообщения нет.
+
+        Сообщение — с наибольшим первым recv_ns среди сообщений сессии без audio,
+        все предложения которых получены раньше entry.created_at. При совпадении
+        длительности (допуск DURATION_TOLERANCE_S) склейка копируется в store/ и
+        становится audio; иначе (или при сбое копирования) audio остаётся None, а
+        сообщение доигрывается по предложениям. created_at/project заполняются
+        в любом случае. С audio сообщение next_sentence() больше не выдаёт.
+        """
+        message = self._candidate(entry)
+        if message is None:
+            log.info("для склейки %s нет сообщения сессии %s", entry.path.name,
+                     entry.session_id)
+            return None
+        message.created_at = entry.created_at
+        message.project = entry.project
+        total = sum(self._duration(s) for s in message.sentences)
+        if abs(entry.duration_s - total) > self.DURATION_TOLERANCE_S + 1e-9:
+            log.warning("склейка %s: %.3f с, предложения сообщения %s/%s: %.3f с;"
+                        " играется по предложениям", entry.path.name,
+                        entry.duration_s, message.session_id, message.token, total)
+            return message
+        target = store / entry.path.name
+        try:
+            shutil.copy2(entry.path, target)
+        except OSError:
+            log.warning("не удалось скопировать склейку %s в %s; играется по"
+                        " предложениям", entry.path, target, exc_info=True)
+            return message
+        message.audio = target
+        message.duration_s = entry.duration_s
+        return message
+
+    def locate(self, message: Message, position_s: float) -> tuple[Path, float]:
+        """Файл и смещение в нём для позиции в сообщении (за концом — конец последнего)."""
+        if message.audio is not None:
+            return message.audio, position_s
+        remaining = max(position_s, 0.0)
+        for sentence in message.sentences:
+            duration = self._duration(sentence)
+            if remaining < duration:
+                return sentence.path, remaining
+            remaining -= duration
+        last = message.sentences[-1]
+        return last.path, self._duration(last)
+
+    def offset_of(self, message: Message, sentence: Sentence) -> float:
+        """Начало предложения в сообщении, с."""
+        offset = 0.0
+        for item in message.sentences:
+            if item is sentence or item == sentence:
+                break
+            offset += self._duration(item)
+        return offset
+
+    def _candidate(self, entry: "HistoryEntry") -> Message | None:
+        created_ns = entry.created_at * 1e9
+        fitting = [m for m in self._messages
+                   if m.session_id == entry.session_id and m.audio is None
+                   and m.created_at is None
+                   and all(s.recv_ns < created_ns for s in m.sentences)]
+        return max(fitting, key=lambda m: m.sentences[0].recv_ns, default=None)
+
+    def _duration(self, sentence: Sentence) -> float:
+        cached = self._durations.get(sentence.path)
+        if cached is not None:
+            return cached
+        try:
+            with wave.open(str(sentence.path), "rb") as w:
+                duration = w.getnframes() / w.getframerate()
+        except (OSError, EOFError, wave.Error, ZeroDivisionError):
+            log.warning("длительность %s не прочитана, считается 0", sentence.path,
+                        exc_info=True)
+            duration = 0.0
+        self._durations[sentence.path] = duration
+        return duration
