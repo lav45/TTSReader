@@ -97,6 +97,21 @@ class PaplayWrapperTest(unittest.TestCase):
         result = self.run_wrapper(self.make_wav(), with_runtime=False)
         self.assertEqual(result.returncode, 1)
         self.assertNotEqual(result.stderr.strip(), "")
+        self.assert_logged(result.stderr)
+
+    def test_no_arguments_fails(self):
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 1)
+        self.assertNotEqual(result.stderr.strip(), "")
+        self.assert_logged(result.stderr)
+
+    def test_unwritable_runtime_dir_fails(self):
+        self.runtime.chmod(0o500)
+        self.addCleanup(self.runtime.chmod, 0o700)
+        result = self.run_wrapper(self.make_wav())
+        self.assertEqual(result.returncode, 1)
+        self.assertNotEqual(result.stderr.strip(), "")
+        self.assert_logged(result.stderr)
 
     def test_success_does_not_log(self):
         self.run_wrapper(self.make_wav())
