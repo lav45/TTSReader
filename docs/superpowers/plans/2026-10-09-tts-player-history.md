@@ -146,7 +146,12 @@ class MessageQueue:
         # |entry.duration_s − Σ длительностей предложений| ≤ 0,05 → копия в
         #   store/{entry.path.name}, заполнить audio/created_at/project/duration_s;
         # иначе — только created_at/project, audio=None, WARNING
-        # attach законченным считает сообщение в любом случае
+        # attach законченным считает сообщение в любом случае; сообщение с заполненным
+        # created_at повторно не сопоставляется
+    def next_item(self) -> Sentence | Message | None
+        # (заменяет next_sentence, ревью Task 2) Sentence — играть предложение;
+        # Message — началось сообщение со склейкой, играть message.audio с 0;
+        # None — ждать. Сообщение со склейкой предложений больше не выдаёт.
     def locate(self, message: Message, position_s: float) -> tuple[Path, float]
         # audio есть → (audio, position_s); иначе предложение и смещение в нём
     def offset_of(self, message: Message, sentence: Sentence) -> float
