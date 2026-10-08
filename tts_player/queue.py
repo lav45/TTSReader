@@ -21,6 +21,9 @@ class MessageQueue:
     отвечает на вопросы о порядке (following/preceding/first_unheard), длине и
     завершённости сообщения, отображает позицию в файл (locate) и владеет файлами
     своих сообщений: удаляет их при вытеснении из хвоста, в release() и clear().
+
+    following/preceding/is_complete принимают только живые сообщения — из messages;
+    сообщение, вытесненное или забытое после release()/clear(), им не передаётся.
     """
     TAIL = 5
     DURATION_TOLERANCE_S = 0.05
@@ -69,6 +72,10 @@ class MessageQueue:
 
     def start(self, message: Message) -> None:
         """Сообщение начато: входит в хвост; при TAIL+1 начатых удаляется самое старое."""
+        if message not in self._messages:
+            log.debug("сообщение %s/%s уже не в очереди, не начинается",
+                      message.session_id, message.token)
+            return
         if message in self._started:
             return
         self._started.append(message)
@@ -96,7 +103,8 @@ class MessageQueue:
     def release(self, current: Message | None, position_s: float) -> list[Sentence]:
         """Отдаёт непрослушанные предложения по recv_ns и забывает все сообщения.
 
-        current — предложения, кончающиеся после position_s; остальные непрослушанные
+        current — предложения, кончающиеся после position_s или начинающиеся не раньше
+        неё (предложение нулевой длины на позиции не теряется); остальные непрослушанные
         сообщения — все предложения. Файлы прослушанных и сыгранных предложений
         удаляются, копии склеек удаляются всегда: после перезапуска непрослушанное
         играется по предложениям.
@@ -105,7 +113,7 @@ class MessageQueue:
         for message in self._messages:
             if message is current:
                 pending.extend(s for s in message.sentences
-                               if self.offset_of(message, s) + self._duration(s) > position_s)
+                               if self._unfinished(message, s, position_s))
             elif not message.heard:
                 pending.extend(message.sentences)
         for message in self._messages:
@@ -116,13 +124,24 @@ class MessageQueue:
         self._forget()
         return sorted(pending, key=lambda s: s.recv_ns)
 
+    def _unfinished(self, message: Message, sentence: Sentence, position_s: float) -> bool:
+        start = self.offset_of(message, sentence)
+        return start + self._duration(sentence) > position_s or start >= position_s
+
     def clear(self) -> None:
-        """Удаляет файлы всех сообщений, включая хвост, и забывает всё."""
+        """Удаляет файлы всех сообщений, включая хвост, и забывает их.
+
+        Ключи очищенных сообщений запоминаются как вытесненные: их поздние предложения
+        не добавляются, файлы удаляются. Новые сообщения приходят как обычно.
+        """
+        cleared = {(m.session_id, m.token) for m in self._messages}
         for message in self._messages:
             for sentence in message.sentences:
                 self._unlink(sentence)
             self._unlink_audio(message)
+        evicted = self._evicted | cleared
         self._forget()
+        self._evicted = evicted
 
     def _find(self, session_id: str, token: str) -> Message | None:
         for message in self._messages:

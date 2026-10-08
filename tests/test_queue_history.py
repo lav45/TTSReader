@@ -244,6 +244,20 @@ class QueueHistoryTest(unittest.TestCase):
         self.assertFalse(message.audio.exists())
         self.assertFalse(sentences[0].path.exists())
 
+    def test_release_current_keeps_zero_length_sentence_at_position(self):
+        message, sentences = self.three_sentences()
+        sentences[1].path.write_bytes(b"garbage")
+        with self.assertLogs("tts_player.queue", logging.WARNING):
+            released = self.queue.release(message, 0.5)
+        self.assertEqual(sentences[1:], released)
+
+    def test_release_current_drops_zero_length_sentence_before_position(self):
+        message, sentences = self.three_sentences()
+        sentences[1].path.write_bytes(b"garbage")
+        with self.assertLogs("tts_player.queue", logging.WARNING):
+            released = self.queue.release(message, 0.75)
+        self.assertEqual(sentences[2:], released)
+
     def test_release_current_takes_priority_over_heard(self):
         message, sentences = self.three_sentences()
         self.queue.mark_heard(message)

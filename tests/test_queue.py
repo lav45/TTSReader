@@ -234,7 +234,9 @@ class MessageQueueTest(unittest.TestCase):
         self.queue.start(first)
         self.queue.mark_heard(first)
         self.queue.start(second)
-        self.assertEqual([b0], self.queue.release(None, 0.0))
+        with self.assertLogs("tts_player.queue", "WARNING"):
+            released = self.queue.release(second, 0.0)
+        self.assertEqual([b0], released)
         self.assertFalse(a0.path.exists())
         self.assertTrue(b0.path.exists())
 
@@ -262,6 +264,39 @@ class MessageQueueTest(unittest.TestCase):
         self.assertEqual([], self.queue.messages)
         self.assertFalse(any(s.path.exists() for s in sentences))
         self.assertEqual([], self.queue.release(None, 0.0))
+
+    def test_sentence_of_cleared_message_is_deleted_not_added(self):
+        self.queue.add(self.sentence(1, token="t1", index=0))
+        self.queue.clear()
+        late = self.sentence(2, token="t1", index=1)
+        with self.assertLogs("tts_player.queue", "INFO"):
+            self.queue.add(late)
+        self.assertFalse(late.path.exists())
+        self.assertEqual([], self.queue.messages)
+
+    def test_new_message_after_clear_is_added(self):
+        self.queue.add(self.sentence(1, token="t1"))
+        self.queue.clear()
+        fresh = self.sentence(2, token="t2")
+        self.queue.add(fresh)
+        self.assertEqual([[fresh]], [m.sentences for m in self.queue.messages])
+
+    def test_release_forgets_evicted_keys(self):
+        self.start_messages(6)
+        self.queue.release(None, 0.0)
+        late = self.sentence(100, token="t1", index=1)
+        self.queue.add(late)
+        self.assertEqual(["t1"], self.tokens())
+
+    def test_start_of_forgotten_message_is_noop(self):
+        self.queue.add(self.sentence(1, token="t1"))
+        message = self.queue.messages[0]
+        self.queue.clear()
+        with self.assertLogs("tts_player.queue", "DEBUG"):
+            self.queue.start(message)
+        self.assertEqual([], self.queue.messages)
+        self.start_messages(6)
+        self.assertEqual(5, len(self.queue.messages))
 
 
 if __name__ == "__main__":
