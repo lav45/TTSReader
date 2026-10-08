@@ -86,9 +86,10 @@ class Player:
             return
         log.info("complete %s %s %.2fs", message.session_id, message.token,
                  message.duration_s)
-        sentence = self._sentence
-        if sentence is None or message is not self._queue.current:
+        if message is not self._queue.playing:
             return
+        sentence = self._sentence
+        assert sentence is not None, "играет сообщение без предложения"
         position = self._queue.offset_of(message, sentence) + (self._playback.position() or 0.0)
         log.info("switched %s at %.2f", message.audio.name, position)
         self._sentence = None

@@ -232,6 +232,34 @@ class QueueHistoryTest(unittest.TestCase):
         self.assertFalse(message.audio.exists())
         self.assertTrue(all(s.path.exists() for s in sentences))
 
+    def test_failed_copy_leaves_no_partial_file(self):
+        self.add(1_000_000_000, 1.0)
+
+        def partial_copy(src, dst):
+            Path(dst).write_bytes(b"part")
+            raise OSError("диск полон")
+
+        with mock.patch("tts_player.queue.shutil.copy2", side_effect=partial_copy):
+            with self.assertLogs("tts_player.queue", logging.WARNING):
+                message = self.queue.attach(self.entry(1.0), self.store)
+        self.assertIsNone(message.audio)
+        self.assertEqual([], list(self.store.iterdir()))
+
+    def test_playing_is_message_after_switch_and_not_otherwise(self):
+        sentence = self.add(1_000_000_000, 1.0)
+        self.assertIsNone(self.queue.playing)
+        self.queue.next_item()
+        self.assertEqual(sentence, self.queue.playing)
+        message = self.queue.attach(self.entry(1.0), self.store)
+        self.assertIs(message, self.queue.playing)
+
+    def test_playing_stays_sentence_when_audio_mismatch(self):
+        sentence = self.add(1_000_000_000, 1.0)
+        self.queue.next_item()
+        with self.assertLogs("tts_player.queue", logging.WARNING):
+            self.queue.attach(self.entry(1.5), self.store)
+        self.assertEqual(sentence, self.queue.playing)
+
     def test_eviction_deletes_audio(self):
         self.add(1_000_000_000, 1.0, token="m0")
         message = self.queue.attach(self.entry(1.0), self.store)

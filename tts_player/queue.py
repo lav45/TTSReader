@@ -42,6 +42,11 @@ class MessageQueue:
     def current(self) -> Message | None:
         return self._current
 
+    @property
+    def playing(self) -> Sentence | Message | None:
+        """Выданное next_item() и не законченное; после перехода attach() — само сообщение."""
+        return self._playing
+
     def add(self, sentence: Sentence) -> None:
         if (sentence.session_id, sentence.token) in self._evicted:
             log.info("предложение вытесненного сообщения %s/%s не играется: %s",
@@ -207,6 +212,7 @@ class MessageQueue:
         except OSError:
             log.warning("не удалось скопировать склейку %s в %s; играется по"
                         " предложениям", entry.path, target, exc_info=True)
+            target.unlink(missing_ok=True)
             return message
         message.audio = target
         message.duration_s = entry.duration_s

@@ -120,6 +120,7 @@ class PlaybackTest(unittest.TestCase):
         self.run_loop(800)
         self.assertEqual([], self.finished)
         self.assertEqual([], self.errors)
+
     def test_start_offset_shortens_playback(self) -> None:
         wav = make_wav(self.dir / "a.wav", 1.0)
         started = time.monotonic()
@@ -164,6 +165,27 @@ class PlaybackTest(unittest.TestCase):
         GLib.timeout_add(300, lambda: samples.append(self.playback.position()) or False)
         self.run_loop(600)
         self.assertGreaterEqual(samples[0], 1.0)
+        self.assertLess(samples[0], 1.6)
+
+    def test_position_right_after_play_with_offset_is_the_offset(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 2.0)
+        self.playback.play(wav, start_s=1.0)
+        position = self.playback.position()
+        self.assertIsNotNone(position)
+        self.assertAlmostEqual(1.0, position, delta=0.05)
+
+    def test_output_error_during_paused_preroll_with_offset(self) -> None:
+        playback = Playback("filesink")
+        self.addCleanup(playback.stop)
+        playback.on_finished = self._finished
+        playback.on_error = self._errored
+        wav = make_wav(self.dir / "a.wav", 2.0)
+        playback.play(wav, start_s=1.0)
+        self.run_loop()
+        self.assertEqual([], self.finished)
+        self.assertEqual(1, len(self.errors))
+        self.assertEqual(wav, self.errors[0][0])
+        self.assertTrue(self.errors[0][2])
 
 
 if __name__ == "__main__":

@@ -57,6 +57,8 @@ class Playback:
         player = self._player
         if player is None:
             return None
+        if self._seek_ns is not None:
+            return self._seek_ns / Gst.SECOND
         ok, position_ns = player.query_position(Gst.Format.TIME)
         if not ok:
             return None
