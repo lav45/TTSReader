@@ -120,7 +120,12 @@ paplay [опции] <wav>                      # опции не использ�
 файл:   {recv_ns}_{basename(<wav>)}       # recv_ns — время приёма, наносекунды: порядок
 запись: cp <wav> inbox/.{имя}.part  →  mv inbox/.{имя}.part inbox/{имя}   # атомарно
 exit:   0 — файл в буфере; 1 — копия не удалась
+сбой:   сообщение в stderr и в journal: logger -t tts-player-paplay
 ```
+
+Демон запускает плеер с `stdout/stderr=DEVNULL` и код возврата не читает, поэтому
+единственный след сбоя обёртки — journal (`journalctl -t tts-player-paplay`).
+Согласовано 2026-10-09.
 
 Плеер читает только файлы без точки в начале имени; забранное из `inbox` дальше
 принадлежит плееру. Объявления (`tts_announce.wav`, `tts_daemon_announce.wav`) обёртка
