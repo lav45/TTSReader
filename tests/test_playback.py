@@ -120,6 +120,50 @@ class PlaybackTest(unittest.TestCase):
         self.run_loop(800)
         self.assertEqual([], self.finished)
         self.assertEqual([], self.errors)
+    def test_start_offset_shortens_playback(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 1.0)
+        started = time.monotonic()
+        self.playback.play(wav, start_s=0.6)
+        self.run_loop()
+        elapsed = time.monotonic() - started
+        self.assertEqual([wav], self.finished)
+        self.assertEqual([], self.errors)
+        self.assertAlmostEqual(0.4, elapsed, delta=0.15)
+
+    def test_start_beyond_end_finishes_without_error(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 0.3)
+        self.playback.play(wav, start_s=5.0)
+        self.run_loop()
+        self.assertEqual([wav], self.finished)
+        self.assertEqual([], self.errors)
+
+    def test_position_grows_within_file_and_none_after_stop(self) -> None:
+        duration = 1.5
+        wav = make_wav(self.dir / "a.wav", duration)
+        samples: list[float | None] = []
+        self.playback.play(wav)
+        for delay in (300, 700):
+            GLib.timeout_add(delay, lambda: samples.append(self.playback.position()) or False)
+        self.run_loop(1000)
+        first, second = samples
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertLess(first, second)
+        self.assertGreaterEqual(first, 0.0)
+        self.assertLessEqual(second, duration)
+        self.playback.stop()
+        self.assertIsNone(self.playback.position())
+
+    def test_position_none_when_idle(self) -> None:
+        self.assertIsNone(self.playback.position())
+
+    def test_position_after_start_offset_begins_at_offset(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 2.0)
+        samples: list[float | None] = []
+        self.playback.play(wav, start_s=1.0)
+        GLib.timeout_add(300, lambda: samples.append(self.playback.position()) or False)
+        self.run_loop(600)
+        self.assertGreaterEqual(samples[0], 1.0)
 
 
 if __name__ == "__main__":
