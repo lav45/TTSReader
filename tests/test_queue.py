@@ -2,6 +2,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tts_player.model import Sentence
 from tts_player.queue import MessageQueue
@@ -137,6 +138,36 @@ class MessageQueueTest(unittest.TestCase):
         sentences = self.play_messages(20)
         self.queue.next_sentence()
         self.assertTrue(all(s.path.exists() for s in sentences))
+
+    def test_unlink_failure_on_eviction_does_not_break_queue(self):
+        sentences = self.play_messages(7)
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")):
+            handed = self.drain()
+        self.assertEqual(sentences, handed)
+
+    def test_sentence_of_evicted_message_is_deleted_not_played(self):
+        sentences = self.play_messages(6)
+        self.drain()
+        late = self.sentence(100, token="t1", index=1)
+        self.queue.add(late)
+        self.assertIsNone(self.queue.next_sentence())
+        self.assertFalse(late.path.exists())
+
+    def test_sentence_of_evicted_message_with_missing_file_is_fine(self):
+        self.play_messages(6)
+        self.drain()
+        late = self.sentence(100, token="t1", index=1)
+        late.path.unlink()
+        self.queue.add(late)
+        self.assertIsNone(self.queue.next_sentence())
+
+    def test_sentence_of_evicted_message_unlink_error_is_logged(self):
+        self.play_messages(6)
+        self.drain()
+        late = self.sentence(100, token="t1", index=1)
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")):
+            self.queue.add(late)
+        self.assertIsNone(self.queue.next_sentence())
 
 
 if __name__ == "__main__":

@@ -15,12 +15,18 @@ class MessageQueue:
         self._handed: set[Sentence] = set()
         self._started: list[Message] = []
         self._current: Message | None = None
+        self._evicted: set[tuple[str, str]] = set()
 
     @property
     def current(self) -> Message | None:
         return self._current
 
     def add(self, sentence: Sentence) -> None:
+        if (sentence.session_id, sentence.token) in self._evicted:
+            log.info("предложение вытесненного сообщения %s/%s не играется: %s",
+                     sentence.session_id, sentence.token, sentence.path)
+            self._unlink(sentence)
+            return
         message = self._find(sentence.session_id, sentence.token)
         if message is None:
             message = Message(sentence.session_id, sentence.token, [])
@@ -65,11 +71,17 @@ class MessageQueue:
             self._drop(self._started.pop(0))
 
     def _drop(self, message: Message) -> None:
+        self._messages.remove(message)
+        self._evicted.add((message.session_id, message.token))
         for sentence in message.sentences:
             self._handed.discard(sentence)
-            try:
-                sentence.path.unlink()
-            except FileNotFoundError:
-                log.debug("файл уже удалён: %s", sentence.path)
-        self._messages.remove(message)
+            self._unlink(sentence)
         log.info("сообщение %s/%s удалено из хвоста", message.session_id, message.token)
+
+    def _unlink(self, sentence: Sentence) -> None:
+        try:
+            sentence.path.unlink()
+        except FileNotFoundError:
+            log.debug("файл уже удалён: %s", sentence.path)
+        except OSError:
+            log.exception("не удалось удалить файл %s", sentence.path)
