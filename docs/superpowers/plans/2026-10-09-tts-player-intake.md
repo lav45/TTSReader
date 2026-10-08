@@ -93,8 +93,11 @@ class Sentence:
 
 class Inbox:
     def __init__(self, runtime_dir: Path, on_sentence: Callable[[Sentence], None]) -> None
-    def start(self) -> None   # создаёт каталоги, забирает накопленное по возрастанию recv_ns, затем следит
+    def start(self) -> None   # создаёт каталоги, удаляет остатки store/ (WARNING с числом),
+                              # забирает накопленное по возрастанию recv_ns, затем следит
     def stop(self) -> None
+    def put_back(self, sentences: list[Sentence]) -> None   # store/ → inbox/ под тем же именем
+                              # (добавлено финальным ревью: штатный выход возвращает непроигранное)
 ```
 
 **Acceptance Criteria:**
@@ -143,6 +146,9 @@ class MessageQueue:
         # иначе None — ждать новых предложений
     @property
     def current(self) -> Message | None
+    def release(self) -> list[Sentence]
+        # (добавлено финальным ревью) незаконченные предложения по recv_ns — играющее и
+        # невыданные; файлы остальных удаляются, все сообщения забываются
 
 сообщение = (session_id, token); порядок сообщений — по recv_ns первого предложения
 хвост: начатых сообщений (проигранные + текущее) не больше TAIL; с началом 6-го файлы
@@ -181,7 +187,9 @@ class Playback:
     def __init__(self, audio_sink: str | None = None) -> None
         # None — системный вывод playbin; имя — элемент GStreamer (тесты: "fakesink", sync=true)
     on_finished: Callable[[Path], None]          # EOS
-    on_error: Callable[[Path, str], None]        # ошибка GStreamer, текст ошибки
+    on_error: Callable[[Path, str, bool], None]  # ошибка GStreamer, текст, output_failed:
+                                                 # True — Gst.ResourceError от элемента-SINK
+                                                 # (изменено финальным ревью)
     def play(self, path: Path) -> None           # прерывает текущее, начинает path
     def stop(self) -> None
 ```
