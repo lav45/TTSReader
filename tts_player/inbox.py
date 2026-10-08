@@ -24,6 +24,10 @@ class Inbox:
 
     Файл переносится в store/ (rename на одной tmpfs) под тем же именем.
     Имена с точкой в начале (.part обёртки) не читаются.
+
+    Порядок: накопленное при start() отдаётся по возрастанию recv_ns; дальше доставка
+    идёт в порядке событий каталога. Упорядочивает по Sentence.recv_ns потребитель
+    (очередь), Inbox заново не сортирует.
     """
 
     def __init__(self, runtime_dir: Path, on_sentence: Callable[[Sentence], None]) -> None:
@@ -51,7 +55,8 @@ class Inbox:
             self._monitor = None
 
     def _scan(self) -> None:
-        names = [entry.name for entry in os.scandir(self._inbox)]
+        with os.scandir(self._inbox) as entries:
+            names = [entry.name for entry in entries if entry.is_file()]
         matched = []
         for name in names:
             if name.startswith("."):
@@ -83,13 +88,30 @@ class Inbox:
         match = NAME_PATTERN.match(name)
         target = self._store / name
         try:
-            os.rename(self._inbox / name, target)
+            self._rename(name, target)
         except FileNotFoundError:
             return  # уже забран (скан и событие монитора могут совпасть)
-        self._on_sentence(Sentence(
+        except OSError:
+            log.exception("Не удалось забрать %s из inbox", name)
+            return
+        sentence = Sentence(
             recv_ns=int(match["recv_ns"]),
             session_id=match["session_id"],
             token=match["token"],
             index=int(match["index"]),
             path=target,
-        ))
+        )
+        try:
+            self._on_sentence(sentence)
+        except Exception:
+            log.exception("on_sentence упал на %s", name)
+
+    def _rename(self, name: str, target: Path) -> None:
+        try:
+            os.rename(self._inbox / name, target)
+        except FileNotFoundError:
+            if self._store.is_dir():
+                raise  # пропал сам файл
+            log.warning("store/ пропал, создаю заново")
+            self._store.mkdir(parents=True, exist_ok=True)
+            os.rename(self._inbox / name, target)

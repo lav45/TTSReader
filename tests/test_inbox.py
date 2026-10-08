@@ -110,6 +110,37 @@ class InboxTest(unittest.TestCase):
             path=self.store_dir / name,
         )])
 
+    def test_store_removed_at_runtime_is_recreated(self):
+        self.inbox.start()
+        self.store_dir.rmdir()
+        self.run_paplay("tts_queue_S_ab_s0.wav")
+        self.spin(until=lambda: self.got)
+        self.assertEqual(len(self.got), 1)
+        self.assertTrue(self.got[0].path.exists())
+
+    def test_callback_error_does_not_stop_backlog(self):
+        first = "1000000000000000000_tts_queue_S_ab_s0.wav"
+        second = "2000000000000000000_tts_queue_S_ab_s1.wav"
+        self.drop(first)
+        self.drop(second)
+
+        def callback(sentence):
+            self.got.append(sentence)
+            if sentence.index == 0:
+                raise RuntimeError("boom")
+
+        inbox = Inbox(self.runtime, callback)
+        self.addCleanup(inbox.stop)
+        with self.assertLogs("tts_player.inbox", level="ERROR"):
+            inbox.start()
+        self.assertEqual([s.index for s in self.got], [0, 1])
+
+    def test_directory_in_inbox_is_skipped(self):
+        self.inbox_dir.mkdir(parents=True)
+        (self.inbox_dir / "1000000000000000000_tts_queue_S_ab_s0.wav").mkdir()
+        self.inbox.start()
+        self.assertEqual(self.got, [])
+
 
 if __name__ == "__main__":
     unittest.main()
