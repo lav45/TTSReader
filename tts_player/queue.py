@@ -74,13 +74,17 @@ class MessageQueue:
         и не начатых сообщений. Файлы остальных (законченные, опоздавшие к уже
         законченным сообщениям) удаляются. Прерванное сообщение со склейкой (играющее
         или текущее) отдаётся всеми предложениями: копия audio удаляется, после
-        перезапуска оно играется по предложениям.
+        перезапуска оно играется по предложениям. Склейка, после выдачи которой
+        next_item() вызывали снова, доиграна: её файлы удаляются, предложения не
+        возвращаются.
         """
         pending = self._interrupted()
         for message in self._messages:
             if message is not self._current and message in self._started:
                 continue
-            if message.audio is not None:
+            if message is self._current and self._finished_audio(message):
+                continue
+            if message.audio is not None and message not in self._started:
                 pending.extend(s for s in message.sentences if s not in pending)
                 continue
             pending.extend(s for s in message.sentences
@@ -93,6 +97,16 @@ class MessageQueue:
             self._unlink_audio(message)
         self._forget()
         return sorted(pending, key=lambda s: s.recv_ns)
+
+    def _finished_audio(self, message: Message) -> bool:
+        """Текущее сообщение с audio, выданное как Message, уже не играющее.
+
+        Вызов next_item() после выдачи Message означает, что склейка доиграна.
+        Признак: ни одно предложение сообщения не выдавалось (audio прикрепили
+        к сообщению, игравшемуся по предложениям, — их остаток не терять).
+        """
+        return (message.audio is not None and message is not self._playing
+                and not any(s in self._handed for s in message.sentences))
 
     def _interrupted(self) -> list[Sentence]:
         if isinstance(self._playing, Message):

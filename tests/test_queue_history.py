@@ -192,12 +192,20 @@ class QueueHistoryTest(unittest.TestCase):
         self.assertFalse(message.audio.exists())
         self.assertTrue(a.path.exists() and b.path.exists())
 
-    def test_release_current_audio_message_not_playing_returns_all_sentences(self):
+    def test_release_finished_audio_message_returns_nothing_and_deletes_files(self):
         a = self.add(1_000_000_000, 0.5, token="a", index=0)
         b = self.add(2_000_000_000, 0.5, token="a", index=1)
         message = self.queue.attach(self.entry(1.0), self.store)
-        self.queue.next_item()
+        self.assertIs(message, self.queue.next_item())
         self.assertIsNone(self.queue.next_item())
+        self.assertEqual([], self.queue.release())
+        self.assertFalse(message.audio.exists())
+        self.assertFalse(a.path.exists() or b.path.exists())
+
+    def test_release_unreturned_audio_message_returns_all_sentences(self):
+        a = self.add(1_000_000_000, 0.5, token="a", index=0)
+        b = self.add(2_000_000_000, 0.5, token="a", index=1)
+        message = self.queue.attach(self.entry(1.0), self.store)
         self.assertEqual([a, b], self.queue.release())
         self.assertFalse(message.audio.exists())
 
