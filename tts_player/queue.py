@@ -17,8 +17,8 @@ log = logging.getLogger("tts_player.queue")
 class MessageQueue:
     """Сообщения по первому recv_ns; хвост из TAIL начатых сообщений.
 
-    Последнее выданное next_sentence() предложение считается играющим до следующего
-    вызова next_sentence(): тот означает, что оно закончено (проиграно или пропущено).
+    Последнее выданное next_item() (предложение или сообщение со склейкой) считается
+    играющим до следующего вызова next_item(): тот означает, что оно закончено (проиграно или пропущено).
     """
     TAIL = 5
     DURATION_TOLERANCE_S = 0.05
@@ -31,7 +31,7 @@ class MessageQueue:
         self._handed: set[Sentence] = set()
         self._started: list[Message] = []
         self._current: Message | None = None
-        self._playing: Sentence | None = None
+        self._playing: Sentence | Message | None = None
         self._evicted: set[tuple[str, str]] = set()
         self._durations: dict[Path, float] = {}
 
@@ -53,15 +53,17 @@ class MessageQueue:
         message.sentences.insert(bisect.bisect_right(keys, sentence.recv_ns), sentence)
         self._messages.sort(key=lambda m: m.sentences[0].recv_ns)
 
-    def next_sentence(self) -> Sentence | None:
-        """Следующее предложение к проигрыванию или None.
+    def next_item(self) -> Sentence | Message | None:
+        """Следующее к проигрыванию: Sentence, Message со склейкой или None.
 
-        Сообщение с audio (склейкой) предложениями не выдаётся: его играет Player
-        из audio. Сообщение, чья склейка не сошлась по длительности (audio None),
-        выдаётся по предложениям как обычно, даже если attach() его уже обработал.
+        Sentence играется как есть. Message выдаётся, когда стартует сообщение
+        с audio: Player играет message.audio с нуля и по окончании снова зовёт
+        next_item(). None — играть нечего, ждать. Сообщение с audio предложениями
+        не выдаётся никогда; сообщение, чья склейка не сошлась по длительности
+        (audio None), выдаётся по предложениям, даже если attach() его обработал.
         """
         self._playing = self._pick()
-        if self._playing is not None:
+        if isinstance(self._playing, Sentence):
             self._handed.add(self._playing)
         return self._playing
 
@@ -70,13 +72,19 @@ class MessageQueue:
 
         Незаконченные — играющее и те, что ещё были бы выданы: невыданные текущего
         и не начатых сообщений. Файлы остальных (законченные, опоздавшие к уже
-        законченным сообщениям) удаляются.
+        законченным сообщениям) удаляются. Прерванное сообщение со склейкой (играющее
+        или текущее) отдаётся всеми предложениями: копия audio удаляется, после
+        перезапуска оно играется по предложениям.
         """
-        pending = [] if self._playing is None else [self._playing]
+        pending = self._interrupted()
         for message in self._messages:
             if message is not self._current and message in self._started:
                 continue
-            pending.extend(s for s in message.sentences if s not in self._handed)
+            if message.audio is not None:
+                pending.extend(s for s in message.sentences if s not in pending)
+                continue
+            pending.extend(s for s in message.sentences
+                           if s not in self._handed and s not in pending)
         for message in self._messages:
             for sentence in message.sentences:
                 if sentence not in pending:
@@ -86,7 +94,12 @@ class MessageQueue:
         self._forget()
         return sorted(pending, key=lambda s: s.recv_ns)
 
-    def _pick(self) -> Sentence | None:
+    def _interrupted(self) -> list[Sentence]:
+        if isinstance(self._playing, Message):
+            return list(self._playing.sentences)
+        return [] if self._playing is None else [self._playing]
+
+    def _pick(self) -> Sentence | Message | None:
         if self._current is not None:
             sentence = self._unplayed(self._current)
             if sentence is not None:
@@ -95,6 +108,8 @@ class MessageQueue:
             if message in self._started:
                 continue
             self._start(message)
+            if message.audio is not None:
+                return message
             sentence = self._unplayed(message)
             if sentence is not None:
                 return sentence
@@ -154,7 +169,7 @@ class MessageQueue:
         длительности (допуск DURATION_TOLERANCE_S) склейка копируется в store/ и
         становится audio; иначе (или при сбое копирования) audio остаётся None, а
         сообщение доигрывается по предложениям. created_at/project заполняются
-        в любом случае. С audio сообщение next_sentence() больше не выдаёт.
+        в любом случае. С audio сообщение next_item() предложениями больше не выдаёт.
         """
         message = self._candidate(entry)
         if message is None:
@@ -197,7 +212,7 @@ class MessageQueue:
         """Начало предложения в сообщении, с."""
         offset = 0.0
         for item in message.sentences:
-            if item is sentence or item == sentence:
+            if item == sentence:
                 break
             offset += self._duration(item)
         return offset

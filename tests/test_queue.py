@@ -22,7 +22,7 @@ class MessageQueueTest(unittest.TestCase):
 
     def drain(self):
         result = []
-        while (sentence := self.queue.next_sentence()) is not None:
+        while (sentence := self.queue.next_item()) is not None:
             result.append(sentence)
         return result
 
@@ -30,16 +30,16 @@ class MessageQueueTest(unittest.TestCase):
         a, b = self.sentence(1, index=0), self.sentence(2, index=1)
         self.queue.add(a)
         self.queue.add(b)
-        self.queue.next_sentence()
+        self.queue.next_item()
         self.assertEqual([a, b], self.queue.current.sentences)
 
     def test_other_token_makes_new_message(self):
         a, b = self.sentence(1, token="t1"), self.sentence(2, token="t2")
         self.queue.add(a)
         self.queue.add(b)
-        self.assertEqual(a, self.queue.next_sentence())
+        self.assertEqual(a, self.queue.next_item())
         self.assertEqual("t1", self.queue.current.token)
-        self.assertEqual(b, self.queue.next_sentence())
+        self.assertEqual(b, self.queue.next_item())
         self.assertEqual("t2", self.queue.current.token)
 
     def test_other_session_same_token_is_other_message(self):
@@ -47,7 +47,7 @@ class MessageQueueTest(unittest.TestCase):
         b = self.sentence(2, session="s2")
         self.queue.add(a)
         self.queue.add(b)
-        self.queue.next_sentence()
+        self.queue.next_item()
         self.assertEqual([a], self.queue.current.sentences)
 
     def test_sentences_by_recv_ns_each_once(self):
@@ -55,24 +55,24 @@ class MessageQueueTest(unittest.TestCase):
         for s in (c, a, b):
             self.queue.add(s)
         self.assertEqual([a, b, c], self.drain())
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertIsNone(self.queue.next_item())
 
     def test_empty_queue(self):
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertIsNone(self.queue.next_item())
         self.assertIsNone(self.queue.current)
 
     def test_late_sentence_of_current_message_is_next(self):
         a, b = self.sentence(1, index=0), self.sentence(2, index=1)
         self.queue.add(a)
-        self.assertEqual(a, self.queue.next_sentence())
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertEqual(a, self.queue.next_item())
+        self.assertIsNone(self.queue.next_item())
         self.queue.add(b)
-        self.assertEqual(b, self.queue.next_sentence())
+        self.assertEqual(b, self.queue.next_item())
 
     def test_late_sentence_with_earlier_recv_ns_is_handed_once_after(self):
         a, b, early = self.sentence(5, index=1), self.sentence(6, index=2), self.sentence(1, index=0)
         self.queue.add(a)
-        self.assertEqual(a, self.queue.next_sentence())
+        self.assertEqual(a, self.queue.next_item())
         self.queue.add(early)
         self.queue.add(b)
         self.assertEqual([early, b], self.drain())
@@ -80,9 +80,9 @@ class MessageQueueTest(unittest.TestCase):
     def test_moves_to_later_message_when_current_exhausted(self):
         a, b = self.sentence(1, token="t1"), self.sentence(2, token="t2")
         self.queue.add(a)
-        self.assertEqual(a, self.queue.next_sentence())
+        self.assertEqual(a, self.queue.next_item())
         self.queue.add(b)
-        self.assertEqual(b, self.queue.next_sentence())
+        self.assertEqual(b, self.queue.next_item())
         self.assertEqual("t2", self.queue.current.token)
 
     def test_messages_ordered_by_first_recv_ns(self):
@@ -99,7 +99,7 @@ class MessageQueueTest(unittest.TestCase):
         self.queue.add(b)
         self.drain()
         self.queue.add(late)
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertIsNone(self.queue.next_item())
         self.assertTrue(late.path.exists())
 
     def play_messages(self, count):
@@ -111,9 +111,9 @@ class MessageQueueTest(unittest.TestCase):
     def test_sixth_message_deletes_first_only(self):
         sentences = self.play_messages(6)
         for s in sentences[:5]:
-            self.assertEqual(s, self.queue.next_sentence())
+            self.assertEqual(s, self.queue.next_item())
         self.assertTrue(all(s.path.exists() for s in sentences))
-        self.assertEqual(sentences[5], self.queue.next_sentence())
+        self.assertEqual(sentences[5], self.queue.next_item())
         self.assertFalse(sentences[0].path.exists())
         self.assertTrue(all(s.path.exists() for s in sentences[1:]))
 
@@ -136,7 +136,7 @@ class MessageQueueTest(unittest.TestCase):
 
     def test_unplayed_messages_never_deleted(self):
         sentences = self.play_messages(20)
-        self.queue.next_sentence()
+        self.queue.next_item()
         self.assertTrue(all(s.path.exists() for s in sentences))
 
     def test_unlink_failure_on_eviction_does_not_break_queue(self):
@@ -150,7 +150,7 @@ class MessageQueueTest(unittest.TestCase):
         self.drain()
         late = self.sentence(100, token="t1", index=1)
         self.queue.add(late)
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertIsNone(self.queue.next_item())
         self.assertFalse(late.path.exists())
 
     def test_sentence_of_evicted_message_with_missing_file_is_fine(self):
@@ -159,7 +159,7 @@ class MessageQueueTest(unittest.TestCase):
         late = self.sentence(100, token="t1", index=1)
         late.path.unlink()
         self.queue.add(late)
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertIsNone(self.queue.next_item())
 
     def test_sentence_of_evicted_message_unlink_error_is_logged(self):
         self.play_messages(6)
@@ -169,7 +169,7 @@ class MessageQueueTest(unittest.TestCase):
             with self.assertLogs("tts_player.queue", "ERROR") as logs:
                 self.queue.add(late)
         self.assertTrue(any(str(late.path) in line for line in logs.output))
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertIsNone(self.queue.next_item())
 
     def test_messages_with_same_fields_are_different_messages(self):
         self.assertNotEqual(Message("s1", "t1", []), Message("s1", "t1", []))
@@ -179,7 +179,7 @@ class MessageQueueTest(unittest.TestCase):
         b0 = self.sentence(3, token="tb")
         for s in (b0, a1, a0):
             self.queue.add(s)
-        self.assertEqual(a0, self.queue.next_sentence())
+        self.assertEqual(a0, self.queue.next_item())
         self.assertEqual([a0, a1, b0], self.queue.release())
         self.assertTrue(all(s.path.exists() for s in (a0, a1, b0)))
 
@@ -187,8 +187,8 @@ class MessageQueueTest(unittest.TestCase):
         a0, b0 = self.sentence(1, token="ta"), self.sentence(2, token="tb")
         self.queue.add(a0)
         self.queue.add(b0)
-        self.queue.next_sentence()
-        self.queue.next_sentence()
+        self.queue.next_item()
+        self.queue.next_item()
         self.assertEqual([b0], self.queue.release())
         self.assertFalse(a0.path.exists())
         self.assertTrue(b0.path.exists())
@@ -214,10 +214,10 @@ class MessageQueueTest(unittest.TestCase):
         a0, b0 = self.sentence(1, token="ta"), self.sentence(2, token="tb")
         self.queue.add(a0)
         self.queue.add(b0)
-        self.queue.next_sentence()
+        self.queue.next_item()
         self.queue.release()
         self.assertIsNone(self.queue.current)
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertIsNone(self.queue.next_item())
         self.assertEqual([], self.queue.release())
 
 

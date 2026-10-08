@@ -146,25 +146,68 @@ class QueueHistoryTest(unittest.TestCase):
     def test_attached_current_does_not_hand_out_rest(self):
         first = self.add(1_000_000_000, 1.0, index=0)
         self.add(2_000_000_000, 1.0, index=1)
-        self.assertEqual(first, self.queue.next_sentence())
+        self.assertEqual(first, self.queue.next_item())
         self.queue.attach(self.entry(2.0), self.store)
-        self.assertIsNone(self.queue.next_sentence())
+        self.assertIsNone(self.queue.next_item())
 
     def test_attached_current_with_mismatch_keeps_handing_out(self):
         first = self.add(1_000_000_000, 1.0, index=0)
         second = self.add(2_000_000_000, 1.0, index=1)
-        self.queue.next_sentence()
+        self.queue.next_item()
         with self.assertLogs("tts_player.queue", logging.WARNING):
             self.queue.attach(self.entry(5.0), self.store)
-        self.assertEqual(second, self.queue.next_sentence())
+        self.assertEqual(second, self.queue.next_item())
+
+    def attach_first(self, token, recv_ns, name="tts-1.wav"):
+        self.add(recv_ns, 1.0, token=token)
+        message = self.queue.attach(self.entry(1.0, name=name), self.store)
+        self.assertIsNotNone(message.audio)
+        return message
+
+    def test_unstarted_audio_message_is_returned_then_next_sentence(self):
+        message = self.attach_first("a", 1_000_000_000)
+        plain = self.add(2_000_000_000, 1.0, token="b")
+        self.assertIs(message, self.queue.next_item())
+        self.assertEqual(plain, self.queue.next_item())
+
+    def test_audio_message_alone_returns_message_then_none(self):
+        message = self.attach_first("a", 1_000_000_000)
+        self.assertIs(message, self.queue.next_item())
+        self.assertIsNone(self.queue.next_item())
+
+    def test_audio_message_not_evicted_before_returned(self):
+        for i in range(MessageQueue.TAIL):
+            self.add((i + 1) * 1_000_000_000, 0.1, token=f"m{i}")
+            self.queue.next_item()
+        message = self.attach_first("last", 50_000_000_000, name="tts-9.wav")
+        self.assertIs(message, self.queue.next_item())
+        self.assertTrue(message.audio.exists())
+
+    def test_release_playing_audio_message_returns_all_sentences(self):
+        a = self.add(1_000_000_000, 0.5, token="a", index=0)
+        b = self.add(2_000_000_000, 0.5, token="a", index=1)
+        message = self.queue.attach(self.entry(1.0), self.store)
+        self.assertIs(message, self.queue.next_item())
+        self.assertEqual([a, b], self.queue.release())
+        self.assertFalse(message.audio.exists())
+        self.assertTrue(a.path.exists() and b.path.exists())
+
+    def test_release_current_audio_message_not_playing_returns_all_sentences(self):
+        a = self.add(1_000_000_000, 0.5, token="a", index=0)
+        b = self.add(2_000_000_000, 0.5, token="a", index=1)
+        message = self.queue.attach(self.entry(1.0), self.store)
+        self.queue.next_item()
+        self.assertIsNone(self.queue.next_item())
+        self.assertEqual([a, b], self.queue.release())
+        self.assertFalse(message.audio.exists())
 
     def test_eviction_deletes_audio(self):
         self.add(1_000_000_000, 1.0, token="m0")
         message = self.queue.attach(self.entry(1.0), self.store)
-        self.queue.next_sentence()
+        self.queue.next_item()
         for i in range(1, MessageQueue.TAIL + 1):
             self.add((i + 1) * 1_000_000_000, 0.1, token=f"m{i}")
-            self.queue.next_sentence()
+            self.queue.next_item()
         self.assertFalse(message.audio.exists())
 
     def test_release_deletes_audio(self):

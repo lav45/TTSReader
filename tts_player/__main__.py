@@ -12,7 +12,7 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
 from tts_player.inbox import Inbox  # noqa: E402
-from tts_player.model import Sentence  # noqa: E402
+from tts_player.model import Message, Sentence  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.queue import MessageQueue  # noqa: E402
 
@@ -75,12 +75,13 @@ class Player:
         return GLib.SOURCE_REMOVE
 
     def _play_next(self) -> None:
-        sentence = self._queue.next_sentence()
-        self._idle = sentence is None
-        if sentence is None:
+        item = self._queue.next_item()
+        self._idle = item is None
+        if item is None:
             return
-        log.info("playing %s", sentence.path.name)
-        self._playback.play(sentence.path)
+        path = item.audio if isinstance(item, Message) else item.path
+        log.info("playing %s", path.name)
+        self._playback.play(path)
 
 
 def main(argv: list[str] | None = None) -> int:
