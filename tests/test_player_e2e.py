@@ -2,6 +2,7 @@
 import os
 import queue
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,8 @@ import unittest
 import uuid
 import wave
 from pathlib import Path
+
+from test_history import SCHEMA
 
 ROOT = Path(__file__).resolve().parent.parent
 PAPLAY = ROOT / "daemon-bin" / "paplay"
@@ -28,7 +31,9 @@ def make_wav(path: Path, seconds: float = SECONDS) -> Path:
     return path
 
 
-class PlayerE2ETest(unittest.TestCase):
+class PlayerProcessCase(unittest.TestCase):
+    """Процесс плеера во временном окружении: свой XDG_RUNTIME_DIR, своя история демона."""
+
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -39,6 +44,13 @@ class PlayerE2ETest(unittest.TestCase):
         self.store = self.runtime / "tts-player" / "store"
         self.wavs = self.tmp / "wavs"
         self.wavs.mkdir()
+        self.history = self.tmp / "speech_history"
+        self.history.mkdir()
+        self.db = self.tmp / "handy_analysis.db"
+        conn = sqlite3.connect(str(self.db))
+        conn.execute(SCHEMA)
+        conn.commit()
+        conn.close()
         self.lines: queue.Queue[str] = queue.Queue()
         self.proc: subprocess.Popen | None = None
 
@@ -47,9 +59,11 @@ class PlayerE2ETest(unittest.TestCase):
         env["XDG_RUNTIME_DIR"] = str(self.runtime)
         return env
 
-    def start_player(self, sink: str = "fakesink") -> None:
+    def start_player(self, sink: str = "fakesink", history: Path | None = None) -> None:
+        history = self.history if history is None else history
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "tts_player", "--audio-sink", sink],
+            [sys.executable, "-m", "tts_player", "--audio-sink", sink,
+             "--history-dir", str(history), "--history-db", str(self.db)],
             cwd=ROOT, env=self.env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
@@ -98,6 +112,8 @@ class PlayerE2ETest(unittest.TestCase):
             return
         self.fail(f"неожиданная строка: {line}")
 
+
+class PlayerE2ETest(PlayerProcessCase):
     def test_messages_play_in_order(self) -> None:
         session = uuid.uuid4().hex
         self.start_player()

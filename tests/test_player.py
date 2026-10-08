@@ -27,8 +27,11 @@ class FakePlayback:
         self.played: list[str] = []
         self.stopped = False
 
-    def play(self, path: Path) -> None:
+    def play(self, path: Path, start_s: float = 0.0) -> None:
         self.played.append(path.name)
+
+    def position(self) -> float | None:
+        return None
 
     def stop(self) -> None:
         self.stopped = True
@@ -42,6 +45,8 @@ class PlayerTest(unittest.TestCase):
         self.inbox_dir = self.runtime / "tts-player" / "inbox"
         self.store_dir = self.runtime / "tts-player" / "store"
         self.inbox_dir.mkdir(parents=True)
+        history_dir = self.runtime / "speech_history"
+        history_dir.mkdir()
         patcher = mock.patch("tts_player.__main__.Playback", FakePlayback)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -49,7 +54,7 @@ class PlayerTest(unittest.TestCase):
         self.glib = glib.start()
         self.addCleanup(glib.stop)
         self.glib.timeout_add_seconds.return_value = 42
-        self.player = Player(self.runtime, None)
+        self.player = Player(self.runtime, None, history_dir, self.runtime / "handy_analysis.db")
         self.playback: FakePlayback = self.player._playback
 
     def start_with(self, *names: str) -> None:
