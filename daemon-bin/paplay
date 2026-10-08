@@ -1,0 +1,44 @@
+#!/bin/bash
+#
+# paplay - обёртка вместо настоящего paplay: не играет, а кладёт фразу в буфер плеера.
+#
+# Демон claude-tts ищет проигрыватель по имени paplay через PATH. daemon-bin стоит
+# в начале PATH демона, поэтому он находит эту обёртку, а не системный paplay.
+# Звук играет десктопное приложение-плеер: оно забирает файлы из буфера.
+#
+# Буфер: $XDG_RUNTIME_DIR/tts-player/inbox/, создаётся при необходимости.
+# Файл:  {recv_ns}_{имя WAV}, recv_ns = date +%s%N, поэтому порядок имён по строке
+#        совпадает с порядком вызовов.
+# Запись атомарная: сначала cp в .{имя}.part, затем mv, плеер .part не видит.
+#
+# Вызов: paplay [опции] <wav>. Опции игнорируются, <wav> - последний аргумент.
+# Объявления демона (tts_announce.wav, tts_daemon_announce.wav) пропускаются.
+# Код 1 и сообщение в stderr: нет аргумента, нет XDG_RUNTIME_DIR, копия не удалась;
+# в буфере не остаётся ни файла, ни .part.
+
+if [ $# -eq 0 ]; then
+    echo "paplay: не указан WAV-файл" >&2
+    exit 1
+fi
+
+WAV="${!#}"
+NAME="$(basename "$WAV")"
+
+case "$NAME" in
+    tts_announce.wav | tts_daemon_announce.wav) exit 0 ;;
+esac
+
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    echo "paplay: XDG_RUNTIME_DIR не задан" >&2
+    exit 1
+fi
+
+INBOX="$XDG_RUNTIME_DIR/tts-player/inbox"
+mkdir -p "$INBOX" || exit 1
+
+FILE="$(date +%s%N)_$NAME"
+PART="$INBOX/.$FILE.part"
+trap 'rm -f "$PART"' EXIT
+
+cp "$WAV" "$PART" || { echo "paplay: не удалось скопировать $WAV" >&2; exit 1; }
+mv "$PART" "$INBOX/$FILE" || { echo "paplay: не удалось положить $FILE в буфер" >&2; exit 1; }
