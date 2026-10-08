@@ -20,6 +20,8 @@ class Message:
     Сравнивается по идентичности: два объекта — два разных сообщения очереди.
     audio — копия склейки демона в store/ (None, пока её нет или длительности
     разошлись); created_at/project/duration_s — из записи истории, до неё None.
+    heard — сообщение прослушано (MessageQueue.mark_heard): его поздние предложения
+    не добавляются, release() его файлы удаляет.
     """
     session_id: str
     token: str
@@ -28,3 +30,4 @@ class Message:
     created_at: float | None = None
     project: str | None = None
     duration_s: float | None = None
+    heard: bool = False
