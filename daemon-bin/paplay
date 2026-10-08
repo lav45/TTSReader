@@ -13,13 +13,18 @@
 #
 # Вызов: paplay [опции] <wav>. Опции игнорируются, <wav> - последний аргумент.
 # Объявления демона (tts_announce.wav, tts_daemon_announce.wav) пропускаются.
-# Код 1 и сообщение в stderr: нет аргумента, нет XDG_RUNTIME_DIR, копия не удалась;
-# в буфере не остаётся ни файла, ни .part.
+# Код 1: нет аргумента, нет XDG_RUNTIME_DIR, буфер не создан, копия не удалась;
+# в буфере не остаётся ни файла, ни .part. Демон запускает плеер с stdout/stderr=DEVNULL
+# и код не читает, поэтому сообщение о сбое идёт и в stderr, и в journal:
+# logger -t tts-player-paplay (journalctl -t tts-player-paplay).
 
-if [ $# -eq 0 ]; then
-    echo "paplay: не указан WAV-файл" >&2
+fail() {
+    echo "paplay: $1" >&2
+    logger -t tts-player-paplay "$1"
     exit 1
-fi
+}
+
+[ $# -eq 0 ] && fail "не указан WAV-файл"
 
 WAV="${!#}"
 NAME="$(basename "$WAV")"
@@ -28,17 +33,14 @@ case "$NAME" in
     tts_announce.wav | tts_daemon_announce.wav) exit 0 ;;
 esac
 
-if [ -z "$XDG_RUNTIME_DIR" ]; then
-    echo "paplay: XDG_RUNTIME_DIR не задан" >&2
-    exit 1
-fi
+[ -z "$XDG_RUNTIME_DIR" ] && fail "XDG_RUNTIME_DIR не задан"
 
 INBOX="$XDG_RUNTIME_DIR/tts-player/inbox"
-mkdir -p "$INBOX" || exit 1
+mkdir -p "$INBOX" || fail "не удалось создать буфер $INBOX"
 
 FILE="$(date +%s%N)_$NAME"
 PART="$INBOX/.$FILE.part"
 trap 'rm -f "$PART"' EXIT
 
-cp "$WAV" "$PART" || { echo "paplay: не удалось скопировать $WAV" >&2; exit 1; }
-mv "$PART" "$INBOX/$FILE" || { echo "paplay: не удалось положить $FILE в буфер" >&2; exit 1; }
+cp "$WAV" "$PART" || fail "не удалось скопировать $WAV"
+mv "$PART" "$INBOX/$FILE" || fail "не удалось положить $FILE в буфер"

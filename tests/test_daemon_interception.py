@@ -15,10 +15,17 @@ WHICH_SCRIPT = (
     "from claude_code_tts.audio import detect_player\n"
     "print(shutil.which(detect_player()[0]))\n"
 )
+# Перед Popen проверяем, что player из PATH — ожидаемая обёртка (argv[2]); иначе exit 3 без
+# запуска, чтобы системный paplay не дошёл до живого PulseAudio.
 PLAY_SCRIPT = (
-    "import subprocess, sys\n"
+    "import shutil, subprocess, sys\n"
     "from claude_code_tts.audio import detect_player\n"
-    "sys.exit(subprocess.Popen(detect_player() + [sys.argv[1]]).wait())\n"
+    "cmd = detect_player()\n"
+    "found = shutil.which(cmd[0])\n"
+    "if found != sys.argv[2]:\n"
+    "    print(f'player {found!r} is not the wrapper {sys.argv[2]!r}', file=sys.stderr)\n"
+    "    sys.exit(3)\n"
+    "sys.exit(subprocess.Popen(cmd + [sys.argv[1]]).wait())\n"
 )
 
 
@@ -46,11 +53,22 @@ class DaemonInterceptionTest(unittest.TestCase):
         return subprocess.run([str(DAEMON_PYTHON), "-I", "-c", script, *map(str, args)],
                               env=env, capture_output=True, text=True)
 
+    def run_play(self, wav, path=None):
+        return self.daemon_python(PLAY_SCRIPT, wav, DAEMON_BIN / "paplay", path=path)
+
     def play(self, name, data):
         wav = self.queue / name
         wav.write_bytes(data)
-        result = self.daemon_python(PLAY_SCRIPT, wav)
+        result = self.run_play(wav)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_play_script_refuses_foreign_player(self):
+        wav = self.queue / "tts_queue_sess_tok_s0.wav"
+        wav.write_bytes(b"s0")
+        result = self.run_play(wav, path=os.environ.get("PATH", ""))
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("is not the wrapper", result.stderr)
+        self.assertFalse(self.inbox.exists())
 
     def test_player_found_by_daemon_is_our_wrapper(self):
         result = self.daemon_python(WHICH_SCRIPT)
@@ -59,7 +77,7 @@ class DaemonInterceptionTest(unittest.TestCase):
 
     def test_sentences_reach_reader_in_order_and_intact(self):
         sentences = {f"tts_queue_sess_tok_s{i}.wav": f"RIFF-sentence-{i}-".encode() + bytes([i, 255 - i]) * 7
-                     for i in range(3)}
+                     for i in (2, 0, 1)}
         for i, (name, data) in enumerate(sentences.items()):
             self.play(name, data)
             if i == 0:
