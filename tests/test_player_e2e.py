@@ -19,12 +19,12 @@ RATE = 8000
 SECONDS = 0.25
 
 
-def make_wav(path: Path) -> Path:
+def make_wav(path: Path, seconds: float = SECONDS) -> Path:
     with wave.open(str(path), "wb") as f:
         f.setnchannels(1)
         f.setsampwidth(2)
         f.setframerate(RATE)
-        f.writeframes(b"\x00\x00" * int(RATE * SECONDS))
+        f.writeframes(b"\x00\x00" * int(RATE * seconds))
     return path
 
 
@@ -35,6 +35,8 @@ class PlayerE2ETest(unittest.TestCase):
         self.tmp = Path(tmp.name)
         self.runtime = self.tmp / "run"
         self.runtime.mkdir()
+        self.inbox = self.runtime / "tts-player" / "inbox"
+        self.store = self.runtime / "tts-player" / "store"
         self.wavs = self.tmp / "wavs"
         self.wavs.mkdir()
         self.lines: queue.Queue[str] = queue.Queue()
@@ -45,9 +47,9 @@ class PlayerE2ETest(unittest.TestCase):
         env["XDG_RUNTIME_DIR"] = str(self.runtime)
         return env
 
-    def start_player(self) -> None:
+    def start_player(self, sink: str = "fakesink") -> None:
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "tts_player", "--audio-sink", "fakesink"],
+            [sys.executable, "-m", "tts_player", "--audio-sink", sink],
             cwd=ROOT, env=self.env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
@@ -64,10 +66,11 @@ class PlayerE2ETest(unittest.TestCase):
             self.lines.put(line.rstrip("\n"))
         proc.stderr.close()
 
-    def sentence(self, session: str, token: str, index: int, valid: bool = True) -> Path:
+    def sentence(self, session: str, token: str, index: int, valid: bool = True,
+                 seconds: float = SECONDS) -> Path:
         path = self.wavs / f"tts_queue_{session}_{token}_s{index}.wav"
         if valid:
-            make_wav(path)
+            make_wav(path, seconds)
         else:
             path.write_bytes(b"not a wav at all")
         return path
@@ -88,9 +91,9 @@ class PlayerE2ETest(unittest.TestCase):
     def played(self, count: int) -> list[str]:
         return [self.next_line("playing ").removeprefix("playing ") for _ in range(count)]
 
-    def assert_quiet(self) -> None:
+    def assert_quiet(self, seconds: float = QUIET) -> None:
         try:
-            line = self.lines.get(timeout=QUIET)
+            line = self.lines.get(timeout=seconds)
         except queue.Empty:
             return
         self.fail(f"неожиданная строка: {line}")
@@ -117,6 +120,10 @@ class PlayerE2ETest(unittest.TestCase):
         self.assertTrue(self.next_line("playing ").endswith("bbbbbb_s0.wav"))
         self.drop(self.sentence(session, "aaaaaa", 2))
         self.assert_quiet()
+        self.assertIsNone(self.proc.poll())
+        self.assertEqual([], [p.name for p in self.inbox.iterdir()])
+        self.drop(self.sentence(session, "cccccc", 0))
+        self.assertTrue(self.next_line("playing ").endswith("cccccc_s0.wav"))
 
     def test_backlog_plays_first_by_recv_ns(self) -> None:
         session = uuid.uuid4().hex
@@ -135,6 +142,36 @@ class PlayerE2ETest(unittest.TestCase):
         self.assertTrue(error.startswith("error ") and "aaaaaa_s0.wav: " in error, error)
         self.drop(self.sentence(session, "bbbbbb", 0))
         self.assertTrue(self.next_line("playing ").endswith("bbbbbb_s0.wav"))
+
+    def test_sigterm_returns_unfinished_to_inbox_and_restart_plays_them(self) -> None:
+        session = uuid.uuid4().hex
+        self.drop(self.sentence(session, "aaaaaa", 0, seconds=3.0))
+        self.drop(self.sentence(session, "aaaaaa", 1))
+        self.drop(self.sentence(session, "bbbbbb", 0))
+        self.start_player()
+        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        back = sorted(p.name for p in self.inbox.iterdir())
+        self.assertEqual(
+            [f"_tts_queue_{session}_aaaaaa_s0.wav", f"_tts_queue_{session}_aaaaaa_s1.wav",
+             f"_tts_queue_{session}_bbbbbb_s0.wav"],
+            [n[n.index("_tts_queue"):] for n in back])
+        self.assertEqual([], list(self.store.iterdir()))
+        self.start_player()
+        self.assertEqual(back, self.played(3))
+
+    def test_output_error_keeps_sentence_and_reports_once(self) -> None:
+        session = uuid.uuid4().hex
+        self.start_player(sink="filesink")  # filesink без location не открывается — звука нет
+        self.drop(self.sentence(session, "aaaaaa", 0))
+        self.drop(self.sentence(session, "bbbbbb", 0))
+        self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s0.wav"))
+        error = self.next_line("error ")
+        self.assertIn("aaaaaa_s0.wav: ", error)
+        self.assert_quiet(4.5)  # два повтора по 2 с — ни новой строки error, ни перехода к bbbbbb
+        self.assertIsNone(self.proc.poll())
+        self.assertEqual(2, len(list(self.store.iterdir())))
 
     def test_without_runtime_dir_exits_1_with_message(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}

@@ -30,7 +30,7 @@ class PlaybackTest(unittest.TestCase):
         self.dir = Path(tmp.name)
         self.loop = GLib.MainLoop()
         self.finished: list[Path] = []
-        self.errors: list[tuple[Path, str]] = []
+        self.errors: list[tuple[Path, str, bool]] = []
         self.playback = Playback("fakesink")
         self.addCleanup(self.playback.stop)
         self.playback.on_finished = self._finished
@@ -40,8 +40,8 @@ class PlaybackTest(unittest.TestCase):
         self.finished.append(path)
         self.loop.quit()
 
-    def _errored(self, path: Path, text: str) -> None:
-        self.errors.append((path, text))
+    def _errored(self, path: Path, text: str, output_failed: bool) -> None:
+        self.errors.append((path, text, output_failed))
         self.loop.quit()
 
     def run_loop(self, ms: int = LOOP_LIMIT_MS) -> None:
@@ -73,12 +73,35 @@ class PlaybackTest(unittest.TestCase):
     def test_garbage_reports_error(self) -> None:
         bad = self.dir / "bad.wav"
         bad.write_bytes(os.urandom(2048))
-        self.playback.play(bad)
-        self.run_loop()
+        with self.assertNoLogs("tts_player.playback", level="INFO"):
+            self.playback.play(bad)
+            self.run_loop()
         self.assertEqual([], self.finished)
         self.assertEqual(1, len(self.errors))
         self.assertEqual(bad, self.errors[0][0])
         self.assertTrue(self.errors[0][1])
+        self.assertFalse(self.errors[0][2])
+
+    def test_missing_file_is_file_error(self) -> None:
+        missing = self.dir / "missing.wav"
+        self.playback.play(missing)
+        self.run_loop()
+        self.assertEqual([(missing, False)], [(p, out) for p, _, out in self.errors])
+
+    def test_sink_that_fails_to_open_is_output_error(self) -> None:
+        # filesink без location не открывается: ResourceError от sink, звука нет
+        playback = Playback("filesink")
+        self.addCleanup(playback.stop)
+        playback.on_finished = self._finished
+        playback.on_error = self._errored
+        wav = make_wav(self.dir / "a.wav", 0.2)
+        playback.play(wav)
+        self.run_loop()
+        self.assertEqual([], self.finished)
+        self.assertEqual(1, len(self.errors))
+        self.assertEqual(wav, self.errors[0][0])
+        self.assertTrue(self.errors[0][1])
+        self.assertTrue(self.errors[0][2])
 
     def test_play_interrupts_current(self) -> None:
         first = make_wav(self.dir / "first.wav", 1.0)

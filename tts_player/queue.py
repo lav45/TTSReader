@@ -8,13 +8,22 @@ log = logging.getLogger("tts_player.queue")
 
 
 class MessageQueue:
+    """Сообщения по первому recv_ns; хвост из TAIL начатых сообщений.
+
+    Последнее выданное next_sentence() предложение считается играющим до следующего
+    вызова next_sentence(): тот означает, что оно закончено (проиграно или пропущено).
+    """
     TAIL = 5
 
     def __init__(self) -> None:
+        self._forget()
+
+    def _forget(self) -> None:
         self._messages: list[Message] = []
         self._handed: set[Sentence] = set()
         self._started: list[Message] = []
         self._current: Message | None = None
+        self._playing: Sentence | None = None
         self._evicted: set[tuple[str, str]] = set()
 
     @property
@@ -31,25 +40,45 @@ class MessageQueue:
         if message is None:
             message = Message(sentence.session_id, sentence.token, [])
             self._messages.append(message)
-        if sentence in message.sentences:
-            return
         keys = [s.recv_ns for s in message.sentences]
         message.sentences.insert(bisect.bisect_right(keys, sentence.recv_ns), sentence)
         self._messages.sort(key=lambda m: m.sentences[0].recv_ns)
 
     def next_sentence(self) -> Sentence | None:
+        self._playing = self._pick()
+        if self._playing is not None:
+            self._handed.add(self._playing)
+        return self._playing
+
+    def release(self) -> list[Sentence]:
+        """Отдаёт незаконченные предложения по recv_ns и забывает все сообщения.
+
+        Незаконченные — играющее и те, что ещё были бы выданы: невыданные текущего
+        и не начатых сообщений. Файлы остальных (законченные, опоздавшие к уже
+        законченным сообщениям) удаляются.
+        """
+        pending = [] if self._playing is None else [self._playing]
+        for message in self._messages:
+            if message is not self._current and message in self._started:
+                continue
+            pending.extend(s for s in message.sentences if s not in self._handed)
+        for message in self._messages:
+            for sentence in message.sentences:
+                if sentence not in pending:
+                    self._unlink(sentence)
+        self._forget()
+        return sorted(pending, key=lambda s: s.recv_ns)
+
+    def _pick(self) -> Sentence | None:
         if self._current is not None:
             sentence = self._unplayed(self._current)
             if sentence is not None:
-                self._handed.add(sentence)
                 return sentence
         for message in self._messages:
             if message in self._started:
                 continue
             self._start(message)
-            sentence = self._unplayed(message)
-            self._handed.add(sentence)
-            return sentence
+            return self._unplayed(message)
         return None
 
     def _find(self, session_id: str, token: str) -> Message | None:

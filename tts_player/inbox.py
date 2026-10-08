@@ -25,6 +25,9 @@ class Inbox:
     Файл переносится в store/ (rename на одной tmpfs) под тем же именем.
     Имена с точкой в начале (.part обёртки) не читаются.
 
+    store/ принадлежит одному запуску плеера: start() удаляет остатки прошлого (после
+    падения), штатный выход возвращает незаконченное в inbox/ через put_back().
+
     Порядок: накопленное при start() отдаётся по возрастанию recv_ns; дальше доставка
     идёт в порядке событий каталога. Упорядочивает по Sentence.recv_ns потребитель
     (очередь), Inbox заново не сортирует.
@@ -40,6 +43,7 @@ class Inbox:
     def start(self) -> None:
         self._inbox.mkdir(parents=True, exist_ok=True)
         self._store.mkdir(parents=True, exist_ok=True)
+        self._clear_store()
         # Сначала монитор, потом скан: файл между ними не потеряется,
         # а повторный забор того же имени пропускается.
         monitor = Gio.File.new_for_path(str(self._inbox)).monitor_directory(
@@ -53,6 +57,31 @@ class Inbox:
         if self._monitor is not None:
             self._monitor.cancel()
             self._monitor = None
+
+    def put_back(self, sentences: list[Sentence]) -> None:
+        """Возвращает предложения из store/ в inbox/ под тем же именем: их заберёт следующий запуск.
+
+        Звать после stop(), иначе монитор заберёт их обратно.
+        """
+        for sentence in sentences:
+            try:
+                os.rename(sentence.path, self._inbox / sentence.path.name)
+            except OSError:
+                log.exception("Не удалось вернуть %s в inbox", sentence.path.name)
+
+    def _clear_store(self) -> None:
+        with os.scandir(self._store) as entries:
+            leftovers = [entry.path for entry in entries if entry.is_file()]
+        if not leftovers:
+            return
+        log.warning("В store/ остались файлы прошлого запуска (%d), удаляю", len(leftovers))
+        for path in leftovers:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.exception("Не удалось удалить остаток %s", path)
 
     def _scan(self) -> None:
         with os.scandir(self._inbox) as entries:

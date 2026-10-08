@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tts_player.model import Sentence
+from tts_player.model import Message, Sentence
 from tts_player.queue import MessageQueue
 
 
@@ -166,8 +166,59 @@ class MessageQueueTest(unittest.TestCase):
         self.drain()
         late = self.sentence(100, token="t1", index=1)
         with mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")):
-            self.queue.add(late)
+            with self.assertLogs("tts_player.queue", "ERROR") as logs:
+                self.queue.add(late)
+        self.assertTrue(any(str(late.path) in line for line in logs.output))
         self.assertIsNone(self.queue.next_sentence())
+
+    def test_messages_with_same_fields_are_different_messages(self):
+        self.assertNotEqual(Message("s1", "t1", []), Message("s1", "t1", []))
+
+    def test_release_returns_playing_and_unplayed_files_kept(self):
+        a0, a1 = self.sentence(1, token="ta", index=0), self.sentence(2, token="ta", index=1)
+        b0 = self.sentence(3, token="tb")
+        for s in (b0, a1, a0):
+            self.queue.add(s)
+        self.assertEqual(a0, self.queue.next_sentence())
+        self.assertEqual([a0, a1, b0], self.queue.release())
+        self.assertTrue(all(s.path.exists() for s in (a0, a1, b0)))
+
+    def test_release_deletes_finished(self):
+        a0, b0 = self.sentence(1, token="ta"), self.sentence(2, token="tb")
+        self.queue.add(a0)
+        self.queue.add(b0)
+        self.queue.next_sentence()
+        self.queue.next_sentence()
+        self.assertEqual([b0], self.queue.release())
+        self.assertFalse(a0.path.exists())
+        self.assertTrue(b0.path.exists())
+
+    def test_release_when_idle_returns_nothing_and_deletes_all(self):
+        a0 = self.sentence(1, token="ta")
+        self.queue.add(a0)
+        self.drain()
+        self.assertEqual([], self.queue.release())
+        self.assertFalse(a0.path.exists())
+
+    def test_release_deletes_late_sentence_of_finished_message(self):
+        a0, b0 = self.sentence(1, token="ta", index=0), self.sentence(2, token="tb")
+        self.queue.add(a0)
+        self.queue.add(b0)
+        self.drain()
+        late = self.sentence(3, token="ta", index=1)
+        self.queue.add(late)
+        self.assertEqual([], self.queue.release())
+        self.assertFalse(late.path.exists())
+
+    def test_release_forgets_all_messages(self):
+        a0, b0 = self.sentence(1, token="ta"), self.sentence(2, token="tb")
+        self.queue.add(a0)
+        self.queue.add(b0)
+        self.queue.next_sentence()
+        self.queue.release()
+        self.assertIsNone(self.queue.current)
+        self.assertIsNone(self.queue.next_sentence())
+        self.assertEqual([], self.queue.release())
 
 
 if __name__ == "__main__":

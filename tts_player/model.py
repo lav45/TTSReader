@@ -13,9 +13,12 @@ class Sentence:
     path: Path
 
 
-@dataclass
+@dataclass(eq=False)
 class Message:
-    """Сообщение: предложения одного (session_id, token) по возрастанию recv_ns."""
+    """Сообщение: предложения одного (session_id, token) по возрастанию recv_ns.
+
+    Сравнивается по идентичности: два объекта — два разных сообщения очереди.
+    """
     session_id: str
     token: str
     sentences: list[Sentence]
