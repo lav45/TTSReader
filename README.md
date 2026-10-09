@@ -179,7 +179,8 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
   `start` поднимает демон и плеер, если их нет, и зовёт `tts-player session add UUID CWD`; `end` зовёт
   `tts-player session remove UUID`; при `reason` = `clear` (`/clear`) `end` зовёт
   `tts-player session clear UUID CWD` (без `cwd` - ошибка, выход 1). Вывода в stdout нет, статус - в
-  `$XDG_RUNTIME_DIR/tts-player/hook.log`, ошибка - в stderr с выходом 1;
+  `$XDG_RUNTIME_DIR/tts-player/hook.log` (первой строкой каждого вызова - событие:
+  `<дата время> start|end <UUID> source=… reason=… cwd=…`), ошибка - в stderr с выходом 1;
 - меню трея «Выход» - закрыть плеер.
 
 ## Список сессий

@@ -283,6 +283,14 @@ class PlayerHookTest(unittest.TestCase):
         self.assertEqual(self.calls("tts-player", 1), ["session clear u1 /p"])
         self.assertIn("вывод заглушки session", self.hook_log())
 
+    def test_event_line_in_log_has_mode_id_source_reason_cwd(self):
+        self.start(session="u1", cwd="/p/X")
+        self.end(session="u1", reason="clear", cwd="/p/Y")
+        lines = [line.split(" ", 2)[2] for line in self.hook_log().splitlines()
+                 if " start u1 " in line or " end u1 " in line]
+        self.assertEqual(["start u1 source=startup reason= cwd=/p/X",
+                          "end u1 source= reason=clear cwd=/p/Y"], lines)
+
     def test_end_other_reasons_remove_session(self):
         for reason in ("other", "logout", "resume", "prompt_input_exit", None):
             with self.subTest(reason=reason):

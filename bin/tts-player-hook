@@ -177,6 +177,10 @@ jq -s -e 'length == 1 and (.[0] | type == "object")' <<< "$INPUT" > /dev/null 2>
 SESSION_ID="$(json_field session_id)"
 [ -n "$SESSION_ID" ] || fail "в JSON нет session_id"
 
+# Строка события: по ней видно, с каким cwd пришли SessionEnd и следующий SessionStart
+# (замена сессии при /clear сравнивает их каталоги).
+log "$(date '+%F %T') $MODE $SESSION_ID source=$(json_field source) reason=$(json_field reason) cwd=$(json_field cwd)"
+
 if [ "$MODE" = "start" ]; then
     CWD="$(json_field cwd)"
     [ -n "$CWD" ] || fail "в JSON нет cwd"
