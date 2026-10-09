@@ -81,25 +81,29 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assertLessEqual(position, 1.0)
         self.assertTrue(self.next_line("playing ").endswith(f"{other}_bbbbbb_s0.wav"))
 
-    def test_two_passes_of_one_task_complete_as_one_message(self) -> None:
-        """Обёртка с playback.json (id задачи X) кладёт два прохода синтеза с разными token:
-        плеер играет их одним сообщением, склейка задачи даёт одну строку complete."""
+    def test_two_passes_of_one_task_end_as_one_message(self) -> None:
+        """Обёртка с playback.json (id задачи X) кладёт два прохода синтеза, как у демона:
+        проход 1 (aaaaaa) оборван паузой на s1 без записи истории, проход 2 (bbbbbb) начинает
+        с того же s1; склейка — только прохода 2. Плеер играет все четыре файла одним
+        сообщением по recv_ns; склейка короче сообщения — одна строка ended, без complete."""
         session = uuid.uuid4().hex
-        sentences = [*self.message(session, "aaaaaa", 2), self.sentence(session, "bbbbbb", 0, seconds=SECONDS)]
+        sentences = [*self.message(session, "aaaaaa", 2),
+                     self.sentence(session, "bbbbbb", 1, seconds=SECONDS),
+                     self.sentence(session, "bbbbbb", 2, seconds=SECONDS)]
         self.task("0123456789abcdef")
         self.start_player()
         for path in sentences:
             self.drop(path)
-        first = self.next_line("playing ")
-        self.assertTrue(first.endswith(f"_0123456789abcdef_tts_queue_{session}_aaaaaa_s0.wav"),
-                        first)
-        self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s1.wav"))
-        self.daemon_saves(session, sentences)
-        lines = self.lines_until("complete ")
-        self.assertEqual(f"complete {session} aaaaaa 1.50s", lines[-1])
-        self.assertEqual([], [line for line in lines if line.startswith("ended ")])
-        tail = self.lines_for(e2e.QUIET)
-        self.assertEqual([], [line for line in tail if line.startswith(("complete ", "ended "))])
+        played = [self.next_line("playing ") for _ in range(2)]
+        self.daemon_saves(session, sentences[2:])
+        lines = self.lines_until("ended ")
+        self.assertEqual(f"ended {session} aaaaaa", lines[-1])
+        lines += self.lines_for(e2e.QUIET + 2 * SECONDS)
+        played += [line for line in lines if line.startswith("playing ")]
+        self.assertEqual([f"_0123456789abcdef_{p.name}" for p in sentences],
+                         [line[line.index("_"):] for line in played])
+        self.assertEqual(1, len([line for line in lines if line.startswith("ended ")]), lines)
+        self.assertEqual([], [line for line in lines if line.startswith("complete ")])
 
     def lines_for(self, seconds: float) -> list[str]:
         """Все строки за seconds."""

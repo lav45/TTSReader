@@ -49,13 +49,22 @@ class QueueHistoryTest(unittest.TestCase):
         return next(m for m in self.queue.messages
                     if m.token == token and m.session_id == session)
 
-    def test_attaches_to_message_of_two_passes_of_one_task(self):
-        """Склейка задачи, синтезированной в два прохода, — к одному сообщению обоих проходов."""
-        self.add(1_000_000_000, 1, token="aa", task="f00d")
-        self.add(2_000_000_000, 1, token="bb", task="f00d")
-        message = self.queue.attach(self.entry(2), self.store)
-        self.assertEqual(("f00d", "aa"), (message.task_id, message.token))
-        self.assertEqual(self.store / "tts-1.wav", message.audio)
+    def test_clip_of_second_pass_ends_message_of_both_passes(self):
+        """Как у демона: пауза обрывает проход 1 на s1 без записи истории, проход 2 (новый
+        token) начинает с того же s1, склейка — только из предложений прохода 2. Длительность
+        не сходится с сообщением обоих проходов: audio нет, но сообщение завершено."""
+        self.add(1_000_000_000, 1, token="aa", index=0, task="f00d")
+        self.add(2_000_000_000, 1, token="aa", index=1, task="f00d")
+        self.add(3_000_000_000, 1, token="bb", index=1, task="f00d")
+        self.add(4_000_000_000, 1, token="bb", index=2, task="f00d")
+        with self.assertLogs("tts_player.queue", "WARNING"):
+            message = self.queue.attach(self.entry(2), self.store)
+        self.assertEqual([message], self.queue.messages)
+        self.assertEqual(("f00d", "aa", 4), (message.task_id, message.token,
+                                             len(message.sentences)))
+        self.assertIsNone(message.audio)
+        self.assertEqual(100.0, message.created_at)
+        self.assertTrue(self.queue.is_complete(message))
 
     def test_attaches_latest_message_of_session_without_audio(self):
         self.add(1_000_000_000, 1, token="old")
