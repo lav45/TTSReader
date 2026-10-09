@@ -131,20 +131,6 @@ def play_pause_enabled(state: PlayerState) -> bool:
     return state.current is not None or bool(state.messages)
 
 
-def _current_index(state: PlayerState) -> int | None:
-    return next((i for i, m in enumerate(state.messages) if m is state.current), None)
-
-
-def prev_enabled(state: PlayerState) -> bool:
-    index = _current_index(state)
-    return index is not None and index > 0
-
-
-def next_enabled(state: PlayerState) -> bool:
-    index = _current_index(state)
-    return index is not None and index < len(state.messages) - 1
-
-
 def text_position_label(state: TextState) -> str:
     return _clock(state.position_s, state.length_s)
 

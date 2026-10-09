@@ -6,9 +6,9 @@ from tts_player.model import Message, Sentence
 from tts_player.player import PlayerState
 from tts_player.sessions import Session
 from tts_player.text_speaker import TextState
-from tts_player.view import (MessageRow, SessionRow, clear_enabled, next_enabled,
-                             play_pause_enabled, play_pause_label, position_label,
-                             prev_enabled, rows, session_rows, text_play_enabled,
+from tts_player.view import (MessageRow, SessionRow, clear_enabled, play_pause_enabled,
+                             play_pause_label, position_label, rows, session_rows,
+                             text_play_enabled,
                              text_play_pause_label, text_position_label, tree_rows)
 
 CREATED_AT = 1_700_000_000.0
@@ -171,17 +171,6 @@ class ControlsTest(unittest.TestCase):
         self.assertTrue(play_pause_enabled(state("idle", messages=[heard, unheard])))
         self.assertTrue(play_pause_enabled(state("idle", messages=[heard])))
 
-    def test_prev_next_at_edges(self):
-        a, b, c = message("a"), message("b"), message("c")
-        cases = {a: (False, True), b: (True, True), c: (True, False)}
-        for current, (prev, following) in cases.items():
-            st = state("playing", current, messages=[a, b, c])
-            self.assertEqual((prev_enabled(st), next_enabled(st)), (prev, following),
-                             current.task_ids)
-
-    def test_prev_next_without_current(self):
-        st = state(messages=[message("a"), message("b")])
-        self.assertEqual((prev_enabled(st), next_enabled(st)), (False, False))
 
 if __name__ == "__main__":
     unittest.main()

@@ -216,8 +216,7 @@ class PlayerWindowTest(unittest.TestCase):
 
     def test_buttons_call_player_commands(self) -> None:
         w = self.window
-        for button, call in ((w.prev_button, "prev"), (w.play_pause_button, "toggle_play_pause"),
-                             (w.next_button, "next"), (w.clear_button, "clear")):
+        for button, call in ((w.play_pause_button, "toggle_play_pause"), (w.clear_button, "clear")):
             self.player.calls.clear()
             button.clicked()
             self.assertEqual([(call,)], self.player.calls, call)
@@ -367,7 +366,7 @@ class PlayerWindowTest(unittest.TestCase):
         w = self.window
         w.show_all()
         flush()
-        w.next_button.grab_focus()
+        w.play_pause_button.grab_focus()
         flush()
         self.player.change(self.open_first(self.c, position_s=0.0))
         flush()
@@ -419,24 +418,17 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual(5.0, w.scale.get_value())
         self.assertEqual(position_label(snapshot), w.position_label_widget.get_text())
         self.assertEqual(play_pause_label(snapshot), w.play_pause_button.get_label())
-        self.assertTrue(w.prev_button.get_sensitive())
-        self.assertFalse(w.next_button.get_sensitive())
 
-    def test_transport_row_is_position_left_then_prev_play_pause_next_right(self) -> None:
+    def test_transport_row_is_position_left_then_play_pause_right(self) -> None:
+        """Кнопок ⏮/⏭ нет (2026-10-10, ими не пользовались): в ряду время и play/pause."""
         w = self.window
         row = w.play_pause_button.get_parent()
-        buttons = [child for child in row.get_children() if isinstance(child, Gtk.Button)]
-        self.assertEqual([w.prev_button, w.play_pause_button, w.next_button], buttons)
-        self.assertIs(row, w.position_label_widget.get_parent())
+        self.assertEqual([w.position_label_widget, w.play_pause_button], row.get_children())
         self.assertEqual(Gtk.PackType.START,
                          row.child_get_property(w.position_label_widget, "pack-type"))
-        self.assertEqual(w.position_label_widget, row.get_children()[0])
-        for button in buttons:
-            self.assertEqual(Gtk.PackType.END, row.child_get_property(button, "pack-type"))
-        # pack_end кладёт последним добавленного первым справа: порядок слева направо
-        self.assertEqual([w.position_label_widget, w.prev_button, w.play_pause_button,
-                          w.next_button], row.get_children())
-        for name in ("pause_button", "play_stop_button"):
+        self.assertEqual(Gtk.PackType.END,
+                         row.child_get_property(w.play_pause_button, "pack-type"))
+        for name in ("pause_button", "play_stop_button", "prev_button", "next_button"):
             self.assertFalse(hasattr(w, name), name)
 
     def test_main_screen_order_top_to_bottom(self) -> None:
@@ -465,10 +457,6 @@ class PlayerWindowTest(unittest.TestCase):
             self.player.change(snapshot)
             self.assertEqual(label, w.play_pause_button.get_label(), snapshot.status)
             self.assertEqual(enabled, w.play_pause_button.get_sensitive(), snapshot.status)
-
-    def test_stopped_first_disables_prev(self) -> None:
-        self.player.change(state("stopped", self.a, [self.a, self.b, self.c]))
-        self.assertFalse(self.window.prev_button.get_sensitive())
 
     def test_close_hides_window(self) -> None:
         self.window.show_all()

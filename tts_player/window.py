@@ -16,15 +16,13 @@ from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import PlayerSettings, Prefs  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.text_speaker import SOUNDING_STATUSES, TextSpeaker, TextState  # noqa: E402
-from tts_player.view import (MessageRow, SessionRow, clear_enabled, next_enabled,  # noqa: E402
+from tts_player.view import (MessageRow, SessionRow, clear_enabled,  # noqa: E402
                              play_pause_enabled, play_pause_label, position_label,
-                             prev_enabled, text_play_enabled,
+                             text_play_enabled,
                              text_play_pause_label, text_position_label, tree_rows)
 
 log = logging.getLogger(__name__)
 
-PREV_LABEL = "⏮"
-NEXT_LABEL = "⏭"
 FOLDER_OPEN_ARROW = "▾"
 FOLDER_CLOSED_ARROW = "▸"
 FOLDER_OPEN_ICON = "folder-open-symbolic"
@@ -97,7 +95,7 @@ class PlayerWindow(Gtk.Window):
     "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить сообщения
     активной сессии» (активна, пока есть активная сессия), справа «Озвучить свой текст»; дерево сессий — папки (открыта одна или ни одной: открытая —
     активная), дорожки открытой — под её заголовком с отступом; ползунок позиции; ряд со
-    временем слева и prev / play-pause / next справа.
+    временем слева и play/pause справа.
     "settings": хвост очереди и приглушение (PlayerSettings), голос и скорость claude-tts
     (DaemonSettings); «Сохранить» пишет их и остаётся на экране, итог — в блоке внизу; стрелка
     назад возвращает без записи. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
@@ -132,9 +130,7 @@ class PlayerWindow(Gtk.Window):
         self.scale = self.slider.scale
         self.position_label_widget = Gtk.Label(xalign=0.0)
 
-        self.prev_button = self._button(PREV_LABEL, player.prev)
         self.play_pause_button = self._button("", self._toggle_main)
-        self.next_button = self._button(NEXT_LABEL, player.next)
         self.clear_button = self._icon_button(
             "user-trash-symbolic", "Очистить сообщения активной сессии", player.clear)
         self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
@@ -142,11 +138,10 @@ class PlayerWindow(Gtk.Window):
         self.text_button = self._icon_button("audio-volume-high-symbolic", "Озвучить свой текст",
                                              self._open_text)
 
-        # время слева, кнопки справа: pack_end выкладывает от правого края, поэтому next первым
+        # время слева, play/pause справа
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         buttons.pack_start(self.position_label_widget, False, False, 0)
-        for button in (self.next_button, self.play_pause_button, self.prev_button):
-            buttons.pack_end(button, False, False, 0)
+        buttons.pack_end(self.play_pause_button, False, False, 0)
 
         self.tree = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         self.tree.set_activate_on_single_click(True)
@@ -302,8 +297,8 @@ class PlayerWindow(Gtk.Window):
 
     def _toggle_main(self) -> None:
         """Play/pause главного экрана. Главный экран виден, только когда свой текст молчит
-        (инвариант держит _leave_text), поэтому его кнопки, включая prev/next и клик по
-        строке, свой текст не трогают."""
+        (инвариант держит _leave_text), поэтому его кнопки и клик по строке свой текст не
+        трогают."""
         self._player.toggle_play_pause()
 
     def _on_text_changed(self, buffer: Gtk.TextBuffer) -> None:
@@ -396,8 +391,6 @@ class PlayerWindow(Gtk.Window):
         self.position_label_widget.set_text(position_label(state))
         self.play_pause_button.set_label(play_pause_label(state))
         self.play_pause_button.set_sensitive(play_pause_enabled(state))
-        self.prev_button.set_sensitive(prev_enabled(state))
-        self.next_button.set_sensitive(next_enabled(state))
         self.scale.set_sensitive(state.current is not None)
         self.slider.show(state.position_s, state.length_s)
         self.clear_button.set_sensitive(clear_enabled(state))
