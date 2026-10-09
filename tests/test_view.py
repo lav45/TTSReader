@@ -1,7 +1,5 @@
-import tempfile
 import time
 import unittest
-import wave
 from pathlib import Path
 
 from tts_player.model import Message, Sentence
@@ -15,21 +13,15 @@ def hms(seconds: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(seconds))
 
 
-def write_wav(path: Path, seconds: int) -> Path:
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(1000)
-        w.writeframes(b"\0\0" * 1000 * seconds)
-    return path
-
-
 def message(token="t", sentences=None, **kw) -> Message:
     return Message("s", token, sentences or [], **kw)
 
 
-def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=()) -> PlayerState:
-    return PlayerState(status, current, position_s, length_s, list(messages), False)
+def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=(),
+          lengths=None) -> PlayerState:
+    messages = list(messages)
+    lengths = [0.0] * len(messages) if lengths is None else lengths
+    return PlayerState(status, current, position_s, length_s, messages, False, lengths)
 
 
 class RowsTest(unittest.TestCase):
@@ -56,24 +48,20 @@ class RowsTest(unittest.TestCase):
 
     def test_duration_known_has_no_ellipsis(self):
         m = message(created_at=CREATED_AT, duration_s=65)
-        self.assertEqual(rows(state(messages=[m]))[0].duration, "1:05")
+        self.assertEqual(rows(state(messages=[m], lengths=[65.0]))[0].duration, "1:05")
 
     def test_duration_hours(self):
         m = message(created_at=CREATED_AT, duration_s=3725)
-        self.assertEqual(rows(state(messages=[m]))[0].duration, "1:02:05")
+        self.assertEqual(rows(state(messages=[m], lengths=[3725.0]))[0].duration, "1:02:05")
 
-    def test_duration_before_gluing_sums_sentences(self):
-        with tempfile.TemporaryDirectory() as d:
-            sentences = [
-                Sentence(1, "s", "t", i, write_wav(Path(d) / f"{i}.wav", 2)) for i in range(2)
-            ]
-            m = message(sentences=sentences)
-            self.assertEqual(rows(state(messages=[m]))[0].duration, "0:04…")
+    def test_duration_before_gluing_has_ellipsis(self):
+        m = message()
+        self.assertEqual(rows(state(messages=[m], lengths=[4.0]))[0].duration, "0:04…")
 
-    def test_unreadable_sentence_counts_zero(self):
-        s = Sentence(1, "s", "t", 0, Path("/nonexistent/x.wav"))
-        m = message(sentences=[s])
-        self.assertEqual(rows(state(messages=[m]))[0].duration, "0:00…")
+    def test_duration_uses_length_of_own_message(self):
+        a, b = message("a"), message("b", duration_s=9)
+        result = rows(state(messages=[a, b], lengths=[4.0, 9.0]))
+        self.assertEqual([r.duration for r in result], ["0:04…", "0:09"])
 
 
 class LabelsTest(unittest.TestCase):

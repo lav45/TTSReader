@@ -29,6 +29,7 @@ class PlayerState:
     length_s: float  # queue.length(current), 0 без текущего
     messages: list[Message]
     output_down: bool
+    lengths: list[float]  # queue.length(m) для каждого из messages, в том же порядке
 
 
 class Player:
@@ -101,8 +102,10 @@ class Player:
     def state(self) -> PlayerState:
         current = self._current
         length = 0.0 if current is None else self._queue.length(current)
+        messages = self._queue.messages
+        lengths = [self._queue.length(m) for m in messages]
         return PlayerState(self._status, current, self._now(), length,
-                           self._queue.messages, self._output_down)
+                           messages, self._output_down, lengths)
 
     def toggle_pause(self) -> None:
         if self._status == "playing":

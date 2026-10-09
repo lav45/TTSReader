@@ -161,6 +161,14 @@ class PlayerHistoryTest(PlayerCase):
         self.finish()
         self.assertEqual([A0, A1, JOINED, N0], self.playback.played)
 
+    def test_state_lengths_match_queue_length_per_message(self) -> None:
+        self.start_with(A0, A1, N0)
+        self.player._on_entry(self.joined())
+        state = self.state()
+        self.assertEqual(len(state.messages), len(state.lengths))
+        self.assertEqual([self.player._queue.length(m) for m in state.messages], state.lengths)
+        self.assertAlmostEqual(1.0, state.lengths[0])
+
     def test_entry_during_outage_waits_for_retry_of_joined_file(self) -> None:
         self.start_with(A0, A1, N0)
         self.finish()

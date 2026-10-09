@@ -1,10 +1,7 @@
 """Модель отображения: PlayerState -> то, что показывает окно. Без Gtk."""
 import os
 import time
-import wave
 from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
 
 from tts_player.model import Message
 from tts_player.player import PlayerState
@@ -19,15 +16,6 @@ class MessageRow:
     duration: str  # "M:SS"; до склейки "M:SS…"
     current: bool
     heard: bool
-
-
-@lru_cache(maxsize=4096)
-def _wav_seconds(path: Path) -> float:
-    try:
-        with wave.open(str(path), "rb") as w:
-            return w.getnframes() / w.getframerate()
-    except (OSError, EOFError, wave.Error, ZeroDivisionError):
-        return 0.0
 
 
 def format_seconds(seconds: float) -> str:
@@ -54,22 +42,20 @@ def _project(message: Message) -> str:
     return name or NO_PROJECT
 
 
-def _duration(message: Message) -> str:
-    if message.duration_s is not None:
-        return format_seconds(message.duration_s)
-    total = sum(_wav_seconds(s.path) for s in message.sentences)
-    return format_seconds(total) + PENDING_MARK
+def _duration(message: Message, length_s: float) -> str:
+    text = format_seconds(length_s)
+    return text if message.duration_s is not None else text + PENDING_MARK
 
 
 def rows(state: PlayerState) -> list[MessageRow]:
     return [
         MessageRow(
             title=f"{_start_time(m)}  {_project(m)}",
-            duration=_duration(m),
+            duration=_duration(m, length_s),
             current=m is state.current,
             heard=m.heard,
         )
-        for m in state.messages
+        for m, length_s in zip(state.messages, state.lengths)
     ]
 
 
