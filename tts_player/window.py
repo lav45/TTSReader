@@ -1,5 +1,6 @@
 """Окно плеера и значок в трее. Что показывать — решает tts_player.view над player.state();
 команды уходят в Player только через его методы."""
+import logging
 from typing import Callable
 
 import gi
@@ -12,22 +13,35 @@ from gi.repository import Gdk, GLib, Gtk, Pango, XApp  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings, SettingsError, Voice  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
+from tts_player.player_settings import PlayerSettings, Prefs  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
-from tts_player.view import (MessageRow, current_title, next_enabled, pause_enabled,  # noqa: E402
-                             pause_label, play_stop_label, position_label, prev_enabled, rows)
+from tts_player.view import (MessageRow, next_enabled, play_pause_enabled,  # noqa: E402
+                             play_pause_label, position_label, prev_enabled, rows)
+
+log = logging.getLogger(__name__)
 
 PREV_LABEL = "⏮"
 NEXT_LABEL = "⏭"
+SAVED_TEXT = "Настройки сохранены"
+STATUS_SUCCESS = "success"
+STATUS_ERROR = "error"
+# блок результата на экране настроек: провайдер ставится только на этот Label
+STATUS_CSS = b"""
+label.success, label.error { padding: 6px 8px; border-radius: 4px; color: #ffffff; }
+label.success { background-color: #2e7d32; border: 1px solid #1b5e20; }
+label.error { background-color: #c62828; border: 1px solid #8e0000; }
+"""
 
 
 class PlayerWindow(Gtk.Window):
     """Два экрана в одном Gtk.Stack.
 
-    "main": кнопки prev / pause / play|stop / next, ползунок позиции, список сообщений,
-    внизу слева значки «Очистить буфер», «Настройки» и «Выключить озвучку» (активен, пока
-    озвучка включена; состояние читается при показе окна и на тике таймера). "settings":
-    голос и скорость claude-tts через DaemonSettings; «Сохранить» пишет их и возвращает
-    на главный экран, стрелка назад возвращает без записи.
+    "main" сверху вниз: ряд служебных значков — слева «Очистить буфер», «Настройки» и
+    «Выключить озвучку» (активен, пока озвучка включена; состояние читается при показе окна
+    и на тике таймера), справа выключатель автовоспроизведения; список сообщений; ползунок
+    позиции; ряд prev / play-pause / next со временем справа. "settings": хвост очереди
+    (PlayerSettings), голос и скорость claude-tts (DaemonSettings); «Сохранить» пишет их и
+    остаётся на экране, итог — в блоке внизу; стрелка назад возвращает без записи.
 
     Обновляется по player.on_change и, пока окно видно, таймером REFRESH_MS — позиция
     играющего файла сама on_change не вызывает. Закрытие прячет окно в трей.
@@ -36,11 +50,14 @@ class PlayerWindow(Gtk.Window):
     SPEED_STEP = 0.1
     SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
 
-    def __init__(self, player, settings: DaemonSettings, voicing: Voicing) -> None:
+    def __init__(self, player, settings: DaemonSettings, prefs: PlayerSettings,
+                 voicing: Voicing) -> None:
         super().__init__(title="TTS Player")
         self._player = player
         self._settings = settings
+        self._prefs = prefs
         self._voicing = voicing
+        self._voice_loaded = False  # голос и скорость прочитаны при открытии настроек
         self._refresh_id = 0
         self._dragging = False
         self._drag_value: float | None = None  # change-value за перетаскивание; None — не двигали
@@ -50,7 +67,6 @@ class PlayerWindow(Gtk.Window):
         self._shown_messages: list[Message] = []
         self.set_default_size(420, 360)
 
-        self.title_label = Gtk.Label(xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 1.0, 1.0)
         self.scale.set_draw_value(False)
         self.scale.connect("button-press-event", self._on_scale_press)
@@ -60,8 +76,7 @@ class PlayerWindow(Gtk.Window):
         self.position_label_widget = Gtk.Label(xalign=1.0)
 
         self.prev_button = self._button(PREV_LABEL, player.prev)
-        self.pause_button = self._button("", player.toggle_pause)
-        self.play_stop_button = self._button("", player.toggle_play_stop)
+        self.play_pause_button = self._button("", player.toggle_play_pause)
         self.next_button = self._button(NEXT_LABEL, player.next)
         self.clear_button = self._icon_button("user-trash-symbolic", "Очистить буфер",
                                               player.clear)
@@ -69,10 +84,14 @@ class PlayerWindow(Gtk.Window):
                                                  self._open_settings)
         self.voicing_off_button = self._icon_button(
             "system-shutdown-symbolic", "Выключить озвучку (/tts-off)", self._turn_voicing_off)
+        self.autoplay_button = Gtk.ToggleButton(image=Gtk.Image.new_from_icon_name(
+            "media-playlist-consecutive-symbolic", Gtk.IconSize.BUTTON))
+        self.autoplay_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.autoplay_button.set_tooltip_text("Автовоспроизведение")
+        self._autoplay_handler = self.autoplay_button.connect("toggled", self._on_autoplay_toggled)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        for button in (self.prev_button, self.pause_button, self.play_stop_button,
-                       self.next_button):
+        for button in (self.prev_button, self.play_pause_button, self.next_button):
             buttons.pack_start(button, False, False, 0)
         buttons.pack_end(self.position_label_widget, False, False, 0)
 
@@ -82,17 +101,17 @@ class PlayerWindow(Gtk.Window):
         scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.add(self.message_list)
 
-        # ряд значков внизу слева; следующие значки — pack_start сюда же
+        # ряд служебных значков наверху: команды слева, выключатели справа
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         for button in (self.clear_button, self.settings_button, self.voicing_off_button):
             tools.pack_start(button, False, False, 0)
+        tools.pack_end(self.autoplay_button, False, False, 0)
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        main.pack_start(self.title_label, False, False, 0)
+        main.pack_start(tools, False, False, 0)
+        main.pack_start(scrolled, True, True, 0)
         main.pack_start(self.scale, False, False, 0)
         main.pack_start(buttons, False, False, 0)
-        main.pack_start(scrolled, True, True, 0)
-        main.pack_start(tools, False, False, 0)
 
         self.stack = Gtk.Stack(margin=12)
         self.stack.add_named(main, "main")
@@ -124,7 +143,7 @@ class PlayerWindow(Gtk.Window):
         return button
 
     def _settings_screen(self) -> Gtk.Box:
-        """Экран настроек: стрелка назад, голос, скорость, «Сохранить», причина сбоя."""
+        """Экран настроек: стрелка назад, голос, скорость, хвост, «Сохранить», блок итога."""
         self.back_button = self._icon_button("go-previous-symbolic", "Назад", self._show_main)
         self.voice_combo = Gtk.ComboBoxText()
         for renderer in self.voice_combo.get_cells():
@@ -133,8 +152,16 @@ class PlayerWindow(Gtk.Window):
         self.speed_spin = Gtk.SpinButton.new_with_range(
             DaemonSettings.SPEED_MIN, DaemonSettings.SPEED_MAX, self.SPEED_STEP)
         self.speed_spin.set_digits(self.SPEED_DIGITS)
+        self.tail_spin = Gtk.SpinButton.new_with_range(
+            PlayerSettings.TAIL_MIN, PlayerSettings.TAIL_MAX, 1)
+        self.tail_spin.set_digits(0)
         self.save_button = self._button("Сохранить", self._save_settings)
-        self.settings_error = Gtk.Label(xalign=0.0, wrap=True, selectable=True)
+        self.settings_status = Gtk.Label(xalign=0.0, wrap=True, selectable=True)
+        self.settings_status.set_no_show_all(True)  # show_all окна не открывает пустой блок
+        provider = Gtk.CssProvider()
+        provider.load_from_data(STATUS_CSS)
+        self.settings_status.get_style_context().add_provider(
+            provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         header.pack_start(self.back_button, False, False, 0)
@@ -145,6 +172,8 @@ class PlayerWindow(Gtk.Window):
         fields.attach(self.voice_combo, 1, 0, 1, 1)
         fields.attach(Gtk.Label(label="Скорость", xalign=0.0), 0, 1, 1, 1)
         fields.attach(self.speed_spin, 1, 1, 1, 1)
+        fields.attach(Gtk.Label(label="Хвост очереди", xalign=0.0), 0, 2, 1, 1)
+        fields.attach(self.tail_spin, 1, 2, 1, 1)
         self.voice_combo.set_hexpand(True)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -154,24 +183,27 @@ class PlayerWindow(Gtk.Window):
         screen.pack_start(header, False, False, 0)
         screen.pack_start(fields, False, False, 0)
         screen.pack_start(actions, False, False, 0)
-        screen.pack_start(self.settings_error, False, False, 0)
+        screen.pack_end(self.settings_status, False, False, 0)  # узкий блок внизу экрана
         return screen
 
     def _open_settings(self) -> None:
-        """Каждый вход читает настройки заново: несохранённое с прошлого раза не остаётся."""
+        """Каждый вход читает настройки заново: несохранённое с прошлого раза не остаётся.
+        Хвост — из файла плеера и доступен всегда; голос и скорость — только если
+        настройки claude-tts прочитались."""
+        self._hide_status()
+        self.tail_spin.set_value(self._prefs.load().tail)
         self.voice_combo.remove_all()
         try:
             loaded = self._settings.load()
         except SettingsError as e:
-            self._set_settings_enabled(False)
-            self.settings_error.set_text(str(e))
+            self._set_voice_enabled(False)
+            self._show_status(str(e), STATUS_ERROR)
         else:
             for voice in loaded.voices:
                 self.voice_combo.append(voice.name, self._voice_text(voice))
             self.voice_combo.set_active_id(loaded.active)
             self.speed_spin.set_value(loaded.speed)
-            self._set_settings_enabled(True)
-            self.settings_error.set_text("")
+            self._set_voice_enabled(True)
         self.stack.set_visible_child_name("settings")
 
     @staticmethod
@@ -180,31 +212,70 @@ class PlayerWindow(Gtk.Window):
             return f"{voice.name} — {voice.description}"
         return voice.name
 
-    def _set_settings_enabled(self, enabled: bool) -> None:
-        for widget in (self.voice_combo, self.speed_spin, self.save_button):
+    def _set_voice_enabled(self, enabled: bool) -> None:
+        self._voice_loaded = enabled
+        for widget in (self.voice_combo, self.speed_spin):
             widget.set_sensitive(enabled)
 
     def _save_settings(self) -> None:
+        """Сначала хвост (с текущим автовоспроизведением) в файл плеера и в плеер, затем
+        голос и скорость, если они прочитались. Экран остаётся, итог — в блоке внизу."""
         try:
-            self.speed_spin.update()  # набранный текст без потери фокуса
-            # стрелка даёт 1.9000000000000001: округляем до знаков спина
-            speed = round(self.speed_spin.get_value(), self.SPEED_DIGITS)
-            self._settings.save(self.voice_combo.get_active_id(), speed)
+            self.tail_spin.update()  # набранный текст без потери фокуса
+            prefs = Prefs(tail=self.tail_spin.get_value_as_int(),
+                          autoplay=self._player.state().autoplay)
+            self._prefs.save(prefs)
+            self._player.apply_prefs(prefs)
+            if self._voice_loaded:
+                self.speed_spin.update()
+                # стрелка даёт 1.9000000000000001: округляем до знаков спина
+                speed = round(self.speed_spin.get_value(), self.SPEED_DIGITS)
+                self._settings.save(self.voice_combo.get_active_id(), speed)
         except SettingsError as e:
-            self.settings_error.set_text(str(e))
+            self._show_status(str(e), STATUS_ERROR)
             return
-        self._show_main()
+        self._show_status(SAVED_TEXT, STATUS_SUCCESS)
+
+    def _show_status(self, text: str, kind: str) -> None:
+        context = self.settings_status.get_style_context()
+        for name in (STATUS_SUCCESS, STATUS_ERROR):
+            context.remove_class(name)
+        context.add_class(kind)
+        self.settings_status.set_text(text)
+        self.settings_status.show()
+
+    def _hide_status(self) -> None:
+        context = self.settings_status.get_style_context()
+        for name in (STATUS_SUCCESS, STATUS_ERROR):
+            context.remove_class(name)
+        self.settings_status.set_text("")
+        self.settings_status.hide()
+
+    def _on_autoplay_toggled(self, button: Gtk.ToggleButton) -> None:
+        """Переключение пользователем: хвост — из файла плеера, autoplay — новое значение.
+        Сбой записи — в лог, кнопка возвращается к состоянию плеера."""
+        prefs = Prefs(tail=self._prefs.load().tail, autoplay=button.get_active())
+        try:
+            self._prefs.save(prefs)
+        except SettingsError as e:
+            log.warning("автовоспроизведение не сохранено: %s", e)
+            self._show_autoplay(self._player.state().autoplay)
+            return
+        self._player.apply_prefs(prefs)
+
+    def _show_autoplay(self, autoplay: bool) -> None:
+        """Кнопка следует за состоянием, не вызывая сохранения."""
+        with self.autoplay_button.handler_block(self._autoplay_handler):
+            self.autoplay_button.set_active(autoplay)
 
     def _show_main(self) -> None:
         self.stack.set_visible_child_name("main")
 
     def _show_state(self, state: PlayerState) -> None:
-        self.title_label.set_text(current_title(state))
         self.position_label_widget.set_text(position_label(state))
-        self.pause_button.set_label(pause_label(state))
-        self.pause_button.set_sensitive(pause_enabled(state))
-        self.play_stop_button.set_label(play_stop_label(state))
-        self.play_stop_button.set_sensitive(state.current is not None)
+        self.play_pause_button.set_label(play_pause_label(state))
+        self.play_pause_button.set_sensitive(play_pause_enabled(state))
+        self._show_autoplay(state.autoplay)
         self.prev_button.set_sensitive(prev_enabled(state))
         self.next_button.set_sensitive(next_enabled(state))
         self.scale.set_sensitive(state.current is not None)

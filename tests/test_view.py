@@ -4,8 +4,8 @@ from pathlib import Path
 
 from tts_player.model import Message, Sentence
 from tts_player.player import PlayerState
-from tts_player.view import (current_title, next_enabled, pause_enabled, play_stop_label,
-                             pause_label, position_label, prev_enabled, rows)
+from tts_player.view import (next_enabled, play_pause_enabled, play_pause_label, position_label,
+                             prev_enabled, rows)
 
 CREATED_AT = 1_700_000_000.0
 
@@ -94,25 +94,26 @@ class LabelsTest(unittest.TestCase):
     def test_position_without_current(self):
         self.assertEqual(position_label(state()), "0:00 / 0:00")
 
-    def test_buttons_per_status(self):
+    def test_play_pause_per_status(self):
         m = message()
-        expected = {
-            "playing": ("■", "⏸"),
-            "paused": ("■", "⏵"),
-            "stopped": ("▶", "⏸"),
-            "idle": ("▶", "⏸"),
-        }
-        for status, (play, pause) in expected.items():
-            st = state(status, m)
-            self.assertEqual((play_stop_label(st), pause_label(st)), (play, pause), status)
+        expected = {"playing": "⏸", "paused": "⏵", "stopped": "⏵", "idle": "⏵"}
+        for status, label in expected.items():
+            self.assertEqual(play_pause_label(state(status, m)), label, status)
 
 
 class ControlsTest(unittest.TestCase):
-    def test_pause_only_while_playing_or_paused(self):
-        m = message()
-        expected = {"playing": True, "paused": True, "stopped": False, "idle": False}
-        for status, enabled in expected.items():
-            self.assertEqual(pause_enabled(state(status, m, messages=[m])), enabled, status)
+    def test_play_pause_enabled_with_current(self):
+        m = message(heard=True)
+        for status in ("playing", "paused", "stopped", "idle"):
+            self.assertTrue(play_pause_enabled(state(status, m, messages=[m])), status)
+
+    def test_play_pause_enabled_idle_without_messages(self):
+        self.assertFalse(play_pause_enabled(state("idle")))
+
+    def test_play_pause_enabled_idle_with_unheard_only(self):
+        heard, unheard = message("a", heard=True), message("b")
+        self.assertTrue(play_pause_enabled(state("idle", messages=[heard, unheard])))
+        self.assertFalse(play_pause_enabled(state("idle", messages=[heard])))
 
     def test_prev_next_at_edges(self):
         a, b, c = message("a"), message("b"), message("c")
@@ -125,16 +126,6 @@ class ControlsTest(unittest.TestCase):
     def test_prev_next_without_current(self):
         st = state(messages=[message("a"), message("b")])
         self.assertEqual((prev_enabled(st), next_enabled(st)), (False, False))
-
-    def test_current_title(self):
-        a = message("a", [sentence(CREATED_AT)], project="p")
-        b = message("b", [sentence(CREATED_AT + 1)], project="q")
-        self.assertEqual(current_title(state("playing", b, messages=[a, b])),
-                         f"{hms(CREATED_AT + 1)}  q")
-
-    def test_current_title_without_current(self):
-        self.assertEqual(current_title(state(messages=[message("a")])), "")
-
 
 if __name__ == "__main__":
     unittest.main()

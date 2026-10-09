@@ -65,21 +65,14 @@ def position_label(state: PlayerState) -> str:
     return f"{format_seconds(state.position_s)} / {format_seconds(state.length_s)}"
 
 
-def play_stop_label(state: PlayerState) -> str:
-    return "▶" if state.status in ("stopped", "idle") else "■"
+def play_pause_label(state: PlayerState) -> str:
+    """Кнопка play/pause: при воспроизведении — пауза, иначе — play."""
+    return "⏸" if state.status == "playing" else "⏵"
 
 
-def pause_label(state: PlayerState) -> str:
-    return "⏵" if state.status == "paused" else "⏸"
-
-
-def current_title(state: PlayerState) -> str:
-    """Заголовок окна: строка текущего сообщения; без текущего — пусто."""
-    return next((row.title for row in rows(state) if row.current), "")
-
-
-def pause_enabled(state: PlayerState) -> bool:
-    return state.status in ("playing", "paused")
+def play_pause_enabled(state: PlayerState) -> bool:
+    """Нажатию есть что делать: есть текущее или непрослушанное (toggle_play_pause)."""
+    return state.current is not None or any(not m.heard for m in state.messages)
 
 
 def _current_index(state: PlayerState) -> int | None:

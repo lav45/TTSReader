@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
         voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
-        run_gui(player, settings, voicing, args.show)
+        run_gui(player, settings, prefs, voicing, args.show)
     return 0
 
 
@@ -127,12 +127,13 @@ def gtk_ready() -> bool:
     return initialized
 
 
-def run_gui(player: Player, settings: DaemonSettings, voicing: Voicing, show: bool) -> None:
+def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voicing: Voicing,
+            show: bool) -> None:
     from gi.repository import Gtk
 
     from tts_player.window import PlayerWindow, TrayIcon
 
-    window = PlayerWindow(player, settings, voicing)
+    window = PlayerWindow(player, settings, prefs, voicing)
     tray = TrayIcon(window, Gtk.main_quit)  # noqa: F841 — значок живёт, пока жива ссылка
     if show:
         window.present()

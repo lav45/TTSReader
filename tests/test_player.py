@@ -185,13 +185,13 @@ class PlayerHistoryTest(PlayerCase):
         self.start_with(A0, A1, N0)
         self.finish()
         self.playback.at = 0.2
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         with self.assertLogs("tts_player", "INFO") as logs:
             self.player._on_entry(self.joined())
         self.assertEqual([], [r.getMessage() for r in logs.records
                               if r.getMessage().startswith("switched")])
         self.assertEqual("paused", self.state().status)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.assertEqual(JOINED, self.playback.starts[-1][0])
         self.assertAlmostEqual(0.7, self.playback.starts[-1][1])
 
@@ -318,9 +318,9 @@ class PlayerHistoryTest(PlayerCase):
         state = self.states[-1]
         self.assertFalse(state.output_down)
         self.assertAlmostEqual(0.3, state.position_s)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.assertAlmostEqual(0.3, self.state().position_s)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.assertEqual(A0, self.playback.starts[-1][0])
         self.assertAlmostEqual(0.3, self.playback.starts[-1][1])
 
@@ -365,12 +365,12 @@ class PlayerHistoryTest(PlayerCase):
         self.start_with(A0, A1)
         self.finish()
         self.playback.fail("no output", True)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.glib.source_remove.assert_called_once_with(42)
         state = self.state()
         self.assertEqual("paused", state.status)
         self.assertAlmostEqual(0.5, state.position_s)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.assertEqual((A1, 0.0), self.playback.starts[-1])
 
     def test_seek_during_outage_plays_target(self) -> None:
@@ -392,7 +392,7 @@ class PlayerHistoryTest(PlayerCase):
         self.start_with(A0, A1, B0)
         self.player.next()
         self.player.prev()
-        self.player.toggle_play_stop()
+        self.player.stop_playback()
         self.player.shutdown()
         self.assertEqual([B0], [p.name for p in self.inbox_dir.iterdir()])
         self.assertEqual([], list(self.store_dir.iterdir()))
@@ -495,17 +495,17 @@ class PlayerCursorTest(PlayerCase):
 
 
 class PlayerButtonsTest(PlayerCase):
-    def test_toggle_pause_keeps_position_and_resumes_from_it(self) -> None:
+    def test_play_pause_keeps_position_and_resumes_from_it(self) -> None:
         self.start_with(A0, A1, B0)
         self.finish()
         self.playback.at = 0.2
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.assertIsNone(self.playback.playing)
         self.playback.at = 0.4
         state = self.state()
         self.assertEqual("paused", state.status)
         self.assertAlmostEqual(0.7, state.position_s)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.assertEqual("playing", self.state().status)
         self.assertEqual(A1, self.playback.starts[-1][0])
         self.assertAlmostEqual(0.2, self.playback.starts[-1][1])
@@ -513,30 +513,30 @@ class PlayerButtonsTest(PlayerCase):
     def test_paused_player_does_not_move_on(self) -> None:
         self.start_with(A0)
         self.finish()
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.arrive(B0)
         self.assertEqual(("paused", "aa"), (self.state().status, self.token()))
         self.assertEqual([A0], self.playback.played)
 
-    def test_play_stop_resets_position_and_new_message_does_not_start(self) -> None:
+    def test_stop_resets_position_and_new_message_does_not_start(self) -> None:
         self.start_with(A0, A1)
         self.finish()
         self.playback.at = 0.2
-        self.player.toggle_play_stop()
+        self.player.stop_playback()
         state = self.state()
         self.assertEqual(("stopped", 0.0), (state.status, state.position_s))
         self.assertIsNone(self.playback.playing)
         self.arrive(B0)
         self.assertEqual([A0, A1], self.playback.played)
         self.assertEqual("aa", self.token())
-        self.player.toggle_play_stop()
+        self.player.toggle_play_pause()
         self.assertEqual("playing", self.state().status)
         self.assertEqual((A0, 0.0), self.playback.starts[-1])
 
-    def test_play_stop_during_outage_cancels_retry(self) -> None:
+    def test_stop_during_outage_cancels_retry(self) -> None:
         self.start_with(A0)
         self.playback.fail("no output", True)
-        self.player.toggle_play_stop()
+        self.player.stop_playback()
         self.glib.source_remove.assert_called_once_with(42)
 
     def test_next_plays_following_from_start_and_marks_left_heard(self) -> None:
@@ -578,12 +578,12 @@ class PlayerButtonsTest(PlayerCase):
 
     def test_play_message_while_paused_plays_it_from_start(self) -> None:
         self.start_with(A0, A1, B0)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.click_second_message("paused")
 
     def test_play_message_while_stopped_plays_it_from_start(self) -> None:
         self.start_with(A0, A1, B0)
-        self.player.toggle_play_stop()
+        self.player.stop_playback()
         self.click_second_message("stopped")
 
     def test_play_message_heard_plays_it_from_start(self) -> None:
@@ -622,7 +622,7 @@ class PlayerButtonsTest(PlayerCase):
 
     def test_play_message_current_while_paused_changes_nothing(self) -> None:
         self.start_with(A0, B0)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.assert_click_on_current_changes_nothing()
 
     def test_play_message_current_during_outage_keeps_retry(self) -> None:
@@ -668,7 +668,7 @@ class PlayerButtonsTest(PlayerCase):
 
     def test_next_after_stop_plays(self) -> None:
         self.start_with(A0, B0)
-        self.player.toggle_play_stop()
+        self.player.stop_playback()
         self.player.next()
         self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
@@ -692,7 +692,7 @@ class PlayerButtonsTest(PlayerCase):
     def test_prev_while_paused_plays(self) -> None:
         self.start_with(A0, B0)
         self.player.next()
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.player.prev()
         self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
 
@@ -706,7 +706,7 @@ class PlayerButtonsTest(PlayerCase):
 
     def test_stop_playback_while_paused_stops_at_start(self) -> None:
         self.start_with(A0, B0)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.player.stop_playback()
         state = self.state()
         self.assertEqual(("stopped", 0.0), (state.status, state.position_s))
@@ -716,7 +716,7 @@ class PlayerButtonsTest(PlayerCase):
         self.player.stop_playback()
         self.assertEqual("idle", self.state().status)
         self.start_with(A0)
-        self.player.toggle_play_stop()
+        self.player.stop_playback()
         count = len(self.states)
         stops = self.playback.stops
         self.player.stop_playback()
@@ -737,7 +737,7 @@ class PlayerButtonsTest(PlayerCase):
         count, starts = len(self.states), len(self.playback.starts)
         self.player.play_if_stopped()
         self.assertEqual((count, starts), (len(self.states), len(self.playback.starts)))
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         count = len(self.states)
         self.player.play_if_stopped()
         self.assertEqual("paused", self.state().status)
@@ -768,21 +768,21 @@ class PlayerButtonsTest(PlayerCase):
 
     def test_seek_on_pause_stays_paused_and_resume_starts_there(self) -> None:
         self.start_with(A0, A1, B0)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         played = list(self.playback.played)
         self.player.seek(0.7)
         state = self.state()
         self.assertEqual("paused", state.status)
         self.assertAlmostEqual(0.7, state.position_s)
         self.assertEqual(played, self.playback.played)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         name, start = self.playback.starts[-1]
         self.assertEqual(A1, name)
         self.assertAlmostEqual(0.2, start)
 
     def test_seek_clamps_to_message(self) -> None:
         self.start_with(A0, A1)
-        self.player.toggle_pause()
+        self.player.toggle_play_pause()
         self.player.seek(99)
         self.assertAlmostEqual(1.0, self.state().position_s)
         self.player.seek(-1)
@@ -808,8 +808,8 @@ class PlayerButtonsTest(PlayerCase):
 
     def test_on_change_after_each_command(self) -> None:
         self.start_with(A0, A1, B0)
-        commands = [self.player.toggle_pause, self.player.toggle_pause,
-                    self.player.toggle_play_stop, self.player.toggle_play_stop,
+        commands = [self.player.toggle_play_pause, self.player.toggle_play_pause,
+                    self.player.stop_playback, self.player.toggle_play_pause,
                     self.player.next, self.player.prev,
                     lambda: self.player.seek(0.2), self.player.clear]
         for command in commands:

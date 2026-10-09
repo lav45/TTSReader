@@ -163,19 +163,9 @@ class Player:
         self._status = "playing"
         self._play_at(position)
 
-    def toggle_pause(self) -> None:
-        if self._status == "playing":
-            self._position = self._now()
-            self._halt()
-            self._status = "paused"
-        elif self._status == "paused":
-            self._status = "playing"
-            self._play_at(self._position)
-        self._changed()
-
     def stop_playback(self) -> None:
-        """Идемпотентный stop (команда `tts-player stop`): играет или на паузе — как stop
-        кнопки play|stop; stopped и idle — без изменений."""
+        """Идемпотентный stop (команда `tts-player stop`): играет или на паузе — звук стоп,
+        позиция на начало, автоперехода нет; stopped и idle — без изменений."""
         if self._status in ("playing", "paused"):
             self._stop()
             self._changed()
@@ -190,15 +180,6 @@ class Player:
         self._halt()
         self._status = "stopped"
         self._position = 0.0
-
-    def toggle_play_stop(self) -> None:
-        """stop — позиция на начало, автоперехода нет; play — текущее с позиции курсора
-        (после stop это начало; после конца сообщения — снова с начала)."""
-        if self._status in ("playing", "paused"):
-            self._stop()
-        elif self._current is not None:
-            self._resume()
-        self._changed()
 
     def next(self) -> None:
         current = self._current
