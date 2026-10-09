@@ -1,4 +1,5 @@
-"""Очередь сообщений: порядок прихода, связь с задачами демона, навигация, длина и хвост начатых."""
+"""Очередь сообщений: порядок прихода, связь с задачами демона, навигация, длина, хвост начатых
+и обрезка до tail."""
 import bisect
 import itertools
 import logging
@@ -76,16 +77,17 @@ class MessageQueue:
 
     Очередь не знает, что играет: текущее сообщение и позицию держит Player. Очередь
     связывает предложения с сообщениями по id задач демона (link), отвечает на вопросы о
-    порядке (following/preceding/first_unheard), длине и завершённости сообщения, отображает
+    порядке (following/preceding), длине и завершённости сообщения, отображает
     позицию в файл (locate) и владеет файлами своих сообщений: удаляет их при вытеснении из
-    хвоста, в forget_audio() и clear(); на выходе плеера отдаёт их вместе с сообщениями
-    снимком (release), на старте принимает снимок прошлого запуска (restore).
+    хвоста, обрезке (trim), в forget_audio() и clear(); на выходе плеера отдаёт их вместе с
+    сообщениями снимком (release), на старте принимает снимок прошлого запуска (restore).
 
     following/preceding/is_complete принимают только живые сообщения — из messages;
-    сообщение, вытесненное или забытое после clear()/release(), им не передаётся.
+    сообщение, вытесненное, обрезанное или забытое после clear()/release(), им не передаётся.
 
     tail задаёт снаружи Player (настройки плеера) и может меняться на ходу: start()
-    подгоняет хвост к нему постепенно (см. start).
+    подгоняет хвост начатых к нему постепенно (см. start), trim() режет всю очередь сразу —
+    когда её звать, решает Player (фокус).
     """
     DURATION_TOLERANCE_S = 0.05
 
@@ -160,9 +162,6 @@ class MessageQueue:
         index = self._messages.index(message)
         return self._messages[index - 1] if index > 0 else None
 
-    def first_unheard(self) -> Message | None:
-        return next((m for m in self._messages if not m.heard), None)
-
     def start(self, message: Message) -> None:
         """Сообщение начато: входит в хвост; лишние начатые удаляются, самые старые первыми.
 
@@ -179,7 +178,16 @@ class MessageQueue:
         limit = max(self.tail, len(self._started) - 1)
         self._started.append(message)
         while len(self._started) > limit:
-            self._drop(self._started.pop(0))
+            self._drop(self._started[0])
+
+    def trim(self, keep: Message | None = None) -> None:
+        """Оставляет tail последних сообщений: старшие — любые, начатые и нет, прослушанные и
+        отложенные — удаляются с файлами, как при вытеснении из хвоста. keep (текущее) места
+        в tail не занимает: старше них — остаётся сверх tail."""
+        older = self._messages[:max(len(self._messages) - self.tail, 0)]
+        for message in older:
+            if message is not keep:
+                self._drop(message)
 
     def is_started(self, message: Message) -> bool:
         """Сообщение начато и ещё в хвосте (не вытеснено, не забыто)."""
@@ -258,17 +266,21 @@ class MessageQueue:
         self._messages[:0] = snapshot.messages
         self._started[:0] = snapshot.started
         while len(self._started) > self.tail:
-            self._drop(self._started.pop(0))
+            self._drop(self._started[0])
 
     def message_of(self, task_id: str) -> Message | None:
         return next((m for m in self._messages if task_id in m.task_ids), None)
 
     def _drop(self, message: Message) -> None:
+        """Сообщение уходит из очереди и хвоста начатых, его файлы удалены."""
         self._messages.remove(message)
+        if message in self._started:
+            self._started.remove(message)
         for sentence in message.sentences:
             self._unlink(sentence)
         self._unlink_audio(message)
-        log.info("сообщение %s/%s удалено из хвоста", message.session_id, self.task_of(message))
+        log.info("сообщение %s/%s удалено из очереди", message.session_id,
+                 self.task_of(message))
 
     def _unlink(self, sentence: Sentence) -> None:
         self._durations.pop(sentence.path, None)

@@ -58,6 +58,17 @@ class Player:
     сообщения начинает само это сообщение, а не более ранние непрослушанные (накопленные в
     закрытой папке, отложенные): автопереход идёт только вперёд; не завершено — статус
     playing без звука, пока не придёт предложение. На паузе и после stop автоперехода нет.
+    play/pause без текущего начинает последнее сообщение очереди.
+
+    Длина истории — по фокусу (_focused): фокус у очереди активной сессии, пока текущее
+    звучит, стоит на паузе или выбрано и не запущено (stopped), а в idle — пока есть
+    отданный демону в этом запуске ответ, до которого дойдёт автопереход (новее текущего,
+    ещё не завершён); у закрытых папок фокуса нет. Без фокуса очередь режется до tail
+    (MessageQueue.trim): старшие — прослушанные, непрослушанные, отложенные — удаляются с
+    файлами; текущее места в tail не занимает и остаётся. С фокусом сообщения копятся, позади
+    курсора начатые ограничены tail (MessageQueue.start). Режет одно место — _trim_unfocused
+    из _changed (новое сообщение, конец последнего, открытие и закрытие папки, смена tail) и
+    из start() после восстановления messages.json.
     Открытая (активная) сессия играет подряд — выключателя автовоспроизведения нет; пока
     звучит свой текст (hold), плеер сам ничего не начинает: конец сообщения — stopped на
     следующем по порядку, новое сообщение в тишине только попадает в список.
@@ -169,9 +180,14 @@ class Player:
         # Инвариант: ожидание замены => активной сессии нет (ставится только при снятии
         # активной, любая активация его снимает)
         self._replace_cwd: str | None = None
+        # Отданные демону в этом запуске (_send) и ещё живые в очередях: только они, пока
+        # синтезируются, дают фокус в idle (_focused); восстановленные из messages.json — нет
+        self._sent_in_run: set[Message] = set()
 
     def apply_prefs(self, prefs: Prefs) -> None:
-        """Настройки плеера: хвост очереди каждой сессии, процент приглушения; играющее не трогается. Новый процент во время игры — restore, затем
+        """Настройки плеера: хвост очереди каждой сессии, процент приглушения; играющее не
+        трогается. Очереди без фокуса режутся до нового tail сразу, с фокусом — хвост начатых
+        постепенно (MessageQueue.start). Новый процент во время игры — restore, затем
         duck(новый)."""
         self._tail = prefs.tail
         for queue in [*self._queues.values(), self._no_session]:
@@ -206,7 +222,9 @@ class Player:
         Сообщения прошлого запуска (messages.json) восстанавливаются до inbox/ и задач хука,
         каждое — в очередь своей сессии; сообщения сессий не из списка не восстанавливаются.
         Поздние предложения восстановленных задач — их, а не чужие; файлы store/, на которые
-        сообщения не ссылаются, удаляет Inbox. Непрослушанное активной сессии играет само."""
+        сообщения не ссылаются, удаляет Inbox. Сам плеер ничего не начинает: открытая папка
+        ждёт (idle, текущего нет), восстановленные очереди режутся до tail; новые ответы
+        играют как обычно."""
         if self._history is not None:
             try:
                 self._history.start()
@@ -214,15 +232,12 @@ class Player:
                 log.warning("история %s недоступна (%s), работаю без склеек",
                             self._history_dir, error)
         self._restore(self._saved.load())
+        self._trim_unfocused()
         self._inbox.start(self._store_files())
         if self._control is not None:
             self._control.start()  # раньше задач хука: их сессии уже в списке
         if self._hook_tasks is not None:
             self._hook_tasks.start()
-        if self._status == "idle" and self._starts_by_itself():
-            message = self._queue.first_unheard()
-            if message is not None:
-                self._begin(message, requested=False)
         self._changed()
 
     def _new_queue(self) -> MessageQueue:
@@ -365,6 +380,7 @@ class Player:
             return
         message.deferred = False
         queue.link(message, task_id)
+        self._sent_in_run.add(message)
 
     def shutdown(self) -> None:
         """Выход процесса: громкость чужих потоков — обратно; сообщения — в messages.json
@@ -411,8 +427,8 @@ class Player:
         """Кнопка play/pause: playing — пауза с запомненной позицией; paused — с неё дальше;
         stopped и idle — текущее с курсора (курсор в конце — с начала), но доигранное
         текущее (прослушано, курсор в конце) уступает следующему по порядку, пришедшему
-        после конца, — оно с начала; без текущего — первое непрослушанное с начала, нет
-        его — ничего."""
+        после конца, — оно с начала; без текущего — последнее сообщение очереди с начала
+        (отложенное озвучивается), очередь пуста — ничего."""
         if self._status == "playing":
             self._position = self._now()
             self._halt()
@@ -427,9 +443,9 @@ class Player:
             else:
                 self._begin(following, requested=True)
         else:
-            message = self._queue.first_unheard()
-            if message is not None:
-                self._begin(message, requested=True)
+            messages = self._queue.messages
+            if messages:
+                self._begin(messages[-1], requested=True)
         self._changed()
 
     def _following_finished(self) -> Message | None:
@@ -821,8 +837,37 @@ class Player:
         self._ducking = False
         self._ducker.restore()
 
+    def _focused(self, queue: MessageQueue) -> bool:
+        """Фокус очереди — только у играемой (активной сессии), у закрытых папок его нет
+        никогда. Фокус: текущее есть и статус playing, paused или stopped; либо в idle есть
+        ответ, до которого дойдёт автопереход, — новее текущего (без текущего — любой),
+        отданный демону в этом запуске и ещё синтезируемый (не отложен, не прослушан, не
+        завершён): его первое предложение начнёт его само, и пачка ответов быстрее синтеза не
+        теряет ранние. Восстановленное из messages.json фокуса не даёт, даже растущее: иначе
+        склейка, не привязанная без плеера, держала бы очередь необрезанной."""
+        if queue is not self._queue:
+            return False
+        if self._current is not None and self._status != "idle":
+            return True
+        ahead = queue.messages
+        if self._current is not None:
+            ahead = ahead[ahead.index(self._current) + 1:]
+        return any(m in self._sent_in_run and m.sent and not m.deferred and not m.heard
+                   and not queue.is_complete(m) for m in ahead)
+
+    def _trim_unfocused(self) -> None:
+        """Очереди без фокуса — до tail, самые старые первыми; текущее места в tail не
+        занимает и не удаляется. Ушедшие из очередей забываются в _sent_in_run."""
+        for queue in self._queues.values():
+            if not self._focused(queue):
+                queue.trim(keep=self._current)
+        live = {m for queue in self._queues.values() for m in queue.messages}
+        self._sent_in_run &= live
+
     def _changed(self) -> None:
-        """Каждая смена статуса доходит сюда: сначала приглушение по статусу, затем окно."""
+        """Каждая смена статуса доходит сюда: сначала длина очередей по фокусу, приглушение
+        по статусу, затем окно."""
+        self._trim_unfocused()
         self._follow_status()
         self._follow_orphans()
         try:

@@ -117,7 +117,6 @@ class MessageQueueTest(unittest.TestCase):
 
     def test_empty_queue(self):
         self.assertEqual([], self.queue.messages)
-        self.assertIsNone(self.queue.first_unheard())
 
     def test_following_and_preceding_walk_messages(self):
         for n in (1, 2, 3):
@@ -129,20 +128,6 @@ class MessageQueueTest(unittest.TestCase):
         self.assertIs(second, self.queue.preceding(third))
         self.assertIs(first, self.queue.preceding(second))
         self.assertIsNone(self.queue.preceding(first))
-
-    def test_first_unheard_is_earliest_not_heard(self):
-        for n in (1, 2, 3):
-            self.add(n, task=f"t{n}")
-        first, second, _ = self.queue.messages
-        self.assertIs(first, self.queue.first_unheard())
-        self.queue.mark_heard(first)
-        self.assertTrue(first.heard)
-        self.assertIs(second, self.queue.first_unheard())
-
-    def test_first_unheard_none_when_all_heard(self):
-        self.add(1)
-        self.queue.mark_heard(self.queue.messages[0])
-        self.assertIsNone(self.queue.first_unheard())
 
     def test_new_message_is_not_heard(self):
         self.add(1)
@@ -329,6 +314,86 @@ class MessageQueueTest(unittest.TestCase):
             self.queue.add(late)
         self.assertFalse(late.path.exists())
         self.assertNotIn("t1", self.tasks())
+
+    def deferred(self, text="отложено"):
+        """Отложенное сообщение: только текст, ни задачи, ни файлов."""
+        message = Message("s1", text=text, sent=False, deferred=True)
+        self.queue.append(message)
+        return message
+
+    def test_trim_keeps_last_tail_messages_of_any_kind(self):
+        """Режутся самые старые: начатые и нет, прослушанные, отложенные; их файлы удалены."""
+        self.queue.tail = 2
+        started, unheard = self.add(1, task="t1"), self.add(2, task="t2")
+        self.queue.start(self.queue.messages[0])
+        self.queue.mark_heard(self.queue.messages[0])
+        first_deferred = self.deferred("d1")
+        last = self.add(4, task="t4")
+        self.queue.trim()
+        self.assertEqual(["t4"], [self.queue.task_of(m) for m in self.queue.messages
+                                  if m.task_ids])
+        self.assertEqual(2, len(self.queue.messages))
+        self.assertIs(first_deferred, self.queue.messages[0])
+        self.assertFalse(started.path.exists())
+        self.assertFalse(unheard.path.exists())
+        self.assertTrue(last.path.exists())
+
+    def test_trim_forgets_dropped_started_messages(self):
+        self.queue.tail = 1
+        self.add(1, task="t1")
+        first = self.queue.messages[0]
+        self.queue.start(first)
+        self.add(2, task="t2")
+        self.queue.trim()
+        self.assertFalse(self.queue.is_started(first))
+        self.assertEqual(["t2"], self.tasks())
+
+    def test_trim_drops_deferred_texts_without_files(self):
+        self.queue.tail = 1
+        self.deferred("d1")
+        last = self.deferred("d2")
+        self.queue.trim()
+        self.assertEqual([last], self.queue.messages)
+
+    def test_trim_keeps_old_kept_message_beyond_tail(self):
+        """keep (текущее) места в tail не занимает: tail последних плюс он, если он старше."""
+        self.queue.tail = 2
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, 5)]
+        kept = self.queue.messages[0]
+        self.queue.trim(keep=kept)
+        self.assertEqual(["t1", "t3", "t4"], self.tasks())
+        self.assertEqual([True, False, True, True], [s.path.exists() for s in sentences])
+
+    def test_trim_with_kept_among_newest_keeps_tail(self):
+        self.queue.tail = 2
+        [self.add(n, task=f"t{n}") for n in range(1, 5)]
+        self.queue.trim(keep=self.queue.messages[-1])
+        self.assertEqual(["t3", "t4"], self.tasks())
+
+    def test_trim_tail_one_keeps_new_message_after_old_kept(self):
+        """tail 1, текущее доиграно, пришло новое: остаются оба — новое не уступает текущему."""
+        self.queue.tail = 1
+        self.add(1, task="t1")
+        kept = self.queue.messages[0]
+        self.message("t2")
+        self.queue.trim(keep=kept)
+        self.assertEqual(["t1", "t2"], self.tasks())
+
+    def test_trim_within_tail_changes_nothing(self):
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, 6)]
+        self.queue.trim()
+        self.assertEqual(["t1", "t2", "t3", "t4", "t5"], self.tasks())
+        self.assertTrue(all(s.path.exists() for s in sentences))
+
+    def test_sentence_of_trimmed_message_is_deleted_not_added(self):
+        self.queue.tail = 1
+        self.add(1, task="t1")
+        self.add(2, task="t2")
+        self.queue.trim()
+        late = self.sentence(100, task="t1", index=1)
+        with self.assertLogs("tts_player.queue", "WARNING"):
+            self.queue.add(late)
+        self.assertFalse(late.path.exists())
 
     def test_sentence_of_evicted_message_with_missing_file_is_fine(self):
         self.start_messages(6)

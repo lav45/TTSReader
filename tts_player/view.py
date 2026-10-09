@@ -126,8 +126,9 @@ def play_pause_label(state: PlayerState) -> str:
 
 
 def play_pause_enabled(state: PlayerState) -> bool:
-    """Нажатию есть что делать: есть текущее или непрослушанное (toggle_play_pause)."""
-    return state.current is not None or any(not m.heard for m in state.messages)
+    """Нажатию есть что делать: есть текущее или хоть одно сообщение — без текущего
+    играет последнее (toggle_play_pause)."""
+    return state.current is not None or bool(state.messages)
 
 
 def _current_index(state: PlayerState) -> int | None:

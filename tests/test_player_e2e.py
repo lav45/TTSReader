@@ -233,6 +233,14 @@ class PlayerProcessCase(unittest.TestCase):
             if line.startswith(prefix):
                 return line
 
+    def wait_lock(self) -> None:
+        """Плеер взял замок: старт прошёл, восстановление и inbox/ разобраны."""
+        lock = self.runtime / "tts-player" / "player.lock"
+        deadline = time.monotonic() + WAIT
+        while not (lock.exists() and lock.read_text().strip()):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
     def played(self, count: int) -> list[str]:
         return [self.next_line("playing ").removeprefix("playing ") for _ in range(count)]
 
@@ -306,9 +314,9 @@ class PlayerE2ETest(PlayerProcessCase):
         self.drop(self.sentence(session, "bbbbbb", 0))
         self.assertTrue(self.next_line("playing ").endswith("bbbbbb_s0.wav"))
 
-    def test_sigterm_keeps_unheard_and_restart_plays_them(self) -> None:
+    def test_sigterm_keeps_unheard_and_restart_restores_them_waiting(self) -> None:
         """Выход сохраняет сообщения в messages.json, их файлы остаются в store/; следующий
-        запуск их восстанавливает и играет."""
+        запуск их восстанавливает (файлы не удалены как ничьи), но сам ничего не играет."""
         session = self.session
         self.start_player()
         self.drop(self.sentence(session, "aaaaaa", 0, seconds=3.0))
@@ -322,8 +330,10 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertEqual(3, len(kept))
         self.assertTrue((self.runtime / "tts-player" / "messages.json").exists())
         self.start_player()
-        self.assertEqual(kept, self.played(3))
+        self.wait_lock()
+        self.assert_quiet()
         self.assertFalse((self.runtime / "tts-player" / "messages.json").exists())
+        self.assertEqual(kept, sorted(p.name for p in self.store.iterdir()))
 
     def test_sentence_of_task_queued_before_exit_plays_after_restart(self) -> None:
         session = self.session
@@ -505,18 +515,11 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
         self.start_player()
         self.drop(self.sentence(session, "bbbbbb", 0))
-        names = self.played(2)  # недоигранное aaaaaa сохранено при выходе и играет снова
-        self.assertTrue(names[0].endswith("aaaaaa_s0.wav") and names[1].endswith("bbbbbb_s0.wav"))
+        # недоигранное aaaaaa сохранено при выходе, но само не играет: только новый ответ
+        self.assertTrue(self.played(1)[0].endswith("bbbbbb_s0.wav"))
 
     def sessions_file(self) -> dict:
         return json.loads((self.runtime / "tts-player" / "sessions.json").read_text())
-
-    def wait_lock(self) -> None:
-        lock = self.runtime / "tts-player" / "player.lock"
-        deadline = time.monotonic() + WAIT
-        while not (lock.exists() and lock.read_text().strip()):
-            self.assertLess(time.monotonic(), deadline)
-            time.sleep(0.01)
 
     def test_session_add_has_remove_cycle_through_player_process(self) -> None:
         self.start_player()
@@ -713,9 +716,8 @@ class SingleInstanceTest(PlayerProcessCase):
         sent = self.daemon_tasks()
         self.lines = queue.Queue()
         self.start_player()
-        names = self.played(3)  # открытая сессия играет непрослушанное; sessb молчит
-        self.assertTrue(all(f"_{self.session}_" in name for name in names), names)
-        self.assert_quiet()
+        self.wait_lock()
+        self.assert_quiet()  # при старте сам ничего не играет: ни открытая, ни sessb
         self.assertEqual(sent, self.daemon_tasks())
         self.proc.send_signal(signal.SIGTERM)  # отложенное sessb восстановлено — снова в снимке
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
