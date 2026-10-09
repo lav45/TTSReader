@@ -19,7 +19,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
-from tts_player.instance import Instance, send_stop  # noqa: E402
+from tts_player.instance import Instance, is_locked, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="без окна и трея: только плеер в цикле GLib")
     parser.add_argument("--show", action="store_true", help="показать окно сразу при запуске")
     parser.add_argument("--tray", action="store_true",
-                        help="запуск в трее с скрытым окном (то же, что без --show)")
+                        help="запуск в трее со скрытым окном (то же, что без --show)")
     args = parser.parse_args(argv)
     if args.tray and (args.show or args.no_gui):
         parser.error("--tray не сочетается с --show и --no-gui")
@@ -52,10 +52,14 @@ def main(argv: list[str] | None = None) -> int:
         print("tts_player: XDG_RUNTIME_DIR не задан", file=sys.stderr)
         return 1
 
+    # stop может прийти, как только блокировка видна, а обработчик ставит run() позже;
+    # без этого SIGUSR1 по умолчанию завершил бы плеер
+    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
     instance = Instance.acquire(Path(runtime))  # до Player(): второй экземпляр store/ не трогает
     if instance is None:
         pid = Instance.holder_pid(Path(runtime))
-        print(f"tts-player уже запущен (PID {pid})", file=sys.stderr)
+        shown = "ещё стартует" if pid is None else f"PID {pid}"
+        print(f"tts-player уже запущен ({shown})", file=sys.stderr)
         return 0
 
     if not args.no_gui and not gtk_ready():
@@ -76,9 +80,10 @@ def main(argv: list[str] | None = None) -> int:
 def stop_command() -> int:
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if not runtime:
-        print("tts_player: XDG_RUNTIME_DIR не задан", file=sys.stderr)
-        return 1
-    send_stop(Path(runtime))
+        print("плеер не запущен", file=sys.stderr)
+        return 0
+    if not send_stop(Path(runtime)) and is_locked(Path(runtime)):
+        print("плеер не запущен или ещё стартует", file=sys.stderr)
     return 0
 
 

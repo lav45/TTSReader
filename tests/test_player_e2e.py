@@ -285,6 +285,28 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(0, result.returncode)
         self.assertEqual("", result.stderr)
 
+    def test_sigusr1_before_player_is_up_does_not_kill_and_stop_works_later(self) -> None:
+        session = uuid.uuid4().hex
+        self.start_player()
+        lock = self.runtime / "tts-player" / "player.lock"
+        deadline = time.monotonic() + WAIT
+        while not (lock.exists() and lock.read_text().strip()):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.001)
+        self.proc.send_signal(signal.SIGUSR1)
+        self.drop(self.sentence(session, "aaaaaa", 0, seconds=5.0))
+        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
+        self.assertIsNone(self.proc.poll())
+        self.assertEqual(0, self.run_bin("stop").returncode)
+        self.next_line("stop requested")
+
+    def test_stop_without_runtime_dir_exits_0(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
+        result = subprocess.run([str(BIN), "stop"], cwd=ROOT, env=env,
+                                capture_output=True, text=True, timeout=WAIT)
+        self.assertEqual(0, result.returncode)
+        self.assertIn("плеер не запущен", result.stderr)
+
     def test_tray_conflicts(self) -> None:
         for extra in ("--show", "--no-gui"):
             result = subprocess.run(

@@ -1,6 +1,10 @@
 """Блокировка единственности и команда stop (tts_player.instance) на временных каталогах."""
 import multiprocessing
+import os
 import signal
+import subprocess
+import threading
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,8 +62,35 @@ class InstanceTest(unittest.TestCase):
         self.addCleanup(signal.signal, signal.SIGUSR1, previous)
         instance = Instance.acquire(self.runtime)
         self.addCleanup(instance.release)
-        self.assertTrue(send_stop(self.runtime))
+        self.assertTrue(send_stop(self.runtime, marker=""))
         self.assertEqual([1], received)
+
+    def test_probe_of_free_lock_does_not_touch_file(self) -> None:
+        Instance.acquire(self.runtime).release()
+        path = self.runtime / "tts-player" / "player.lock"
+        path.write_text("999\n")
+        self.assertFalse(send_stop(self.runtime))
+        self.assertEqual("999\n", path.read_text())
+
+    def test_stale_pid_of_foreign_process_is_not_killed(self) -> None:
+        sleeper = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+        instance = Instance.acquire(self.runtime)
+        self.addCleanup(instance.release)
+        (self.runtime / "tts-player" / "player.lock").write_text(f"{sleeper.pid}\n")
+        self.assertFalse(send_stop(self.runtime))
+        self.assertIsNone(sleeper.poll())
+
+    def test_empty_pid_is_reread_until_written(self) -> None:
+        instance = Instance.acquire(self.runtime)
+        self.addCleanup(instance.release)
+        path = self.runtime / "tts-player" / "player.lock"
+        path.write_text("")
+        threading.Timer(0.3, path.write_text, args=(f"{os.getpid()}\n",)).start()
+        started = time.monotonic()
+        self.assertEqual(os.getpid(), Instance.holder_pid(self.runtime))
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
 
 
 if __name__ == "__main__":
