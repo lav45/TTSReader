@@ -294,6 +294,35 @@ class PlayerE2ETest(PlayerProcessCase):
                          self.wait_volume_sets(2)[1])
         self.assertFalse((self.runtime / "tts-player" / "duck.json").exists())
 
+    def test_orphan_stream_is_repaired_after_end(self) -> None:
+        """Приглушённый чужой поток исчезает во время речи; после конца появляется новый
+        поток того же приложения со сниженной громкостью — ему возвращается исходная."""
+        session = uuid.uuid4().hex
+        orphans = self.runtime / "tts-player" / "duck-orphans.json"
+        self.start_player()
+        sentence = self.sentence(session, "aaaaaa", 0)
+        self.drop(sentence)
+        self.played(1)
+        self.wait_volume_sets(1)
+        self.pactl_fixture.write_text("[]")
+        deadline = time.monotonic() + WAIT
+        while not orphans.exists():
+            self.assertLess(time.monotonic(), deadline, "сирота не записана")
+            time.sleep(0.05)
+        self.daemon_saves(session, sentence)
+        state = self.runtime / "tts-player" / "duck.json"
+        deadline = time.monotonic() + WAIT
+        while state.exists():
+            self.assertLess(time.monotonic(), deadline, "громкость не возвращена")
+            time.sleep(0.05)
+        self.pactl_fixture.write_text(json.dumps([sink_input(9, 4242, [18000, 15000])]))
+        sets = self.wait_volume_sets(2)
+        self.assertEqual(["set-sink-input-volume", "9", "60000", "50000"], sets[1])
+        deadline = time.monotonic() + WAIT
+        while orphans.exists():
+            self.assertLess(time.monotonic(), deadline, "сирота не снята")
+            time.sleep(0.05)
+
     def daemon_saves(self, session: str, sentence: Path) -> None:
         """Склейка из одного предложения в speech_history и строка базы, как у демона."""
         created_at = time.time()
@@ -328,7 +357,7 @@ class PlayerE2ETest(PlayerProcessCase):
         state = self.runtime / "tts-player" / "duck.json"
         state.parent.mkdir(parents=True)
         state.write_text(json.dumps({"inputs": {"7": {
-            "volumes": [60000, 50000], "name": "app", "pid": "4242"}}}))
+            "volumes": [60000, 50000], "name": "app4242", "pid": "4242"}}}))
         self.start_player()
         sets = self.wait_volume_sets(1)
         self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"], sets[0])

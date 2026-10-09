@@ -17,7 +17,7 @@ def sink_input(index, pid, values):
     return {
         "index": index,
         "volume": {ch: {"value": v, "value_percent": "x", "db": "x"} for ch, v in zip(channels, values)},
-        "properties": {"application.process.id": str(pid), "application.name": "app"},
+        "properties": {"application.process.id": str(pid), "application.name": f"app{pid}"},
     }
 
 
@@ -43,6 +43,7 @@ class DuckerTest(unittest.TestCase):
         self.log = root / "pactl.log"
         self.fixture = root / "fixture.json"
         self.state = root / "duck.json"
+        self.orphans = root / "duck-orphans.json"
         env = {
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "PACTL_LOG": str(self.log),
@@ -54,7 +55,7 @@ class DuckerTest(unittest.TestCase):
         self.set_inputs([sink_input(1, 200, [60000, 50000]), sink_input(2, OWN_PID, [65536, 65536]),
                          sink_input(3, 300, [40000])])
         self.now = 1000.0
-        self.ducker = Ducker(self.state, OWN_PID, clock=lambda: self.now)
+        self.ducker = Ducker(self.state, OWN_PID, self.orphans, clock=lambda: self.now)
 
     def set_inputs(self, inputs):
         self.fixture.write_text(json.dumps(inputs))
@@ -121,7 +122,7 @@ class DuckerTest(unittest.TestCase):
 
     def test_recover(self):
         self.ducker.duck(30)
-        fresh = Ducker(self.state, OWN_PID)
+        fresh = Ducker(self.state, OWN_PID, self.orphans)
         self.set_inputs([sink_input(1, 200, [18000, 15000])])
         self.clear_log()
         fresh.recover()
@@ -141,7 +142,7 @@ class DuckerTest(unittest.TestCase):
         for extra in cases:
             with self.subTest(extra=extra), mock.patch.dict(os.environ, extra):
                 started = time.monotonic()
-                ducker = Ducker(self.state, OWN_PID, clock=lambda: self.now)
+                ducker = Ducker(self.state, OWN_PID, self.orphans, clock=lambda: self.now)
                 with self.assertLogs("tts_player.ducking", "WARNING"):
                     ducker.duck(30)
                 self.assertLess(time.monotonic() - started, 2.8)
@@ -164,7 +165,7 @@ class DuckerTest(unittest.TestCase):
         self.ducker.duck(30)
         self.set_inputs([None, {"index": 1}, sink_input(1, 200, [18000, 15000])])
         self.clear_log()
-        Ducker(self.state, OWN_PID).recover()
+        Ducker(self.state, OWN_PID, self.orphans).recover()
         self.assertEqual(self.set_calls(), [["set-sink-input-volume", "1", "60000", "50000"]])
 
     def test_restore_list_failure_is_blind(self):
@@ -185,7 +186,7 @@ class DuckerTest(unittest.TestCase):
         self.clear_log()
         with mock.patch.dict(os.environ, {"PACTL_EXIT": "1"}):
             with self.assertLogs("tts_player.ducking", "WARNING"):
-                Ducker(self.state, OWN_PID).recover()
+                Ducker(self.state, OWN_PID, self.orphans).recover()
         attempted = [argv for _, argv in self.calls() if argv.startswith("set-sink-input-volume")]
         self.assertEqual(attempted, ["set-sink-input-volume 1 60000 50000", "set-sink-input-volume 3 40000"])
         self.assertFalse(self.state.exists())
@@ -209,7 +210,7 @@ class DuckerTest(unittest.TestCase):
         self.ducker.duck(30)
         self.set_inputs([sink_input(1, 999, [11111, 22222]), sink_input(3, 300, [12000])])
         self.clear_log()
-        Ducker(self.state, OWN_PID).recover()
+        Ducker(self.state, OWN_PID, self.orphans).recover()
         self.assertEqual(self.set_calls(), [["set-sink-input-volume", "3", "40000"]])
 
     def test_refresh_treats_reused_index_as_new(self):
@@ -313,6 +314,129 @@ class DuckerTest(unittest.TestCase):
         self.assertEqual(self.set_calls(), [])
         self.ducker.refresh()
         self.assertEqual(len(self.set_calls()), 2)
+
+    ORPHAN = {"app200": {"original": [60000, 50000], "ducked": [18000, 15000]}}
+
+    def orphans_data(self):
+        return json.loads(self.orphans.read_text())
+
+    def make_orphan(self):
+        """duck(30); поток 1 (app200) исчезает; restore() делает его сиротой."""
+        self.ducker.duck(30)
+        self.set_inputs([sink_input(3, 300, [12000])])
+        self.ducker.restore()
+        self.clear_log()
+
+    def test_vanished_stream_becomes_orphan_on_restore(self):
+        self.make_orphan()
+        self.assertTrue(self.ducker.has_orphans)
+        self.assertEqual(self.orphans_data(), self.ORPHAN)
+
+    def test_vanished_stream_becomes_orphan_on_refresh(self):
+        self.ducker.duck(30)
+        self.set_inputs([sink_input(3, 300, [12000])])
+        self.ducker.refresh()
+        self.assertEqual(self.orphans_data(), self.ORPHAN)
+        self.assertNotIn("1", json.loads(self.state.read_text())["inputs"])
+        self.clear_log()
+        self.ducker.restore()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "3", "40000"]])
+
+    def test_unlowered_stream_is_not_orphan(self):
+        self.ducker.duck(30)
+        self.set_inputs([sink_input(1, 200, [18000, 15000]), sink_input(9, 900, [20000])])
+        self.ducker.refresh()
+        self.set_inputs([sink_input(1, 200, [18000, 15000])])
+        self.ducker.refresh()
+        self.ducker.restore()
+        self.assertFalse(self.orphans.exists() and "app900" in self.orphans_data())
+
+    def test_nameless_stream_is_not_orphan(self):
+        nameless = sink_input(1, 200, [60000, 50000])
+        del nameless["properties"]["application.name"]
+        self.set_inputs([nameless])
+        self.ducker.duck(30)
+        self.set_inputs([])
+        self.ducker.restore()
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_orphan_new_stream_while_ducked_uses_original_immediately(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(7, 200, [18000, 15000])])
+        self.ducker.duck(50)
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "7", "30000", "25000"]])
+        self.assertFalse(self.ducker.has_orphans)
+        self.assertFalse(self.orphans.exists())
+        self.assertEqual(json.loads(self.state.read_text())["inputs"]["7"]["volumes"], [60000, 50000])
+
+    def test_orphan_refresh_ducks_new_stream_without_age_wait(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(3, 300, [40000])])
+        self.ducker.duck(50)
+        self.set_inputs([sink_input(3, 300, [20000]), sink_input(7, 200, [18000, 15000])])
+        self.clear_log()
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "7", "30000", "25000"]])
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_watch_sets_original_when_volume_equals_ducked(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(7, 200, [18001, 14999])])
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "7", "60000", "50000"]])
+        self.assertFalse(self.ducker.has_orphans)
+        self.assertFalse(self.orphans.exists())
+
+    def test_watch_leaves_user_volume_and_drops_orphan(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(7, 200, [40000, 40000])])
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [])
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_watch_without_matching_stream_keeps_orphan(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(3, 300, [40000])])
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [])
+        self.assertTrue(self.ducker.has_orphans)
+
+    def test_watch_without_orphans_does_not_call_pactl(self):
+        self.ducker.watch()
+        self.assertEqual(self.calls(), [])
+
+    def test_watch_while_ducked_acts_as_refresh(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(3, 300, [40000])])
+        self.ducker.duck(50)
+        self.set_inputs([sink_input(3, 300, [20000]), sink_input(7, 200, [18000, 15000])])
+        self.clear_log()
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "7", "30000", "25000"]])
+
+    def test_watch_stalled_after_timeout(self):
+        self.make_orphan()
+        with mock.patch.dict(os.environ, {"PACTL_SLEEP": "3"}):
+            with self.assertLogs("tts_player.ducking", "WARNING"):
+                self.ducker.watch()
+        self.clear_log()
+        self.ducker.watch()
+        self.assertEqual(self.calls(), [])
+
+    def test_orphans_survive_recreation(self):
+        self.make_orphan()
+        fresh = Ducker(self.state, OWN_PID, self.orphans)
+        self.assertTrue(fresh.has_orphans)
+        self.set_inputs([sink_input(7, 200, [18000, 15000])])
+        fresh.watch()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "7", "60000", "50000"]])
+
+    def test_corrupt_orphans_file_removed(self):
+        self.orphans.write_text("{не json")
+        with self.assertLogs("tts_player.ducking", "WARNING"):
+            ducker = Ducker(self.state, OWN_PID, self.orphans)
+        self.assertFalse(ducker.has_orphans)
+        self.assertFalse(self.orphans.exists())
 
 
 if __name__ == "__main__":

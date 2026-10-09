@@ -65,13 +65,16 @@
 
 ```
 class Ducker:
-    def __init__(self, state_file: Path, own_pid: int) -> None   # state_file = <runtime>/duck.json
+    def __init__(self, state_file: Path, own_pid: int, orphans_file: Path) -> None   # <runtime>/duck.json, <runtime>/duck-orphans.json
     def duck(self, percent: int) -> None      # 0–99; 100 → ничего не делает
     def refresh(self) -> None                 # приглушить потоки, появившиеся после duck
     def restore(self) -> None
     def recover(self) -> None                 # при старте: вернуть громкости из state_file, удалить его
+    def watch(self) -> None                   # вне приглушения: один проход по списку, исправить сирот (при приглушении — refresh)
     @property
     def ducked(self) -> bool
+    @property
+    def has_orphans(self) -> bool
 
 pactl:   LC_ALL=C pactl -f json list sink-inputs
          pactl set-sink-input-volume <index> <value> [<value> …]   # по каналам, порядок channel_map
@@ -83,6 +86,12 @@ refresh  потоки, которых нет в запомненных или ч
          текущие громкости (запись заменить) и приглушить тем же percent; моложе — не трогать и не запоминать; исчезнувшие забыть
 restore  каждому запомненному, который ещё есть в списке с тем же index, name и pid, — запомненные значения (иной поток под тем же index пропустить, info); нечего возвращать — pactl не звать; список не получен — set вслепую каждому; state_file удалить
 recover  state_file есть → restore по нему (потоки, которых нет, пропустить) → удалить; битый — удалить, строка в stderr
+сироты   запомненный (приглушённый) поток исчез при refresh / restore → сирота по application.name {original, ducked}
+         → orphans_file (атомарно; читается в __init__, битый — удалить, строка в stderr); нет имени — не сирота
+         новый чужой поток приложения-сироты:
+           при приглушении → сразу (без 5 с) приглушить от original сироты; сироту снять
+           вне приглушения, громкость == ducked (±1 по каналу) → set original; сироту снять
+           вне приглушения, громкость другая → сироту снять, поток не трогать
 ошибки   pactl нет / код ≠ 0 / таймаут 2 с / не JSON → строка в stderr, исключение не выходит
 ```
 
@@ -94,6 +103,7 @@ recover  state_file есть → restore по нему (потоки, котор
 - [ ] `recover()` по оставленному `state_file` возвращает громкости и удаляет файл; битый файл удалён, в stderr строка
 - [ ] заглушка `pactl` с кодом 1, с не-JSON, спящая 3 с — `duck` не бросает, возвращается не позже ~2 с, в stderr строка
 - [ ] вызовы `pactl` идут с `LC_ALL=C`
+- [ ] сироты: исчезнувший приглушённый поток → запись в orphans_file; новый поток того же приложения — при приглушении сразу от original, вне приглушения original при громкости == ducked ±1, иначе не трогается; сироты переживают пересоздание `Ducker`; битый orphans_file удалён, в stderr строка
 
 **Verify:** `python3 -m unittest tests.test_ducking -v` → `OK`
 
@@ -120,9 +130,10 @@ Player(…, ducker: Ducker | None)        # None — без приглушени
   статус стал playing (из любого другого)     → ducker.duck(prefs.duck)
   статус ушёл из playing (paused/stopped/idle) → ducker.restore()
   пока playing — ducker.refresh() раз в 1 с (GLib таймер; снимается при restore)
+  пока не playing и ducker.has_orphans — ducker.watch() раз в 2 с (GLib-таймер; снимается, когда сирот нет, при входе в playing и в shutdown)
   shutdown()                                   → ducker.restore()
   apply_prefs с новым duck во время playing    → restore(), затем duck(новый)
-__main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start()
+__main__: Ducker(<runtime>/duck.json, os.getpid(), <runtime>/duck-orphans.json); recover() до player.start()
 ```
 
 **Acceptance Criteria:**
@@ -131,6 +142,8 @@ __main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start(
 - [ ] ожидание следующего предложения растущего сообщения (статус `playing`, звук молчит) не вызывает `restore`
 - [ ] `shutdown` во время игры вызывает `restore`
 - [ ] таймер `refresh` есть только в `playing`
+- [ ] таймер `watch` (2 с) идёт, пока `has_orphans` и статус не `playing`; снимается, когда сирот нет, при входе в `playing` и в `shutdown`
+- [ ] e2e: приглушённый чужой поток исчез во время речи, после конца новый поток того же приложения со сниженной громкостью получает исходную
 - [ ] e2e процесс плеера получает заглушку `pactl` в `PATH`: после первого сообщения в журнале заглушки есть `set-sink-input-volume`, после конца — возврат исходного значения
 
 **Verify:** `python3 -m unittest discover -s tests` → `OK`

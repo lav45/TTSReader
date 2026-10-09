@@ -87,7 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # после блокировки: второй экземпляр не возвращает громкости, приглушённые первым
-    ducker = Ducker(Path(runtime) / "tts-player" / "duck.json", os.getpid())
+    ducker = Ducker(Path(runtime) / "tts-player" / "duck.json", os.getpid(),
+                    Path(runtime) / "tts-player" / "duck-orphans.json")
     ducker.recover()  # остаток после падения — до первого duck в player.start()
     player = Player(Path(runtime), args.audio_sink,
                     Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),

@@ -60,9 +60,13 @@ class Player:
     пока playing — refresh раз в REFRESH_SECONDS, статус ушёл из playing и выход — restore.
     Ожидание предложения растущего сообщения — тоже playing: громкость не дрожит. Решает
     одно место — _follow_status из _changed, после которого видна каждая смена статуса.
+    Сироты (громкость приложения, поток которого закончился приглушённым): вне playing,
+    пока ducker.has_orphans — watch раз в WATCH_SECONDS; решает _follow_orphans рядом с
+    _follow_status.
     """
     RETRY_SECONDS = 2
     REFRESH_SECONDS = 1
+    WATCH_SECONDS = 2
 
     def __init__(self, runtime_dir: Path, audio_sink: str | None,
                  history_dir: Path | None, history_db: Path | None,
@@ -96,6 +100,7 @@ class Player:
         self._duck = defaults.duck
         self._ducking = False  # duck() вызван, restore() ещё нет
         self._refresh_id = 0
+        self._watch_id = 0
 
     def apply_prefs(self, prefs: Prefs) -> None:
         """Настройки плеера: хвост очереди, автовоспроизведение, процент приглушения;
@@ -125,6 +130,7 @@ class Player:
         """Выход процесса: громкость чужих потоков — обратно; незаконченное — обратно в
         inbox/, законченное удаляет очередь."""
         self._unduck()
+        self._stop_watch()
         self._inbox.stop()
         if self._history is not None:
             self._history.stop()
@@ -436,6 +442,28 @@ class Player:
         elif not playing:
             self._unduck()
 
+    def _follow_orphans(self) -> None:
+        """Таймер watch: идёт вне playing, пока есть сироты; иначе снят."""
+        if self._ducker is None:
+            return
+        wanted = self._status != "playing" and self._ducker.has_orphans
+        if wanted and not self._watch_id:
+            self._watch_id = GLib.timeout_add_seconds(self.WATCH_SECONDS, self._watch)
+        elif not wanted:
+            self._stop_watch()
+
+    def _watch(self) -> bool:
+        self._ducker.watch()
+        if self._ducker.has_orphans:
+            return GLib.SOURCE_CONTINUE
+        self._watch_id = 0
+        return GLib.SOURCE_REMOVE
+
+    def _stop_watch(self) -> None:
+        if self._watch_id:
+            GLib.source_remove(self._watch_id)
+            self._watch_id = 0
+
     def _refresh(self) -> bool:
         self._ducker.refresh()
         return GLib.SOURCE_CONTINUE
@@ -452,6 +480,7 @@ class Player:
     def _changed(self) -> None:
         """Каждая смена статуса доходит сюда: сначала приглушение по статусу, затем окно."""
         self._follow_status()
+        self._follow_orphans()
         try:
             self.on_change(self.state())
         except Exception:

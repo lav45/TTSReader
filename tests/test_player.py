@@ -83,6 +83,10 @@ class FakeDucker:
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
+        self.has_orphans = False
+
+    def watch(self) -> None:
+        self.calls.append(("watch",))
 
     def duck(self, percent: int) -> None:
         self.calls.append(("duck", percent))
@@ -1200,6 +1204,42 @@ class PlayerDuckingTest(PlayerCase):
         self.glib.source_remove.assert_called_once_with(42)
         self.player.toggle_play_pause()
         self.assertEqual(2, len(self.refresh_timers()))
+
+    def watch_timers(self) -> list:
+        """Колбэки таймеров watch (раз в 2 с), в порядке постановки."""
+        return [c.args[1] for c in self.glib.timeout_add_seconds.call_args_list
+                if c.args[0] == 2]
+
+    def test_watch_timer_while_orphans_and_not_playing(self) -> None:
+        self.ducker.has_orphans = True
+        self.start_with(A0, B0)
+        self.assertEqual([], self.watch_timers())
+        self.player.toggle_play_pause()
+        timers = self.watch_timers()
+        self.assertEqual(1, len(timers))
+        self.assertEqual(self.glib.SOURCE_CONTINUE, timers[0]())
+        self.assertEqual(("watch",), self.ducker.calls[-1])
+        self.player.toggle_play_pause()
+        self.assertEqual(1, len(self.watch_timers()))
+        self.glib.source_remove.assert_any_call(42)
+
+    def test_watch_timer_removed_when_orphans_gone(self) -> None:
+        self.ducker.has_orphans = True
+        self.player.start()
+        timers = self.watch_timers()
+        self.assertEqual(1, len(timers))
+        self.ducker.has_orphans = False
+        self.assertEqual(self.glib.SOURCE_REMOVE, timers[0]())
+
+    def test_no_watch_timer_without_orphans(self) -> None:
+        self.player.start()
+        self.assertEqual([], self.watch_timers())
+
+    def test_shutdown_removes_watch_timer(self) -> None:
+        self.ducker.has_orphans = True
+        self.player.start()
+        self.player.shutdown()
+        self.glib.source_remove.assert_called_with(42)
 
     def test_apply_prefs_new_duck_while_playing_reducks(self) -> None:
         self.start_with(A0, B0)

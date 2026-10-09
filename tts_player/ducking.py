@@ -25,9 +25,12 @@ class Ducker:
 
     MIN_AGE_S = 5.0
 
-    def __init__(self, state_file: Path, own_pid: int, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, state_file: Path, own_pid: int, orphans_file: Path,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self._state_file = state_file
         self._own_pid = own_pid
+        self._orphans_file = orphans_file
+        self._orphans = self._load_orphans()
         self._clock = clock
         self._first_seen: dict[tuple, float] = {}
         self._saved: dict[int, dict] = {}
@@ -39,6 +42,11 @@ class Ducker:
     def ducked(self) -> bool:
         """Снижение запрошено (duck был, restore ещё нет); потоки могут быть ещё не тронуты."""
         return self._percent is not None
+
+    @property
+    def has_orphans(self) -> bool:
+        """Есть приглушённые потоки, закончившиеся во время речи: громкость их приложения ещё надо исправить."""
+        return bool(self._orphans)
 
     def duck(self, percent: int) -> None:
         """Снизить чужие потоки до percent % (0–99). 100 — ничего.
@@ -64,15 +72,17 @@ class Ducker:
         foreign = self._foreign(inputs)
         for index, entry in foreign.items():
             self._first_seen[self._key(index, entry)] = float("-inf")
-        self._lower(foreign)
+        self._lower(self._adopt(foreign))
 
     def refresh(self) -> None:
         """Приглушить потоки, появившиеся после duck.
 
         После таймаута pactl или при отсутствии pactl — ничего, до следующего duck / restore
-        (сервер завис — каждый вызов блокировал бы главный цикл на PACTL_TIMEOUT; нет программы —
-        предупреждение каждую секунду бессмысленно). Код возврата != 0 — повтор остаётся. Если первый duck не
-        получил список потоков — повторяет его."""
+        (сервер завис — каждый вызов блокировал бы главный цикл на PACTL_TIMEOUT; нет
+        программы — предупреждение каждую секунду бессмысленно). Код возврата != 0 —
+        повтор остаётся. Если первый duck не получил список потоков — повторяет его.
+        Запомненный поток, которого нет в списке, становится сиротой; новый поток
+        приложения-сироты глушится сразу, от исходной громкости сироты."""
         if not self.ducked or self._stalled:
             return
         if not self._lowered_once:
@@ -85,29 +95,57 @@ class Ducker:
         foreign = self._foreign(inputs)
         keys = {self._key(index, entry) for index, entry in foreign.items()}
         self._first_seen = {key: seen for key, seen in self._first_seen.items() if key in keys}
+        self._orphan_gone(foreign)
         fresh = {}
         for index, entry in foreign.items():
-            saved = self._saved.get(index)
-            if saved is not None and saved["name"] == entry["name"] and saved["pid"] == entry["pid"]:
+            if self._is_saved(index, entry):
+                continue
+            orphan = self._take_orphan(entry)
+            if orphan is not None:
+                fresh[index] = {**entry, "volumes": orphan["original"]}
                 continue
             first_seen = self._first_seen.setdefault(self._key(index, entry), now)
             if now - first_seen >= self.MIN_AGE_S:
                 fresh[index] = entry
         self._lower(fresh)
 
+    def watch(self) -> None:
+        """Один проход по списку потоков: вне приглушения исправить громкость потоков сирот.
+
+        При приглушении — refresh. Нет сирот или pactl завис / отсутствует — ничего."""
+        if self.ducked:
+            self.refresh()
+            return
+        if not self._orphans or self._stalled:
+            return
+        inputs = self._list_inputs()
+        if inputs is None:
+            return
+        for index, entry in self._foreign(inputs).items():
+            orphan = self._take_orphan(entry)
+            if orphan is None:
+                continue
+            if self._is_close(entry["volumes"], orphan["ducked"]):
+                self._pactl("set-sink-input-volume", str(index), *map(str, orphan["original"]))
+            else:
+                log.info("Громкость %s изменена вне плеера, сирота снята", entry["name"])
+
     def restore(self) -> None:
         """Вернуть запомненные громкости потокам, которые ещё есть; удалить state_file.
 
         Нечего возвращать — pactl не зовём. Не удалось получить список потоков —
         set пробуем вслепую для каждого запомненного."""
-        saved = self._saved
+        saved, percent = self._saved, self._percent
         self._saved = {}
         self._percent = None
         self._lowered_once = False
         self._stalled = False
         self._first_seen = {}
         if saved:
-            self._apply(saved, self._present())
+            present = self._present()
+            self._apply(saved, present)
+            if present is not None and percent is not None:
+                self._add_orphans(saved, present, percent)
         self._remove_state()
 
     def recover(self) -> None:
@@ -131,6 +169,86 @@ class Ducker:
         if saved:
             self._apply(saved, self._present())
         self._remove_state()
+
+    def _is_saved(self, index: int, entry: dict) -> bool:
+        """Поток уже запомнен: тот же index, имя и pid."""
+        saved = self._saved.get(index)
+        return saved is not None and saved["name"] == entry["name"] and saved["pid"] == entry["pid"]
+
+    def _orphan_gone(self, foreign: dict[int, dict]) -> None:
+        """Запомненные потоки, которых нет в списке, — сироты; из запомненных они уходят."""
+        present = {index: (entry["name"], entry["pid"]) for index, entry in foreign.items()}
+        gone = {index: entry for index, entry in self._saved.items()
+                if present.get(index) != (entry["name"], entry["pid"])}
+        if not gone:
+            return
+        for index in gone:
+            del self._saved[index]
+        self._write_state()
+        self._add_orphans(gone, present, self._percent)
+
+    def _add_orphans(self, saved: dict[int, dict], present: dict, percent: int) -> None:
+        """Сироты из saved — запомненных потоков, которых (с тем же именем и pid) нет среди present."""
+        added = False
+        for index, entry in saved.items():
+            if present.get(index) == (entry["name"], entry["pid"]) or entry["name"] is None:
+                continue
+            ducked = [round(v * percent / 100) for v in entry["volumes"]]
+            self._orphans[entry["name"]] = {"original": entry["volumes"], "ducked": ducked}
+            added = True
+        if added:
+            self._write_orphans()
+
+    def _take_orphan(self, entry: dict) -> dict | None:
+        """Сирота приложения потока (снимается); нет или число каналов другое — None."""
+        orphan = self._orphans.pop(entry["name"], None) if entry["name"] is not None else None
+        if orphan is None:
+            return None
+        self._write_orphans()
+        if len(orphan["original"]) != len(entry["volumes"]):
+            return None
+        return orphan
+
+    def _adopt(self, streams: dict[int, dict]) -> dict[int, dict]:
+        """Потоки приложений-сирот глушатся от исходной громкости сироты."""
+        result = {}
+        for index, entry in streams.items():
+            orphan = self._take_orphan(entry)
+            result[index] = entry if orphan is None else {**entry, "volumes": orphan["original"]}
+        return result
+
+    @staticmethod
+    def _is_close(current: list[int], ducked: list[int]) -> bool:
+        return len(current) == len(ducked) and all(abs(a - b) <= 1 for a, b in zip(current, ducked))
+
+    def _load_orphans(self) -> dict[str, dict]:
+        if not self._orphans_file.exists():
+            return {}
+        try:
+            data = json.loads(self._orphans_file.read_text(encoding="utf-8"))
+            return {
+                str(name): {
+                    "original": [int(v) for v in entry["original"]],
+                    "ducked": [int(v) for v in entry["ducked"]],
+                }
+                for name, entry in data.items()
+            }
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            log.warning("Файл сирот %s повреждён, удалён: %s", self._orphans_file, exc)
+            try:
+                self._orphans_file.unlink(missing_ok=True)
+            except OSError as error:
+                log.warning("Не удалён %s: %s", self._orphans_file, error)
+            return {}
+
+    def _write_orphans(self) -> None:
+        try:
+            if self._orphans:
+                write_json(self._orphans_file, self._orphans)
+            else:
+                self._orphans_file.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("Не записан %s: %s", self._orphans_file, exc)
 
     @staticmethod
     def _is_int(value: object) -> bool:
