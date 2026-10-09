@@ -821,13 +821,6 @@ class PlayerButtonsTest(PlayerCase):
         self.player.prev()
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
 
-    def test_state_completes_per_message(self) -> None:
-        self.start_with(A0, A1, B0)
-        state = self.state()
-        self.assertEqual([True, False], state.completes)
-        self.player._on_entry(HistoryEntry(self.history_dir / "x", 1.0, "S", "p", 1.0))
-        self.assertEqual(len(state.messages), len(self.state().completes))
-
     def test_seek_before_joined_plays_sentence_at_offset(self) -> None:
         self.start_with(A0, A1, B0)
         self.player.seek(0.7)
@@ -1440,7 +1433,7 @@ class PlayerHookTasksTest(PlayerCase):
                          (message.session_id, message.project, message.text, message.persona,
                           message.speed, message.task_ids, message.sentences,
                           message.received_at, message.sent))
-        self.assertEqual(([0.0], [False], "idle"), (state.lengths, state.completes, state.status))
+        self.assertEqual(([0.0], "idle"), (state.lengths, state.status))
 
     def test_message_without_sentences_can_be_selected(self) -> None:
         self.manual()

@@ -44,7 +44,6 @@ class PlayerState:
     messages: list[Message]
     output_down: bool
     lengths: list[float]  # queue.length(m) для каждого из messages, в том же порядке
-    completes: list[bool]  # queue.is_complete(m) для каждого из messages, в том же порядке
     sessions: list[Session]  # порядок списка (Sessions.sessions)
     active: str | None  # активная сессия; None — не выбрана
     counts: list[int]  # число сообщений каждой из sessions, в том же порядке
@@ -367,11 +366,10 @@ class Player:
         length = 0.0 if current is None else self._queue.length(current)
         messages = self._queue.messages
         lengths = [self._queue.length(m) for m in messages]
-        completes = [self._queue.is_complete(m) for m in messages]
         sessions = self._sessions.sessions
         counts = [len(self._queues[s.id].messages) for s in sessions]
         return PlayerState(self._status, current, self._now(), length,
-                           messages, self._output_down, lengths, completes,
+                           messages, self._output_down, lengths,
                            sessions, self._sessions.active, counts)
 
     def toggle_play_pause(self) -> None:

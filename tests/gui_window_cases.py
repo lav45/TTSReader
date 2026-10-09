@@ -47,8 +47,7 @@ def state(status: str, current: Message | None, messages: list[Message],
     length = 0.0 if current is None else 10.0
     counts = [0] * len(sessions) if counts is None else list(counts)
     return PlayerState(status, current, position_s, length, messages, False,
-                       [10.0] * len(messages), [True] * len(messages),
-                       list(sessions), active, counts)
+                       [10.0] * len(messages), list(sessions), active, counts)
 
 
 class FakePlayer:
@@ -91,6 +90,9 @@ class FakePlayer:
 
     def select_session(self, session_id: str) -> None:
         self.calls.append(("select_session", session_id))
+
+    def close_session(self) -> None:
+        self.calls.append(("close_session",))
 
     def remove_session(self, session_id: str) -> None:
         self.calls.append(("remove_session", session_id))
@@ -197,14 +199,20 @@ def flush() -> None:
 class PlayerWindowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.a, self.b, self.c = message("a"), message("b"), message("c")
-        self.player = FakePlayer(state("playing", self.b, [self.a, self.b, self.c], 3.0,
-                                       sessions=SESSIONS, active=SESSIONS[0].id))
+        # дерево: [0] открытая папка SESSIONS[0], [1-3] её дорожки a b c, [4] закрытая SESSIONS[1]
+        self.player = FakePlayer(self.open_first(self.b))
         self.settings = FakeSettings(voice_settings())
         self.prefs = FakePrefs(Prefs(tail=7))
         self.text = FakeTextSpeaker()
         self.window = PlayerWindow(self.player, self.settings, self.prefs,
                                    self.text)
         self.addCleanup(self.window.destroy)
+
+    def open_first(self, current: Message | None, status: str = "playing",
+                   messages: list[Message] | None = None, position_s: float = 3.0) -> PlayerState:
+        messages = [self.a, self.b, self.c] if messages is None else messages
+        return state(status, current, messages, position_s, sessions=SESSIONS,
+                     active=SESSIONS[0].id, counts=(len(messages), 5))
 
     def test_buttons_call_player_commands(self) -> None:
         w = self.window
@@ -238,141 +246,135 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertFalse(w.clear_button.get_sensitive())
         self.assertFalse(w.end_session_button.get_sensitive())
 
-    def test_session_list_sits_between_tools_and_messages(self) -> None:
+    def row_box(self, index: int) -> Gtk.Box:
+        return self.window.tree.get_row_at_index(index).get_child()
+
+    def texts(self, index: int) -> list[str]:
+        return [child.get_text() for child in self.row_box(index).get_children()
+                if isinstance(child, Gtk.Label)]
+
+    def test_tree_shows_open_folder_then_its_tracks_then_closed_folder(self) -> None:
         w = self.window
-        main = w.clear_button.get_parent().get_parent()
-        children = main.get_children()
-        tools = w.clear_button.get_parent()
-        container = w.session_list.get_ancestor(Gtk.Box)
-        while container.get_parent() is not main:
-            container = container.get_parent()
-        scrolled = w.message_list.get_ancestor(Gtk.ScrolledWindow)
-        self.assertEqual(children.index(tools) + 1, children.index(container))
-        self.assertEqual(children.index(container) + 1, children.index(scrolled))
-        self.assertFalse(main.query_child_packing(container)[0])  # expand не отнимает
+        self.assertEqual(5, len(w.tree.get_children()))
+        self.assertEqual(["▾", "TTSReader · 1dd2b064", "3"], self.texts(0))
+        self.assertEqual(["▸", "— · abcdef12", "5"], self.texts(4))
+        icons = [[child.get_icon_name()[0] for child in self.row_box(i).get_children()
+                  if isinstance(child, Gtk.Image)] for i in (0, 4)]
+        self.assertEqual([["folder-open-symbolic"], ["folder-symbolic"]], icons)
+        title_open, title_closed = (self.row_box(i).get_children()[2] for i in (0, 4))
+        self.assertIsNotNone(title_open.get_attributes())  # открытая — жирным
+        self.assertIsNone(title_closed.get_attributes())
 
-    def session_texts(self) -> list[str]:
-        rows = self.window.session_list.get_children()
-        return [row.get_child().get_children()[0].get_text() for row in rows]
+    def test_track_row_is_indented_title_then_time_and_duration_at_right(self) -> None:
+        box = self.row_box(1)
+        self.assertEqual(self.window.TRACK_INDENT, box.get_margin_start())
+        self.assertEqual(4, self.row_box(0).get_margin_start())
+        title, time_label, duration = box.get_children()
+        self.assertTrue(box.query_child_packing(title)[0])  # заголовок забирает ширину
+        for label in (time_label, duration):
+            self.assertEqual(Gtk.PackType.END, box.child_get_property(label, "pack-type"))
+        self.assertEqual(["0:10"], [duration.get_text()])
+        self.assertRegex(time_label.get_text(), r"^\d\d:\d\d:\d\d$")
+        self.assertNotIn(":", title.get_text().split()[0][:3])  # время не в заголовке
 
-    def test_session_list_shows_rows_with_bold_active(self) -> None:
-        self.assertEqual(["TTSReader · 1dd2b064", "— · abcdef12"], self.session_texts())
-        labels = [row.get_child().get_children()[0]
-                  for row in self.window.session_list.get_children()]
-        bold = [label.get_attributes() is not None for label in labels]
-        self.assertEqual([True, False], bold)
-
-    def test_session_row_activation_selects_that_session(self) -> None:
-        w = self.window
-        self.assertTrue(w.session_list.get_activate_on_single_click())
+    def test_closed_folder_click_opens_its_session(self) -> None:
         self.player.calls.clear()
-        w.session_list.get_row_at_index(1).activate()
-        w.session_list.get_row_at_index(0).activate()
-        self.assertEqual([("select_session", SESSIONS[1].id), ("select_session", SESSIONS[0].id)],
-                         self.player.calls)
+        self.window.tree.get_row_at_index(4).activate()
+        self.assertEqual([("select_session", SESSIONS[1].id)], self.player.calls)
 
-    def focused_session(self) -> int | None:
-        row = self.window.session_list.get_focus_child()
-        return None if row is None else row.get_index()
+    def test_open_folder_click_closes_it(self) -> None:
+        self.player.calls.clear()
+        self.window.tree.get_row_at_index(0).activate()
+        self.assertEqual([("close_session",)], self.player.calls)
 
-    def test_session_rebuild_keeps_focus_on_active_row(self) -> None:
+    def test_all_closed_shows_only_folders(self) -> None:
+        self.player.change(state("idle", None, [], sessions=SESSIONS, counts=(3, 5)))
+        self.assertEqual(["▸", "▸"], [self.texts(i)[0] for i in (0, 1)])
+        self.assertEqual(2, len(self.window.tree.get_children()))
+
+    def test_session_buttons_follow_active_session(self) -> None:
         w = self.window
-        w.show_all()
-        flush()
-        w.session_list.get_row_at_index(0).grab_focus()
-        flush()
-        self.assertEqual(0, self.focused_session())
-        # Enter по второй строке: активной стала она, строки перестроились
-        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
-                                 sessions=SESSIONS, active=SESSIONS[1].id))
-        flush()
-        self.assertEqual(1, self.focused_session())
-
-    def test_session_rebuild_without_active_keeps_same_index(self) -> None:
-        w = self.window
-        w.show_all()
-        flush()
-        w.session_list.get_row_at_index(1).grab_focus()
-        flush()
-        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
-                                 sessions=SESSIONS[:1]))
-        flush()
-        self.assertEqual(0, self.focused_session())
-
-    def test_no_sessions_hides_list_and_disables_buttons(self) -> None:
-        w = self.window
-        container = w.session_list.get_parent()
-        self.assertTrue(container.get_visible())
-        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0))
-        self.assertEqual([], w.session_list.get_children())
-        self.assertFalse(container.get_visible())
+        self.assertTrue(w.clear_button.get_sensitive())
+        self.assertTrue(w.end_session_button.get_sensitive())
+        self.player.change(state("idle", None, [], sessions=SESSIONS))
         self.assertFalse(w.clear_button.get_sensitive())
         self.assertFalse(w.end_session_button.get_sensitive())
-        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
-                                 sessions=SESSIONS, active=SESSIONS[0].id))
-        self.assertTrue(container.get_visible())
 
-    def test_session_list_rebuilds_only_on_change(self) -> None:
+    def test_no_sessions_empty_tree_and_disabled_buttons(self) -> None:
         w = self.window
-        row = w.session_list.get_row_at_index(0)
-        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 4.0,
-                                 sessions=SESSIONS, active=SESSIONS[0].id))
-        self.assertIs(row, w.session_list.get_row_at_index(0))
-        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 4.0,
-                                 sessions=SESSIONS, active=SESSIONS[1].id))
-        self.assertIsNot(row, w.session_list.get_row_at_index(0))
+        self.player.change(state("idle", None, []))
+        self.assertEqual([], w.tree.get_children())
+        self.assertFalse(w.clear_button.get_sensitive())
+        self.assertFalse(w.end_session_button.get_sensitive())
 
-    def test_row_activation_selects_that_message(self) -> None:
+    def test_tree_rebuilds_only_on_change(self) -> None:
         w = self.window
-        self.assertTrue(w.message_list.get_activate_on_single_click())
-        w.message_list.get_row_at_index(1).activate()
+        row = w.tree.get_row_at_index(0)
+        self.player.change(self.open_first(self.b, position_s=4.0))
+        self.assertIs(row, w.tree.get_row_at_index(0))
+        self.player.change(self.open_first(self.c))
+        self.assertIsNot(row, w.tree.get_row_at_index(0))
+
+    def test_track_click_selects_that_message(self) -> None:
+        w = self.window
+        self.assertTrue(w.tree.get_activate_on_single_click())
+        w.tree.get_row_at_index(2).activate()
         self.assertEqual(1, len(self.player.calls))
         name, played = self.player.calls[0]
         self.assertEqual("play_message", name)
         self.assertIs(self.b, played)
 
-    def test_row_activation_after_rebuild_uses_new_snapshot(self) -> None:
+    def test_track_click_after_rebuild_uses_new_snapshot(self) -> None:
         w = self.window
-        self.player.change(state("playing", self.b, [self.c, self.a, self.b], 3.0))
-        w.message_list.emit("row-activated", w.message_list.get_row_at_index(0))
+        self.player.change(self.open_first(self.b, messages=[self.c, self.a, self.b]))
+        w.tree.emit("row-activated", w.tree.get_row_at_index(1))
         self.assertEqual(1, len(self.player.calls))
         self.assertIs(self.c, self.player.calls[0][1])
 
-    def test_row_activation_with_equal_rows_uses_latest_message_objects(self) -> None:
+    def test_track_click_with_equal_rows_uses_latest_message_objects(self) -> None:
         w = self.window
         a2, b2, c2 = message("a"), message("b"), message("c")
-        self.player.change(state("playing", b2, [a2, b2, c2], 4.0))
-        row = w.message_list.get_row_at_index(2)
-        self.player.change(state("playing", b2, [a2, b2, c2], 4.0))
-        self.assertIs(row, w.message_list.get_row_at_index(2))  # строки равны: без перестройки
-        w.message_list.get_row_at_index(2).activate()
+        self.player.change(self.open_first(b2, messages=[a2, b2, c2], position_s=4.0))
+        row = w.tree.get_row_at_index(3)
+        self.player.change(self.open_first(b2, messages=[a2, b2, c2], position_s=4.0))
+        self.assertIs(row, w.tree.get_row_at_index(3))  # строки равны: без перестройки
+        w.tree.get_row_at_index(3).activate()
         self.assertIs(c2, self.player.calls[0][1])
 
     def focused_index(self) -> int | None:
-        row = self.window.message_list.get_focus_child()
+        row = self.window.tree.get_focus_child()
         return None if row is None else row.get_index()
 
-    def test_rebuild_keeps_keyboard_focus_on_current_row(self) -> None:
-        w = self.window
-        w.show_all()
+    def focus_row(self, index: int) -> None:
+        self.window.show_all()
         flush()
-        w.message_list.get_row_at_index(0).grab_focus()
+        self.window.tree.get_row_at_index(index).grab_focus()
+        flush()
+        self.assertEqual(index, self.focused_index())
+
+    def test_rebuild_keeps_keyboard_focus_on_current_track(self) -> None:
+        self.focus_row(1)
+        self.player.change(self.open_first(self.c, position_s=0.0))  # клик: текущим стало c
+        flush()
+        self.assertEqual(3, self.focused_index())
+
+    def test_rebuild_without_current_focuses_open_folder(self) -> None:
+        self.focus_row(2)
+        self.player.change(self.open_first(None, status="idle"))
         flush()
         self.assertEqual(0, self.focused_index())
-        # клик по строке: текущим стало сообщение c, список перестроился
-        self.player.change(state("playing", self.c, [self.a, self.b, self.c], 0.0))
-        flush()
-        self.assertEqual(2, self.focused_index())
 
-    def test_rebuild_without_current_keeps_focus_on_same_index(self) -> None:
-        w = self.window
-        w.show_all()
-        flush()
-        w.message_list.get_row_at_index(1).grab_focus()
-        flush()
-        self.player.change(state("stopped", None, [self.a, self.b], 0.0))
+    def test_rebuild_after_opening_other_folder_focuses_it(self) -> None:
+        self.focus_row(4)
+        self.player.change(state("idle", None, [], sessions=SESSIONS, active=SESSIONS[1].id))
         flush()
         self.assertEqual(1, self.focused_index())
+
+    def test_rebuild_all_closed_keeps_same_index(self) -> None:
+        self.focus_row(4)
+        self.player.change(state("idle", None, [], sessions=SESSIONS))
+        flush()
+        self.assertEqual(1, self.focused_index())  # не дальше последней строки
 
     def test_rebuild_does_not_steal_focus_from_elsewhere(self) -> None:
         w = self.window
@@ -380,7 +382,7 @@ class PlayerWindowTest(unittest.TestCase):
         flush()
         w.next_button.grab_focus()
         flush()
-        self.player.change(state("playing", self.c, [self.a, self.b, self.c], 0.0))
+        self.player.change(self.open_first(self.c, position_s=0.0))
         flush()
         self.assertIsNone(self.focused_index())
 
@@ -432,7 +434,6 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual(play_pause_label(snapshot), w.play_pause_button.get_label())
         self.assertTrue(w.prev_button.get_sensitive())
         self.assertFalse(w.next_button.get_sensitive())
-        self.assertEqual(3, len(w.message_list.get_children()))
 
     def test_transport_row_is_position_left_then_prev_play_pause_next_right(self) -> None:
         w = self.window
@@ -455,12 +456,11 @@ class PlayerWindowTest(unittest.TestCase):
         w = self.window
         main = w.stack.get_child_by_name("main")
         tools = w.clear_button.get_parent()
-        scrolled = w.message_list.get_parent()
+        scrolled = w.tree.get_parent()
         while scrolled.get_parent() is not main:  # ListBox в ScrolledWindow через Viewport
             scrolled = scrolled.get_parent()
         transport = w.play_pause_button.get_parent()
-        sessions = w.session_list.get_parent()  # свой контейнер между значками и сообщениями
-        self.assertEqual([tools, sessions, scrolled, w.scale, transport], main.get_children())
+        self.assertEqual([tools, scrolled, w.scale, transport], main.get_children())
         self.assertTrue(main.child_get_property(scrolled, "expand"))
 
     def test_play_pause_label_and_sensitivity_per_state(self) -> None:
