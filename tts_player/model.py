@@ -39,6 +39,10 @@ class Message:
     хука, запись истории его подтверждает.
     heard — сообщение прослушано (MessageQueue.mark_heard): его поздние предложения
     не добавляются.
+    sentence_count — на сколько предложений демон делит text (счётчик SentenceCounter той же
+    функцией claude-tts); None — ещё не посчитано или счётчик недоступен. played_indices —
+    индексы предложений последней задачи, удалённых доигранными при выходе плеера
+    (MessageQueue.release): они пришли, и конец сообщения по числу их учитывает.
     """
     session_id: str
     project: str | None = None
@@ -54,6 +58,8 @@ class Message:
     duration_s: float | None = None
     heard: bool = False
     deferred: bool = False
+    sentence_count: int | None = None
+    played_indices: set[int] = field(default_factory=set)
 
 
 @dataclass(frozen=True)

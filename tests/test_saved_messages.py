@@ -34,9 +34,11 @@ class SavedMessagesTest(unittest.TestCase):
         unheard = Message("S", project="/w/p", text="Привет", persona="p", speed=1.5,
                           task_ids={"aa", "bb"},
                           sentences=[self.sentence(S0, 0), self.sentence(S1, 1)],
-                          received_at=5.0, audio=joined, created_at=7.0, duration_s=1.0)
+                          received_at=5.0, audio=joined, created_at=7.0, duration_s=1.0,
+                          sentence_count=2)
         heard = Message("N", text="пока", persona="q", speed=1.0, task_ids={"cc"},
-                        received_at=6.0, heard=True)
+                        received_at=6.0, heard=True, sentence_count=3,
+                        played_indices={0, 2})
         not_sent = Message("S", text="x", sent=False)
         deferred = Message("B", text="отложено", persona="p", speed=1.0, received_at=8.0,
                            sent=False, deferred=True)
@@ -47,7 +49,8 @@ class SavedMessagesTest(unittest.TestCase):
         return (message.session_id, message.project, message.text, message.persona,
                 message.speed, message.task_ids, message.sentences, message.received_at,
                 message.sent, message.audio, message.created_at, message.duration_s,
-                message.heard, message.deferred)
+                message.heard, message.deferred, message.sentence_count,
+                message.played_indices)
 
     def test_round_trip_and_file_deleted_after_load(self):
         snapshot = self.snapshot()
@@ -68,6 +71,21 @@ class SavedMessagesTest(unittest.TestCase):
             del item["deferred"]
         self.path.write_text(json.dumps(data), encoding="utf-8")
         self.assertEqual([False] * 4, [m.deferred for m in self.saved.load().messages])
+
+    def test_missing_sentence_count_reads_as_unknown(self):
+        """Файл до счётчика предложений: число неизвестно (его запросит Player.start),
+        доигранных индексов нет."""
+        self.saved.save(self.snapshot())
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual([2, 3, None, None], [m["sentence_count"] for m in data["messages"]])
+        self.assertEqual([0, 2], data["messages"][1]["played_indices"])
+        for item in data["messages"]:
+            del item["sentence_count"]
+            del item["played_indices"]
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        loaded = self.saved.load().messages
+        self.assertEqual([(None, set())] * 4,
+                         [(m.sentence_count, m.played_indices) for m in loaded])
 
     def test_saved_file_names_are_relative_to_store(self):
         self.saved.save(self.snapshot())
@@ -92,7 +110,12 @@ class SavedMessagesTest(unittest.TestCase):
         self.assertEqual(QueueSnapshot([], [], {}, 0), loaded)
 
     def test_corrupt_file_warns_starts_empty_and_is_deleted(self):
-        for text in ("{не json", "[]", '{"messages": [{"text": 1}]}'):
+        bad_count = json.dumps({"version": 1, "task_order": {}, "delivered": 0, "messages": [
+            {"session_id": "S", "project": None, "text": None, "persona": None, "speed": None,
+             "task_ids": [], "received_at": None, "sent": True, "heard": False,
+             "started": False, "created_at": None, "duration_s": None, "sentences": [],
+             "audio": None, "sentence_count": -1}]})
+        for text in ("{не json", "[]", '{"messages": [{"text": 1}]}', bad_count):
             self.path.write_text(text, encoding="utf-8")
             with self.assertLogs("tts_player.saved_messages", "WARNING"):
                 loaded = self.saved.load()

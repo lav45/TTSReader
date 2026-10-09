@@ -179,7 +179,8 @@ class MessageQueue:
 
     def forget_audio(self, message: Message) -> None:
         """Кэш сообщения устарел: файлы предложений и склейки удалены, сообщение — как только
-        пришедшее (без предложений, записи истории и отметки «прослушано»)."""
+        пришедшее (без предложений, записи истории, отметки «прослушано» и доигранных индексов;
+        число предложений остаётся — текст тот же)."""
         for sentence in message.sentences:
             self._unlink(sentence)
         self._unlink_audio(message)
@@ -188,6 +189,7 @@ class MessageQueue:
         message.created_at = None
         message.duration_s = None
         message.heard = False
+        message.played_indices = set()
 
     def following(self, message: Message) -> Message | None:
         index = self._messages.index(message) + 1
@@ -238,14 +240,28 @@ class MessageQueue:
         return sum(self._duration(s) for s in message.sentences)
 
     def is_complete(self, message: Message) -> bool:
-        """Сообщение больше не растёт: есть склейка или запись истории; его задача не ушла в
-        демон (ждать нечего); или пришло предложение задачи, поставленной позже его последней,
-        — демон синтезирует задачи строго по одной в порядке постановки.
+        """Сообщение больше не растёт: у его последней задачи пришли предложения со всеми
+        индексами 0…n−1, где n — message.sentence_count (любого прохода; n == 0 — ждать
+        нечего). Запасные признаки — число неизвестно или демон сбился: есть склейка или запись
+        истории; его задача не ушла в демон (ждать нечего); или пришло предложение задачи,
+        поставленной позже его последней, — демон синтезирует задачи строго по одной в
+        порядке постановки.
         """
         if message.audio is not None or message.created_at is not None or not message.sent:
             return True
         task_id = self.task_of(message)
+        if self._all_indices(message, task_id):
+            return True
         return task_id is not None and self._order.delivered_after(task_id)
+
+    @staticmethod
+    def _all_indices(message: Message, task_id: str | None) -> bool:
+        """У задачи task_id сообщения есть предложения со всеми индексами 0…sentence_count−1,
+        вместе с удалёнными доигранными при выходе (played_indices); число неизвестно — False."""
+        if message.sentence_count is None:
+            return False
+        received = {s.index for s in message.sentences if s.task_id == task_id}
+        return (received | message.played_indices).issuperset(range(message.sentence_count))
 
     def clear(self) -> None:
         """Удаляет файлы всех сообщений, включая хвост, и забывает их вместе с задачами:
@@ -263,7 +279,8 @@ class MessageQueue:
 
         current (непрослушанное) на позиции position_s > 0: предложения, кончившиеся до
         неё, и склейка удаляются — следующий запуск продолжит с недоигранного (предложение
-        нулевой длины на позиции и начинающееся на ней остаются)."""
+        нулевой длины на позиции и начинающееся на ней остаются); индексы удалённых
+        предложений последней задачи остаются в played_indices для is_complete."""
         if current is not None and not current.heard and position_s > 0:
             self._drop_played(current, position_s)
         for message in self._messages:
@@ -282,6 +299,8 @@ class MessageQueue:
 
     def _drop_played(self, message: Message, position_s: float) -> None:
         played = [s for s in message.sentences if not self._unfinished(message, s, position_s)]
+        task_id = self.task_of(message)
+        message.played_indices |= {s.index for s in played if s.task_id == task_id}
         for sentence in played:
             self._unlink(sentence)
         self._unlink_audio(message)
