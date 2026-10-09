@@ -70,7 +70,7 @@ def run_gui(player: Player, show: bool) -> None:
     from tts_player.window import PlayerWindow, TrayIcon
 
     window = PlayerWindow(player)
-    tray = TrayIcon(window)  # noqa: F841 — значок живёт, пока жива ссылка
+    tray = TrayIcon(window, Gtk.main_quit)  # noqa: F841 — значок живёт, пока жива ссылка
     if show:
         window.present()
     run(player, Gtk.main, Gtk.main_quit)

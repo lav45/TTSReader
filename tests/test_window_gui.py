@@ -13,9 +13,10 @@ if GUI:
     import gi
 
     gi.require_version("Gtk", "3.0")
-    from gi.repository import Gtk  # noqa: E402
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, Gtk  # noqa: E402
 
-    from tts_player.window import PlayerWindow  # noqa: E402
+    from tts_player.window import PlayerWindow, tray_menu  # noqa: E402
 
 
 def message(token: str) -> Message:
@@ -89,6 +90,40 @@ class PlayerWindowTest(unittest.TestCase):
         self.window.scale.emit("change-value", Gtk.ScrollType.JUMP, 7.0)
         self.assertEqual([("seek", 7.0)], self.player.calls)
 
+    def test_drag_seeks_once_on_release_with_dragged_value(self) -> None:
+        w = self.window
+        w._on_scale_press(w.scale, None)
+        w.scale.emit("change-value", Gtk.ScrollType.JUMP, 4.0)
+        w.scale.emit("change-value", Gtk.ScrollType.JUMP, 6.0)
+        self.assertEqual([], self.player.calls)
+        w._on_scale_release(w.scale, None)
+        self.assertEqual([("seek", 6.0)], self.player.calls)
+
+    def test_click_without_movement_does_not_seek(self) -> None:
+        w = self.window
+        w._on_scale_press(w.scale, None)
+        w._on_scale_release(w.scale, None)
+        self.assertEqual([], self.player.calls)
+
+    def test_lost_release_does_not_freeze_slider(self) -> None:
+        w = self.window
+        w._on_scale_press(w.scale, None)
+        w.scale.emit("change-value", Gtk.ScrollType.JUMP, 4.0)
+        w.scale.emit("grab-broken-event", Gdk.Event.new(Gdk.EventType.GRAB_BROKEN))
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 8.0))
+        self.assertEqual(8.0, w.scale.get_value())
+        w._on_scale_release(w.scale, None)
+        self.assertEqual([], self.player.calls)
+
+    def test_refresh_timer_only_while_visible(self) -> None:
+        self.assertFalse(self.window.refreshing)
+        self.window.show_all()
+        flush()
+        self.assertTrue(self.window.refreshing)
+        self.window.hide()
+        flush()
+        self.assertFalse(self.window.refreshing)
+
     def test_state_change_updates_widgets_without_seek(self) -> None:
         snapshot = state("paused", self.c, [self.a, self.b, self.c], 5.0)
         self.player.change(snapshot)
@@ -114,6 +149,18 @@ class PlayerWindowTest(unittest.TestCase):
         flush()
         self.assertFalse(self.window.get_visible())
         self.assertIsNotNone(self.window.get_window(), "окно спрятано, а не уничтожено")
+
+
+@unittest.skipUnless(GUI, "GUI-тест строит меню Gtk: запуск с TTS_PLAYER_GUI_TESTS=1")
+class TrayMenuTest(unittest.TestCase):
+    def test_quit_item_calls_quit(self) -> None:
+        calls = []
+        menu = tray_menu(lambda: calls.append("quit"))
+        self.addCleanup(menu.destroy)
+        items = {item.get_label(): item for item in menu.get_children()}
+        self.assertEqual(["Выход"], list(items))
+        items["Выход"].activate()
+        self.assertEqual(["quit"], calls)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 """Окно плеера и значок в трее. Что показывать — решает tts_player.view над player.state();
 команды уходят в Player только через его методы."""
+from typing import Callable
+
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -28,6 +30,7 @@ class PlayerWindow(Gtk.Window):
         self._player = player
         self._refresh_id = 0
         self._dragging = False
+        self._drag_value: float | None = None  # change-value за перетаскивание; None — не двигали
         self._shown_rows: list[MessageRow] | None = None
         self.set_default_size(420, 360)
 
@@ -37,6 +40,7 @@ class PlayerWindow(Gtk.Window):
         self.scale.connect("button-press-event", self._on_scale_press)
         self.scale.connect("button-release-event", self._on_scale_release)
         self.scale.connect("change-value", self._on_scale_change)
+        self.scale.connect("grab-broken-event", self._on_scale_grab_broken)
         self.position = Gtk.Label(xalign=1.0)
 
         self.prev_button = self._button(PREV_LABEL, player.prev)
@@ -125,6 +129,7 @@ class PlayerWindow(Gtk.Window):
 
     def _on_scale_release(self, scale, _event) -> bool:
         self._dragging = False
+        self._drag_value: float | None = None  # change-value за перетаскивание; None — не двигали
         self._player.seek(scale.get_value())
         return False
 
@@ -144,6 +149,7 @@ class PlayerWindow(Gtk.Window):
             self._refresh_id = GLib.timeout_add(self.REFRESH_MS, self._refresh)
 
     def _on_hide(self, _window) -> None:
+        self._end_drag()
         if self._refresh_id:
             GLib.source_remove(self._refresh_id)
             self._refresh_id = 0
@@ -153,18 +159,30 @@ class PlayerWindow(Gtk.Window):
         return GLib.SOURCE_CONTINUE
 
 
+def tray_menu(quit_app: Callable[[], None]) -> Gtk.Menu:
+    """Меню правого клика по значку: «Выход» — quit_app (выход из главного цикла)."""
+    menu = Gtk.Menu()
+    item = Gtk.MenuItem(label="Выход")
+    item.connect("activate", lambda _item: quit_app())
+    menu.append(item)
+    menu.show_all()
+    return menu
+
+
 class TrayIcon:
-    """Значок XApp в трее: левый клик показывает или прячет окно."""
+    """Значок XApp в трее: левый клик показывает или прячет окно, правый — меню с «Выход»."""
     NAME = "tts-player"
     ICON = "audio-x-generic"
     TOOLTIP = "TTS Player"
 
-    def __init__(self, window: Gtk.Window) -> None:
+    def __init__(self, window: Gtk.Window, quit_app: Callable[[], None]) -> None:
         self._window = window
+        self._menu = tray_menu(quit_app)
         self._icon = XApp.StatusIcon()
         self._icon.set_name(self.NAME)
         self._icon.set_icon_name(self.ICON)
         self._icon.set_tooltip_text(self.TOOLTIP)
+        self._icon.set_secondary_menu(self._menu)
         self._icon.connect("activate", self._on_activate)
         self._icon.set_visible(True)
 
