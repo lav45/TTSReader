@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
-from tts_player.model import Message, Sentence
+from tts_player.model import UNKNOWN_TASK, Message, Sentence
 
 if TYPE_CHECKING:
     from tts_player.history import HistoryEntry
@@ -118,6 +118,13 @@ class MessageQueue:
     def task_of(self, message: Message) -> str | None:
         """Последняя задача демона сообщения; None, если ни одна не поставлена."""
         return max(message.task_ids, key=self._order.order, default=None)
+
+    def task_of_pass(self, session_id: str, token: str) -> str | None:
+        """id задачи прохода синтеза token сессии session_id по уже полученным предложениям или
+        None: метка прохода случайна у каждого прохода демона, поэтому однозначна."""
+        return next((s.task_id for m in self._messages for s in m.sentences
+                     if s.token == token and s.session_id == session_id
+                     and s.task_id != UNKNOWN_TASK), None)
 
     def owns(self, task_id: str) -> bool:
         """Задача — одного из живых сообщений очереди."""

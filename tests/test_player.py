@@ -646,6 +646,37 @@ class PlayerCursorTest(PlayerCase):
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual([A0, B0], self.playback.played)
 
+    def unknown(self, name: str) -> None:
+        """Предложение без id задачи (обёртка не нашла current_message), без задачи хука."""
+        path = self.store_dir / name
+        write_wav(path, SECONDS)
+        match = NAME_PATTERN.match(name)
+        self.player._on_sentence(Sentence(int(match["recv_ns"]), match["task_id"] or "unknown",
+                                          match["session_id"], match["token"],
+                                          int(match["index"]), path))
+
+    def test_unknown_sentence_of_known_pass_joins_its_message(self) -> None:
+        """playback.json потерял current_message посреди прохода: остальные предложения пришли
+        с id unknown, но метка прохода (aa) та же — они идут в сообщение этого прохода."""
+        self.start_with(A0)
+        self.play_first()
+        later = "1000000000000000002_unknown_tts_queue_S_aa_s1.wav"
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.unknown(later)
+        self.assertIn("предложение без id задачи отнесено к задаче aa по проходу aa: " + later,
+                      [r.getMessage() for r in logs.records])
+        self.finish()
+        self.assertEqual((later, 0.0), self.playback.starts[-1])
+        self.assertEqual([A0, later], [s.path.name for s in self.state().current.sentences])
+
+    def test_unknown_sentence_of_unknown_pass_is_still_foreign(self) -> None:
+        self.start_with(A0)
+        self.play_first()
+        stray = "1000000000000000002_unknown_tts_queue_S_bc_s1.wav"
+        self.unknown(stray)
+        self.assertFalse(self.path(stray).exists())
+        self.assertEqual([A0], [s.path.name for s in self.state().current.sentences])
+
     def test_tail_keeps_five_started_messages(self) -> None:
         """Сообщения приходят, пока играет первое (фокус): копятся; next по ним вытесняет
         самое старое начатое сверх хвоста."""
