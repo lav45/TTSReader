@@ -28,12 +28,12 @@
     {
       "id": 4,
       "subject": "Task 4: Живая установка: перезапуск плеера и проба `/clear",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** работающий плеер получает новый код; настоящий `/clear` в пробной сессии даёт в\nжурнале плеера `session clear` (`session replace` живьём не проверяется: пробная сессия не\nоткрыта, замена покрыта только e2e Task 2).\n\n**Files:** нет (вне репозитория: процесс плеера).\n\n**Contract:** обслуживает контракт Task 1; своего артефакта нет.\n\n```\nперезапуск: kill -TERM $(cat $XDG_RUNTIME_DIR/tts-player/player.lock)\n            setsid tts-player --tray < /dev/null >> $XDG_RUNTIME_DIR/tts-player/player.log 2>&1 &\nпроба:      (sleep 12; printf '/clear\\r'; sleep 8; printf '/exit\\r'; sleep 6) \\\n              | timeout 40 script -qfc claude /dev/null > /dev/null\n            пробная сессия не активна (активна текущая) → ждём «session clear», без «session replace»\n```\n\n**Acceptance Criteria:**\n- [ ] после перезапуска `ps -o lstart` процесса плеера — позже слияния; `tts-player session has\n      <UUID текущей сессии>` → 0 (список пережил перезапуск)\n- [ ] пробная сессия с `/clear`: в журнале плеера строки `session clear <uuid1>`, затем `session add\n      <uuid2>`, затем при выходе `session remove <uuid2>`\n\n**Verify:** `grep -n \"session \\(add\\|clear\\|replace\\|remove\\)\" $XDG_RUNTIME_DIR/tts-player/player.log | tail`\n→ строки пробы в порядке критериев\n\n**Steps:**\n\n- [ ] **Step 1: Перезапуск плеера** — по контракту, после слияния.\n- [ ] **Step 2: Проба** — пробная сессия `claude` через `script` с `/clear` и `/exit`.\n- [ ] **Step 3: Commit** — правок в репозитории нет; в отчёте — строки журнала.\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"grep -n \\\"session \\\\(add\\\\|clear\\\\|replace\\\\|remove\\\\)\\\" $XDG_RUNTIME_DIR/tts-player/player.log | tail\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"после перезапуска `ps -o lstart` процесса плеера — позже слияния; `tts-player session has <UUID текущей сессии>` → 0 (список пережил перезапуск)\", \"пробная сессия с `/clear`: в журнале плеера строки `session clear <uuid1>`, затем `session add <uuid2>`, затем при выходе `session remove <uuid2>`\"]}\n```",
       "blockedBy": [
         3
       ]
     }
   ],
-  "lastUpdated": "2026-10-10T00:22:53"
+  "lastUpdated": "2026-10-10T00:45:11"
 }
