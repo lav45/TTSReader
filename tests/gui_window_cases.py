@@ -100,6 +100,20 @@ class FakeSettings:
             raise self.save_error
 
 
+class FakeVoicing:
+    """Контракт Voicing для окна: is_on() и turn_off(); on задаёт ответ, вызовы считаются."""
+
+    def __init__(self, on: bool = True) -> None:
+        self.on = on
+        self.turn_off_calls = 0
+
+    def is_on(self) -> bool:
+        return self.on
+
+    def turn_off(self) -> None:
+        self.turn_off_calls += 1
+
+
 def voice_settings() -> VoiceSettings:
     return VoiceSettings(voices=[Voice("aria", "Тёплый женский"), Voice("bob", "")],
                          active="bob", speed=1.5)
@@ -120,7 +134,8 @@ class PlayerWindowTest(unittest.TestCase):
         self.a, self.b, self.c = message("a"), message("b"), message("c")
         self.player = FakePlayer(state("playing", self.b, [self.a, self.b, self.c], 3.0))
         self.settings = FakeSettings(voice_settings())
-        self.window = PlayerWindow(self.player, self.settings)
+        self.voicing = FakeVoicing(on=False)
+        self.window = PlayerWindow(self.player, self.settings, self.voicing)
         self.addCleanup(self.window.destroy)
 
     def test_buttons_call_player_commands(self) -> None:
@@ -131,6 +146,50 @@ class PlayerWindowTest(unittest.TestCase):
             self.player.calls.clear()
             button.clicked()
             self.assertEqual([(call,)], self.player.calls, call)
+
+    def test_voicing_off_button_is_third_icon_without_text(self) -> None:
+        w = self.window
+        button = w.voicing_off_button
+        self.assertFalse(button.get_label())
+        self.assertEqual("system-shutdown-symbolic", icon_name(button))
+        self.assertEqual("Выключить озвучку (/tts-off)", button.get_tooltip_text())
+        row = w.clear_button.get_parent()
+        self.assertEqual([w.clear_button, w.settings_button, button], row.get_children()[:3])
+
+    def test_voicing_off_button_follows_is_on_on_show_and_tick(self) -> None:
+        button = self.window.voicing_off_button
+        self.assertFalse(button.get_sensitive())
+        self.voicing.on = True
+        self.window._refresh()  # тик REFRESH_MS
+        self.assertTrue(button.get_sensitive())
+        self.voicing.on = False
+        self.window._refresh()
+        self.assertFalse(button.get_sensitive())
+        self.voicing.on = True
+        self.window.show()
+        flush()
+        self.assertTrue(button.get_sensitive())
+
+    def test_voicing_off_button_click_turns_off_once(self) -> None:
+        self.voicing.on = True
+        self.window._refresh()
+        self.window.voicing_off_button.clicked()
+        self.assertEqual(1, self.voicing.turn_off_calls)
+
+    def test_voicing_off_button_insensitive_right_after_click(self) -> None:
+        """Двойной клик не запускает второй хук: кнопка гаснет сразу, не дожидаясь тика."""
+        self.voicing.on = True
+        self.window._refresh()
+        button = self.window.voicing_off_button
+        button.clicked()
+        self.assertFalse(button.get_sensitive())
+        self.window._refresh()  # флаг остался: следующий тик возвращает кнопку
+        self.assertTrue(button.get_sensitive())
+
+    def test_voicing_off_button_sensitive_at_construction_when_on(self) -> None:
+        window = PlayerWindow(self.player, self.settings, FakeVoicing(on=True))
+        self.addCleanup(window.destroy)
+        self.assertTrue(window.voicing_off_button.get_sensitive())
 
     def test_row_activation_plays_that_message(self) -> None:
         w = self.window
@@ -263,7 +322,8 @@ class SettingsScreenTest(unittest.TestCase):
     def setUp(self) -> None:
         self.player = FakePlayer(state("stopped", None, []))
         self.settings = FakeSettings(voice_settings())
-        self.window = PlayerWindow(self.player, self.settings)
+        self.voicing = FakeVoicing(on=False)
+        self.window = PlayerWindow(self.player, self.settings, self.voicing)
         self.addCleanup(self.window.destroy)
 
     def test_icon_buttons_without_text_first_in_one_row(self) -> None:
