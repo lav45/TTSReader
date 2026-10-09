@@ -1,7 +1,9 @@
 """Тесты ControlRequests: забор запросов session add/remove из control/."""
 import json
 import logging
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -33,6 +35,11 @@ class ControlCase(unittest.TestCase):
         path = self.control_dir / name
         path.write_text(data if isinstance(data, str) else json.dumps(data))
         return path
+
+    @staticmethod
+    def age(path, seconds=3600):
+        past = time.time() - seconds
+        os.utime(path, (past, past))
 
     def spin(self, until=None):
         loop = GLib.MainLoop()
@@ -93,6 +100,7 @@ class ControlCase(unittest.TestCase):
 
     def test_tmp_and_dot_names_not_taken(self):
         tmp = self.write("1.json.abc.tmp", {"op": "add", "session": "u1", "cwd": "/p"})
+        self.age(tmp)
         hidden = self.write(".2.json", {"op": "add", "session": "u2", "cwd": "/p"})
         self.control.start()
         self.assertEqual([], self.calls)
@@ -101,10 +109,19 @@ class ControlCase(unittest.TestCase):
 
     def test_start_removes_tmp_leftovers_but_not_json(self):
         tmp = self.write("1.json.abc.tmp", "{")
+        self.age(tmp)
         self.write("2.json", {"op": "add", "session": "u1", "cwd": "/p"})
         self.control.start()
         self.assertFalse(tmp.exists())
         self.assertEqual([("add", "u1", "/p")], self.calls)
+
+    def test_start_keeps_fresh_tmp_removes_old(self):
+        fresh = self.write("1.json.abc.tmp", "{")
+        old = self.write("2.json.abc.tmp", "{")
+        self.age(old)
+        self.control.start()
+        self.assertTrue(fresh.exists())  # его может писать CLI прямо сейчас
+        self.assertFalse(old.exists())
 
     def test_tmp_after_start_left_alone(self):
         self.control.start()

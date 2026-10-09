@@ -2,7 +2,8 @@
 поэтому модуль не импортирует плеер и gi — только instance, sessions и стандартную библиотеку.
 
 add и remove не трогают sessions.json: кладут запрос в $XDG_RUNTIME_DIR/tts-player/control/<ns>.json
-(atomic_json.write_json: временный *.tmp рядом, затем rename; сбой убирает его); список меняет плеер. has только читает sessions.json.
+(atomic_json.write_json: временный *.tmp рядом, затем rename; сбой убирает его);
+список меняет плеер. has только читает sessions.json.
 """
 import os
 import sys
@@ -54,6 +55,14 @@ def is_listed(runtime: Path, session_id: str) -> bool:
     return any(s.id == session_id for s in sessions)
 
 
+def has_pending_requests(runtime: Path) -> bool:
+    """В control/ лежит запрос, который плеер ещё не забрал: sessions.json за ним не поспевает."""
+    control = control_dir(runtime)
+    if not control.is_dir():
+        return False
+    return any(not p.name.startswith(".") for p in control.glob("*.json"))
+
+
 def session_add(session_id: str, cwd: str) -> int:
     request = {"op": "add", "session": session_id, "cwd": cwd}
     return submit(session_id, request, noop_text="сессия уже в списке", sent_text="сессия передана плееру",
@@ -68,12 +77,14 @@ def session_remove(session_id: str) -> int:
 
 def submit(session_id: str, request: dict, noop_text: str, sent_text: str, offline_text: str,
            noop_when_listed: bool) -> int:
-    """Запрос не нужен, если список уже в нужном состоянии: add — UUID есть, remove — UUID нет."""
+    """Запрос не нужен, если список уже в нужном состоянии: add — UUID есть, remove — UUID нет.
+    Но пока в control/ лежат необработанные запросы, sessions.json устарел: тогда пишем всегда
+    (add и remove в плеере идемпотентны)."""
     runtime = runtime_dir()
     if runtime is None:
         print("tts-player: XDG_RUNTIME_DIR не задан", file=sys.stderr)
         return 1
-    if is_listed(runtime, session_id) == noop_when_listed:
+    if not has_pending_requests(runtime) and is_listed(runtime, session_id) == noop_when_listed:
         print(noop_text)
         return 0
     try:

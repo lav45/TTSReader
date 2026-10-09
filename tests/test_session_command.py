@@ -131,6 +131,24 @@ class SessionRequestTest(unittest.TestCase):
         self.assertEqual((0, "сессия не в списке\n"), (result.returncode, result.stdout))
         self.assertEqual([], self.requests())
 
+    def test_remove_after_pending_add_writes_both(self) -> None:
+        run_cli(self.runtime, "session", "add", "u1", "/p/X")
+        result = run_cli(self.runtime, "session", "remove", "u1")
+        self.assertEqual(0, result.returncode)
+        self.assertNotIn("не в списке", result.stdout)
+        self.assertEqual([{"op": "add", "session": "u1", "cwd": "/p/X"},
+                          {"op": "remove", "session": "u1"}], self.requests())
+
+    def test_add_after_pending_remove_writes_both(self) -> None:
+        Sessions(self.path).add("u1", "/p/X")
+        self.lock_player()
+        run_cli(self.runtime, "session", "remove", "u1")
+        result = run_cli(self.runtime, "session", "add", "u1", "/p/X")
+        self.assertEqual(0, result.returncode)
+        self.assertNotIn("уже в списке", result.stdout)
+        self.assertEqual([{"op": "remove", "session": "u1"},
+                          {"op": "add", "session": "u1", "cwd": "/p/X"}], self.requests())
+
     def test_player_not_running(self) -> None:
         Sessions(self.path).add("u1", "/p/TTSReader")
         result = run_cli(self.runtime, "session", "add", "u2", "/p/other")

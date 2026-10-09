@@ -1,6 +1,7 @@
 """Забор файлов *.json из каталога-почтового ящика по порядку имён: queue/ хука и control/."""
 import logging
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -11,6 +12,9 @@ from gi.repository import Gio  # noqa: E402
 
 SUFFIX = ".json"
 LEFTOVER_SUFFIX = ".tmp"
+# Свежий *.tmp может писать CLI прямо сейчас: хук запускает плеер и сразу зовёт `session add`,
+# а старт плеера чистит остатки. Остаток убитого писателя — только старше этого возраста.
+LEFTOVER_MIN_AGE_SECONDS = 60
 
 
 class Mailbox:
@@ -20,7 +24,7 @@ class Mailbox:
     как RENAMED. Файл удаляется после handle (упавший handle не оставляет файл: иначе его
     подобрал бы следующий запуск повторно); нечитаемый удаляется со строкой WARNING.
     Разбор содержимого и его битые случаи — дело handle. clean_leftovers: start() сначала
-    удаляет *.tmp (остатки писателя, убитого между mkstemp и replace) — одним явным шагом.
+    удаляет *.tmp старше LEFTOVER_MIN_AGE_SECONDS (остатки писателя, убитого между mkstemp и replace) — одним явным шагом.
     Журнал и приставка строк (label) — владельца ящика.
     """
 
@@ -69,8 +73,11 @@ class Mailbox:
                 self._take(name)
 
     def _remove_leftovers(self) -> None:
+        threshold = time.time() - LEFTOVER_MIN_AGE_SECONDS
         for stale in self._directory.glob("*" + LEFTOVER_SUFFIX):
             try:
+                if stale.stat().st_mtime >= threshold:
+                    continue
                 stale.unlink(missing_ok=True)
             except OSError as error:
                 self._log.warning("%s: остаток %s не удалён: %s", self._label, stale.name, error)
