@@ -34,6 +34,7 @@ def load_raw_config():
 
 FAKE_DAEMON = '''
 import os
+import subprocess
 import time
 import wave
 
@@ -43,6 +44,8 @@ def daemon_generate_speech(text, persona, output_file):
         log.write(persona + "|" + text + "\\n")
     if os.environ.get("FAKE_NOISE"):
         print("noise")
+    if os.environ.get("FAKE_CHILD_NOISE"):
+        subprocess.run(["echo", "child-noise"], check=True)
     time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
     fail_at = os.environ.get("FAKE_FAIL_AT", "")
     if os.environ.get("FAKE_BAD_WAV"):
@@ -145,6 +148,14 @@ class SynthWorkerTest(unittest.TestCase):
         lines = [json.loads(line) for line in stdout.splitlines()]
         self.assertEqual(len(lines), 4)
         self.assertEqual(stderr.count("noise"), 2)
+
+    def test_child_process_output_goes_to_stderr(self):
+        proc = self.start(FAKE_CHILD_NOISE="1")
+        stdout, stderr = proc.communicate("Раз. Два.", timeout=30)
+        self.assertEqual(proc.returncode, 0)
+        lines = [json.loads(line) for line in stdout.splitlines()]
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(stderr.count("child-noise"), 2)
 
     def test_part_name_never_in_stdout_and_failure_leaves_no_wav(self):
         code, lines = self.run_worker("Раз. Два.", FAKE_FAIL_AT="Два.")

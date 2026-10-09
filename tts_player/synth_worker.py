@@ -1,13 +1,15 @@
 """Процесс синтеза «Своего текста»: режет текст на предложения и пишет WAV по одному.
 
 Запускается интерпретатором claude-tts: `<python> synth_worker.py <out_dir>`.
-Текст читается из stdin целиком. В stdout идут строки JSON (каждая сразу сбрасывается):
+Текст читается из stdin целиком, UTF-8. В stdout идут строки JSON в UTF-8 (каждая сразу
+сбрасывается):
 {"count": k}, затем {"index": i, "path": ..., "duration": ...} по порядку, затем
 {"done": true}; при сбое синтеза предложения — {"error": ...} и выход с кодом 1.
 Выход 2 — не удалось импортировать claude_code_tts. Импортирует только stdlib и
 claude_code_tts: tts_player в окружении claude-tts недоступен.
 """
 import json
+import os
 import sys
 import wave
 from pathlib import Path
@@ -17,7 +19,7 @@ EXIT_SYNTH_FAILED = 1
 EXIT_IMPORT_FAILED = 2
 
 
-PROTOCOL_STREAM = sys.stdout
+PROTOCOL_STREAM = sys.stdout  # main() заменяет его копией fd 1, пока fd 1 не ушёл в stderr
 
 
 def emit(message: dict) -> None:
@@ -49,9 +51,23 @@ def synthesize(sentence: str, persona: str, path: Path, synthesize_speech) -> fl
     return duration
 
 
+def protect_protocol() -> None:
+    """Протокол — в копию fd 1; сам fd 1 и sys.stdout — в stderr.
+
+    Посторонний вывод claude_code_tts (print) и его дочерних процессов, унаследовавших fd 1,
+    уходит в stderr и протокол не портит.
+    """
+    global PROTOCOL_STREAM
+    sys.stdout.flush()
+    protocol_fd = os.dup(1)
+    PROTOCOL_STREAM = os.fdopen(protocol_fd, "w", encoding="utf-8")
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+
+
 def main(argv: list[str]) -> int:
     """Синтезирует предложения текста из stdin в WAV-файлы каталога argv[1]."""
-    sys.stdout = sys.stderr  # посторонние print из claude_code_tts не должны попасть в протокол
+    protect_protocol()
     out_dir = Path(argv[1])
     try:
         from claude_code_tts.bridge import split_sentences
@@ -61,7 +77,7 @@ def main(argv: list[str]) -> int:
         emit({"error": f"import claude_code_tts: {error!r}"})
         return EXIT_IMPORT_FAILED
 
-    text = sys.stdin.read()
+    text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     sentences = split_sentences(text) if text.strip() else []
     emit({"count": len(sentences)})
     if sentences:

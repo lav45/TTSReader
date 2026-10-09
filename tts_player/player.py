@@ -61,6 +61,9 @@ class Player:
     пока playing — refresh раз в REFRESH_SECONDS, статус ушёл из playing и выход — restore.
     Ожидание предложения растущего сообщения — тоже playing: громкость не дрожит. Решает
     одно место — _follow_status из _changed, после которого видна каждая смена статуса.
+    Удержание (hold, контракт (10)) — звучит свой текст: плеер на паузе, а приглушение идёт
+    так же, как при playing; ушедший в hold из playing громкость не возвращает и не глушит
+    заново. Звучит ли плеер для чужих потоков — _speaking, одно на duck и на сирот.
     Сироты (громкость приложения, поток которого закончился приглушённым): вне playing,
     пока ducker.has_orphans и не прошло WATCH_LIMIT_SECONDS с их последнего изменения
     (ducker.orphans_changed_at) — watch раз в WATCH_SECONDS; решает _follow_orphans рядом с
@@ -101,6 +104,7 @@ class Player:
         self._output_down = False
         self._retry_id = 0
         self._autoplay = defaults.autoplay
+        self._held = False  # звучит свой текст: сам ничего не начинаю (hold/release)
         self._ducker = ducker
         self._duck = defaults.duck
         self._ducking = False  # duck() вызван, restore() ещё нет
@@ -115,6 +119,22 @@ class Player:
         if prefs.duck != self._duck:
             self._duck = prefs.duck
             self._unduck()  # _changed приглушит заново, если статус playing
+        self._changed()
+
+    def hold(self) -> None:
+        """Свой текст начал звучать: playing → paused с запомненной позицией; пока держит,
+        плеер сам не начинает ни следующее, ни новое сообщение. Команды пользователя
+        работают как обычно."""
+        self._held = True
+        if self._status == "playing":
+            self._position = self._now()
+            self._halt()
+            self._status = "paused"
+        self._changed()
+
+    def release(self) -> None:
+        """Свой текст замолчал: удержание снято, статус не меняется."""
+        self._held = False
         self._changed()
 
     def start(self) -> None:
@@ -272,7 +292,7 @@ class Player:
 
     def _on_sentence(self, sentence: Sentence) -> None:
         self._queue.add(sentence)
-        if self._status == "idle" and self._autoplay:
+        if self._status == "idle" and self._starts_by_itself():
             message = self._queue.first_unheard()
             if message is not None:
                 self._begin(message)
@@ -358,7 +378,7 @@ class Player:
         self._queue.mark_heard(current)
         # склейка, привязанная после конца по предложениям, может быть длиннее их суммы
         self._position = self._queue.length(current)
-        if not self._autoplay:
+        if not self._starts_by_itself():
             self._stop_after(current)
             return
         upcoming = self._queue.following(current) or self._queue.first_unheard()
@@ -367,8 +387,12 @@ class Player:
             return
         self._begin(upcoming)
 
+    def _starts_by_itself(self) -> bool:
+        """Плеер сам начинает следующее и новое: автовоспроизведение включено и нет удержания."""
+        return self._autoplay and not self._held
+
     def _stop_after(self, message: Message) -> None:
-        """Конец сообщения без автовоспроизведения: stopped; текущим становится следующее
+        """Конец сообщения без автовоспроизведения или в удержании: stopped; текущим становится следующее
         по порядку с позиции 0, нет его — сообщение остаётся текущим с позицией в конце."""
         self._status = "stopped"
         following = self._queue.following(message)
@@ -436,10 +460,10 @@ class Player:
         return self._position if at is None else self._file_base + at
 
     def _follow_status(self) -> None:
-        """Приглушение по статусу: вход в playing — duck и таймер refresh, выход — restore."""
+        """Приглушение по статусу: начал звучать — duck и таймер refresh, замолчал — restore."""
         if self._ducker is None:
             return
-        playing = self._status == "playing"
+        playing = self._speaking()
         if playing and not self._ducking:
             self._ducker.duck(self._duck)
             self._ducking = True
@@ -447,11 +471,15 @@ class Player:
         elif not playing:
             self._unduck()
 
+    def _speaking(self) -> bool:
+        """Для чужих потоков плеер звучит: играет сам или держит паузу ради своего текста."""
+        return self._status == "playing" or self._held
+
     def _follow_orphans(self) -> None:
         """Таймер watch: идёт вне playing, пока есть сироты; иначе снят."""
         if self._ducker is None:
             return
-        wanted = self._status != "playing" and self._watching_orphans()
+        wanted = not self._speaking() and self._watching_orphans()
         if wanted and not self._watch_id:
             self._watch_id = GLib.timeout_add_seconds(self.WATCH_SECONDS, self._watch)
         elif not wanted:
