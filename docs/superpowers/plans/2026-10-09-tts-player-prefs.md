@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers-extended-cc:subagent-driven-development (recommended) or superpowers-extended-cc:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** размер хвоста и автовоспроизведение настраиваются в окне и живут между запусками;
-ряд управления — `[prev] [play/pause] [next]`, выключатель автовоспроизведения внизу справа.
+ряд управления — `[prev] [play/pause] [next]`, выключатель автовоспроизведения справа в ряду служебных кнопок.
 
 **Architecture:** `tts_player/player_settings.py` читает и пишет `settings.json` плеера (контракт
 (6)). `Player.apply_prefs` переносит значения в очередь и в правило перехода; `__main__.py` читает
@@ -42,9 +42,11 @@
 **User decisions (already made):**
 - Уменьшение хвоста — постепенно; хвост 1–20; файл `~/.config/tts-player/settings.json`.
 - Кнопка stop из ряда управления убирается, pause и play — одна кнопка.
-- Выключатель автовоспроизведения внизу справа; отвечает только за проигрывание файлов из буфера:
+- Выключатель автовоспроизведения справа в ряду служебных кнопок (ряд теперь наверху); отвечает только за проигрывание файлов из буфера:
   выключен — плеер сам не начинает ни следующее сообщение, ни новое в тишине.
 - Иконка выключателя — `media-playlist-consecutive-symbolic` (выбрана мной по просьбе пользователя).
+- Главный экран сверху вниз: служебные кнопки → история воспроизведения → плеер (ползунок,
+  кнопки, время); заголовок текущего — в блоке плеера над ползунком (моё решение).
 
 ## Файлы
 
@@ -160,7 +162,7 @@ __main__: --settings-file FILE (по умолчанию PlayerSettings.default_p
 
 ### Task 3: Ряд управления, выключатель и поле хвоста в окне
 
-**Goal:** `[prev] [play/pause] [next]`, выключатель автовоспроизведения внизу справа, поле хвоста на экране настроек.
+**Goal:** новый порядок главного экрана, `[prev] [play/pause] [next]`, выключатель автовоспроизведения в ряду служебных кнопок справа, поле хвоста на экране настроек.
 
 **Files:**
 - Modify: `tts_player/window.py`, `tts_player/view.py`, `tts_player/player.py`, `tts_player/__main__.py`, `README.md`
@@ -170,11 +172,14 @@ __main__: --settings-file FILE (по умолчанию PlayerSettings.default_p
 
 ```
 PlayerWindow(player, settings: DaemonSettings, prefs: PlayerSettings, …прочие аргументы master)
+  главный экран сверху вниз: ряд служебных кнопок (слева clear, settings, voicing_off;
+    справа autoplay_button) → message_list (растягивается) → блок плеера:
+    title_label → scale → ряд управления с position_label справа
   ряд управления: prev_button · play_pause_button · next_button  (pause_button и play_stop_button нет)
     play_pause_button: подпись view.play_pause_label(state) — «⏸» при playing, иначе «⏵»;
                        активна ⇔ view.play_pause_enabled(state): есть текущее или непрослушанное
                        клик → player.toggle_play_pause()
-  внизу справа: autoplay_button — Gtk.ToggleButton, иконка media-playlist-consecutive-symbolic,
+  ряд служебных кнопок справа: autoplay_button — Gtk.ToggleButton, иконка media-playlist-consecutive-symbolic,
                 без текста, подсказка «Автовоспроизведение»; active = state.autoplay
                 переключение пользователем → prefs.save(Prefs(tail, новое)) → player.apply_prefs(...)
                 SettingsError → строка в stderr, кнопка возвращается к state.autoplay
@@ -189,9 +194,10 @@ Player: toggle_pause и toggle_play_stop удалены; view: pause_label, play
 
 **Acceptance Criteria:**
 - [ ] в ряду управления три кнопки в порядке prev, play/pause, next; кнопок pause и play|stop нет
+- [ ] порядок детей главного экрана сверху вниз: ряд служебных кнопок, список, заголовок, ползунок, ряд управления
 - [ ] подпись и доступность play/pause — по `view` для playing, paused, stopped, idle без сообщений, idle с непрослушанным
 - [ ] клик по play/pause вызывает `toggle_play_pause`
-- [ ] выключатель: иконка, подсказка, справа в нижнем ряду; переключение сохраняет `Prefs` с новым autoplay и вызывает `apply_prefs`; новый снимок состояния меняет `active` без вызова `save`
+- [ ] выключатель: иконка, подсказка, справа в ряду служебных кнопок; переключение сохраняет `Prefs` с новым autoplay и вызывает `apply_prefs`; новый снимок состояния меняет `active` без вызова `save`
 - [ ] `tail_spin` показывает загруженный хвост; «Сохранить» пишет его и вызывает `apply_prefs`; при ошибке `load()` настроек claude-tts `tail_spin` активен и «Сохранить» пишет только хвост
 - [ ] `grep -rn "toggle_play_stop\|toggle_pause\|play_stop_label\|pause_label" tts_player tests` пуст
 - [ ] README: ряд управления, выключатель, поле хвоста, файл `settings.json` и `--settings-file`
