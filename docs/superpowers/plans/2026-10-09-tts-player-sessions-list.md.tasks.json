@@ -1,0 +1,21 @@
+{
+  "planPath": "docs/superpowers/plans/2026-10-09-tts-player-sessions-list.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 1: Реестр сессий пишет sessions.json",
+      "status": "pending",
+      "description": "**Goal:** `Sessions` ведёт список и активную сессию и после каждого изменения атомарно пишет файл\nконтракта (15); `load()` поднимает файл прошлого запуска.\n\n**Files:**\n- Create: `tts_player/sessions.py`\n- Test: `tests/test_sessions.py`\n\n**Contract:** файл (15) и интерфейс реестра, которым пользуются плеер и CLI\n\n```\n$XDG_RUNTIME_DIR/tts-player/sessions.json   пишет только плеер, атомарно\n  {\"active\": \"<uuid>\" | null,\n   \"sessions\": [{\"id\": \"<uuid>\", \"project\": \"<последний компонент cwd>\"}, …]}\n\n@dataclass(frozen=True)\nclass Session:\n    id: str\n    project: str\n\ndef sessions_path(runtime_dir: Path) -> Path      # runtime_dir/tts-player/sessions.json\n\ndef read_sessions(path: Path) -> tuple[str | None, list[Session]]\n    # (active, sessions); нет файла — (None, []); битый — ValueError\n\nclass Sessions:\n    def __init__(self, path: Path) -> None\n    def load(self) -> None                       # нет файла — пусто; битый — пусто + WARNING\n    @property sessions -> list[Session]          # копия, в порядке добавления\n    @property active -> str | None\n    def has(self, session_id: str) -> bool\n    def add(self, session_id: str, cwd: str) -> bool     # False — уже в списке, файл не пишется\n    def remove(self, session_id: str) -> bool            # False — нет в списке\n```\n\n**Acceptance Criteria:**\n- [ ] `add(\"u1\", \"/home/u/Programs/TTSReader/\")` в пустой реестр → файл `{\"active\": \"u1\", \"sessions\": [{\"id\": \"u1\", \"project\": \"TTSReader\"}]}`\n- [ ] вторая `add` → сессия в конце списка, `active` прежний\n- [ ] повторная `add` той же сессии → `False`, файл не переписан (mtime и содержимое прежние)\n- [ ] `remove` активной → её нет в списке, `active: null`; `remove` неактивной → `active` прежний\n- [ ] `remove` отсутствующей → `False`\n- [ ] `load()` после записи другим экземпляром → те же `sessions` и `active`\n- [ ] `load()` без файла → пусто; с битым файлом (не JSON; `sessions` не список; `active` не из списка) → пусто и строка WARNING\n- [ ] сбой записи (каталог только для чтения) → WARNING, состояние в памяти изменено, исключения нет\n- [ ] `read_sessions` битого файла → `ValueError`\n\n**Verify:** `python3 -m unittest tests.test_sessions -v` → `OK`\n\n```json:metadata\n{\"files\": [\"tts_player/sessions.py\", \"tests/test_sessions.py\"], \"verifyCommand\": \"python3 -m unittest tests.test_sessions -v\", \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 2: `tts-player session has` читает sessions.json",
+      "status": "pending",
+      "description": "**Goal:** гейт спрашивает `tts-player session has <uuid>` и получает 0 только для сессии из списка\nзапущенного плеера.\n\n**Files:**\n- Modify: `tts_player/__main__.py` (разбор `argv` до `argparse` — рядом с `stop`/`play`)\n- Modify: `README.md`\n- Test: `tests/test_session_command.py`\n\n**Contract:** CLI, читающая сторона (15)\n\n```\ntts-player session has <uuid>\n  exit 0 — <uuid> в sessions[\"id\"] и плеер запущен (instance.is_locked)\n  exit 1 — нет в списке; нет файла; файл битый; плеер не запущен; нет XDG_RUNTIME_DIR\n  вывода нет; sessions.json не меняется\ntts-player session <что-то другое>   → usage в stderr, exit 2\n```\n\n**Acceptance Criteria:**\n- [ ] реестр (`Sessions.add`) записал `u1`, блокировка плеера взята (`Instance.acquire` во временном runtime) → `has u1` exit 0\n- [ ] `has u2` при том же файле → exit 1\n- [ ] файл есть, блокировки нет → `has u1` exit 1\n- [ ] нет файла / битый файл → exit 1, файл не создан и не изменён\n- [ ] `session`, `session has`, `session foo u1` → exit 2 и usage в stderr\n- [ ] README описывает `sessions.json` (кто пишет, кто читает) и `session has`\n\n**Verify:** `python3 -m unittest tests.test_session_command -v` → `OK`\n\n```json:metadata\n{\"files\": [\"tts_player/__main__.py\", \"README.md\", \"tests/test_session_command.py\"], \"verifyCommand\": \"python3 -m unittest tests.test_session_command -v\", \"modelTier\": \"standard\"}\n```",
+      "blockedBy": [
+        0
+      ]
+    }
+  ],
+  "lastUpdated": "2026-10-09T19:47:30"
+}
