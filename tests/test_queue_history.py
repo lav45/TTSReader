@@ -131,6 +131,14 @@ class QueueHistoryTest(unittest.TestCase):
         self.assertEqual(second.path, path)
         self.assertAlmostEqual(2.0, offset)
 
+    def test_locate_finds_zero_length_sentence_at_position(self):
+        first = self.add(1_000_000_000, 0, index=0)
+        self.add(2_000_000_000, 1.0, index=1)
+        middle = self.add(3_000_000_000, 0, index=2)
+        message = self.message()
+        self.assertEqual((first.path, 0), self.queue.locate(message, 0))
+        self.assertEqual((middle.path, 0), self.queue.locate(message, 1.0))
+
     def test_locate_after_audio(self):
         self.add(1_000_000_000, 1.0)
         message = self.queue.attach(self.entry(1.0), self.store)

@@ -211,13 +211,17 @@ class MessageQueue:
         return message
 
     def locate(self, message: Message, position_s: float) -> tuple[Path, float]:
-        """Файл и смещение в нём для позиции в сообщении (за концом — конец последнего)."""
+        """Файл и смещение в нём для позиции в сообщении (за концом — конец последнего).
+
+        Предложение, которое кончается после позиции или начинается на ней, — как в
+        release(): предложение нулевой длины (битый файл) на позиции не пропускается.
+        """
         if message.audio is not None:
             return message.audio, position_s
         remaining = max(position_s, 0.0)
         for sentence in message.sentences:
             duration = self._duration(sentence)
-            if remaining < duration:
+            if remaining < duration or remaining <= 0:
                 return sentence.path, remaining
             remaining -= duration
         last = message.sentences[-1]

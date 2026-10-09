@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 import wave
@@ -20,6 +21,7 @@ WAIT = 10.0
 QUIET = 1.0
 RATE = 8000
 SECONDS = 0.25
+PROTOCOL = ("playing ", "error ", "complete ", "ended ", "switched ")
 
 
 def make_wav(path: Path, seconds: float = SECONDS) -> Path:
@@ -106,11 +108,15 @@ class PlayerProcessCase(unittest.TestCase):
         return [self.next_line("playing ").removeprefix("playing ") for _ in range(count)]
 
     def assert_quiet(self, seconds: float = QUIET) -> None:
-        try:
-            line = self.lines.get(timeout=seconds)
-        except queue.Empty:
-            return
-        self.fail(f"неожиданная строка: {line}")
+        """За seconds ни одной строки протокола (PROTOCOL); диагностика INFO/WARNING не в счёт."""
+        deadline = time.monotonic() + seconds
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                line = self.lines.get(timeout=left)
+            except queue.Empty:
+                return
+            if line.startswith(PROTOCOL):
+                self.fail(f"неожиданная строка: {line}")
 
 
 class PlayerE2ETest(PlayerProcessCase):
