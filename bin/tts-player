@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Запуск плеера и команда stop из любого каталога и через символическую ссылку.
+set -euo pipefail
+root="$(dirname "$(dirname "$(readlink -f "$0")")")"
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m tts_player "$@"

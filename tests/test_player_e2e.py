@@ -227,5 +227,71 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
 
 
+BIN = ROOT / "bin" / "tts-player"
+
+
+class SingleInstanceTest(PlayerProcessCase):
+    def run_bin(self, *args: str, cwd: Path = ROOT) -> subprocess.CompletedProcess:
+        return subprocess.run([str(BIN), *args], cwd=cwd, env=self.env(),
+                              capture_output=True, text=True, timeout=WAIT)
+
+    def test_second_start_exits_0_with_pid_and_keeps_store(self) -> None:
+        self.start_player()
+        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=3.0))
+        self.played(1)
+        kept = sorted(p.name for p in self.store.iterdir())
+        self.assertTrue(kept)
+        result = subprocess.run(
+            self.command("--audio-sink", "fakesink", "--history-dir", str(self.history),
+                         "--history-db", str(self.db)),
+            cwd=ROOT, env=self.env(), capture_output=True, text=True, timeout=WAIT)
+        self.assertEqual(0, result.returncode)
+        self.assertIn(f"tts-player уже запущен (PID {self.proc.pid})", result.stderr)
+        self.assertEqual(kept, sorted(p.name for p in self.store.iterdir()))
+
+    def test_lock_is_free_after_exit_and_new_start_passes(self) -> None:
+        self.start_player()
+        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=3.0))
+        self.played(1)
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        self.start_player()
+        self.drop(self.sentence(uuid.uuid4().hex, "bbbbbb", 0))
+        names = self.played(2)  # недоигранное aaaaaa вернулось в inbox/ и играет снова
+        self.assertTrue(names[0].endswith("aaaaaa_s0.wav") and names[1].endswith("bbbbbb_s0.wav"))
+
+    def test_stop_without_player_exits_0_silently(self) -> None:
+        result = self.run_bin("stop")
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+
+    def test_stop_while_playing_logs_and_silences_until_next_play(self) -> None:
+        session = uuid.uuid4().hex
+        self.start_player()
+        self.drop(self.sentence(session, "aaaaaa", 0, seconds=5.0))
+        self.drop(self.sentence(session, "bbbbbb", 0))
+        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
+        result = self.run_bin("stop")
+        self.assertEqual(0, result.returncode)
+        self.next_line("stop requested")
+        self.assert_quiet()
+        self.assertIsNone(self.proc.poll())
+
+    def test_bin_works_from_other_cwd_and_through_symlink(self) -> None:
+        link = self.tmp / "tts-player-link"
+        link.symlink_to(BIN)
+        result = subprocess.run([str(link), "stop"], cwd=self.tmp, env=self.env(),
+                                capture_output=True, text=True, timeout=WAIT)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+
+    def test_tray_conflicts(self) -> None:
+        for extra in ("--show", "--no-gui"):
+            result = subprocess.run(
+                [sys.executable, "-m", "tts_player", "--tray", extra],
+                cwd=ROOT, env=self.env(), capture_output=True, text=True, timeout=WAIT)
+            self.assertEqual(2, result.returncode, extra)
+
+
 if __name__ == "__main__":
     unittest.main()
