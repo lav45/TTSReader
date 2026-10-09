@@ -956,6 +956,63 @@ class PlayerPrefsTest(PlayerCase):
         self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
+    def stop_on_bb_manually(self, tail: int = 5) -> None:
+        """Без автовоспроизведения доиграно aa: текущее — bb, не начатое (stopped на 0)."""
+        self.manual(tail)
+        self.start_with(A0, B0, C0)
+        self.player.toggle_play_pause()
+        self.finish()
+        self.assertEqual(("stopped", "bb"), (self.state().status, self.token()))
+
+    def heard(self) -> dict[str, bool]:
+        return {m.token: m.heard for m in self.state().messages}
+
+    def test_next_from_unplayed_current_keeps_it_unheard_and_out_of_tail(self) -> None:
+        self.stop_on_bb_manually(tail=1)
+        bb = self.state().current
+        self.player.next()
+        self.assertEqual(("playing", "cc"), (self.state().status, self.token()))
+        self.assertEqual({"bb": False, "cc": False}, self.heard())
+        self.assertFalse(self.player._queue.is_started(bb))
+        self.player.shutdown()
+        self.assertEqual(sorted([B0, C0]), sorted(p.name for p in self.inbox_dir.iterdir()))
+
+    def test_prev_from_unplayed_current_returns_it_to_inbox(self) -> None:
+        self.stop_on_bb_manually()
+        bb = self.state().current
+        self.player.prev()
+        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertFalse(bb.heard)
+        self.assertFalse(self.player._queue.is_started(bb))
+        self.player.shutdown()
+        self.assertEqual(sorted([B0, C0]), sorted(p.name for p in self.inbox_dir.iterdir()))
+
+    def test_click_from_unplayed_current_keeps_it_unheard(self) -> None:
+        self.stop_on_bb_manually()
+        bb = self.state().current
+        self.player.play_message(self.state().messages[2])
+        self.assertEqual(("playing", "cc"), (self.state().status, self.token()))
+        self.assertFalse(bb.heard)
+        self.assertFalse(self.player._queue.is_started(bb))
+        self.player.shutdown()
+        self.assertEqual(sorted([B0, C0]), sorted(p.name for p in self.inbox_dir.iterdir()))
+
+    def test_play_pause_after_joined_longer_than_sentences_plays_new(self) -> None:
+        """Склейка длиннее предложений (в пределах допуска): курсор доигранного — в её конце."""
+        self.manual()
+        self.start_with(A0, A1)
+        self.player.toggle_play_pause()
+        self.finish()
+        self.finish()
+        self.player._on_entry(self.joined(1.04))
+        state = self.state()
+        self.assertEqual("stopped", state.status)
+        self.assertAlmostEqual(1.04, state.position_s)
+        self.arrive(B0)
+        self.player.toggle_play_pause()
+        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
+
     def test_manual_new_message_in_idle_only_appears_in_list(self) -> None:
         self.manual()
         self.player.start()

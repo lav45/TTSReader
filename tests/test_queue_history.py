@@ -31,7 +31,7 @@ class QueueHistoryTest(unittest.TestCase):
         self.history = root / "history"
         for d in (self.dir, self.store, self.history):
             d.mkdir()
-        self.queue = MessageQueue()
+        self.queue = MessageQueue(tail=5)
 
     def add(self, recv_ns, seconds, token="t1", index=0, session="s1"):
         path = self.dir / f"{session}-{token}-{index}-{recv_ns}.wav"

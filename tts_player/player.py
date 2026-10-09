@@ -59,7 +59,8 @@ class Player:
     def __init__(self, runtime_dir: Path, audio_sink: str | None,
                  history_dir: Path | None, history_db: Path | None) -> None:
         self.on_change: Callable[[PlayerState], None] = lambda state: None
-        self._queue = MessageQueue()
+        defaults = Prefs()
+        self._queue = MessageQueue(defaults.tail)
         self._playback = Playback(audio_sink)
         self._playback.on_finished = self._on_finished
         self._playback.on_error = self._on_error
@@ -80,7 +81,7 @@ class Player:
         self._sentence: Sentence | None = None
         self._output_down = False
         self._retry_id = 0
-        self._autoplay = Prefs().autoplay
+        self._autoplay = defaults.autoplay
 
     def apply_prefs(self, prefs: Prefs) -> None:
         """Настройки плеера: хвост очереди и автовоспроизведение; играющее не трогается."""
@@ -217,8 +218,8 @@ class Player:
 
     def play_message(self, message: Message) -> None:
         """Клик по строке списка: сообщение становится текущим и играет с начала, из любого
-        статуса. Покинутое прослушано, только если завершено (как у next/prev); клик по
-        текущему и по вытесненному из очереди сообщению ничего не меняет."""
+        статуса. Покинутое прослушано, только если начато и завершено (как у next/prev);
+        клик по текущему и по вытесненному из очереди сообщению ничего не меняет."""
         if not any(message is queued for queued in self._queue.messages):
             return
         current = self._current
@@ -338,6 +339,8 @@ class Player:
         if not self._queue.is_complete(current):
             return  # ждём предложение: статус playing, звук молчит
         self._queue.mark_heard(current)
+        # склейка, привязанная после конца по предложениям, может быть длиннее их суммы
+        self._position = self._queue.length(current)
         if not self._autoplay:
             self._stop_after(current)
             return
@@ -359,10 +362,11 @@ class Player:
         self._position = 0.0
 
     def _leave(self, message: Message) -> None:
-        """Сообщение покинуто по next/prev: звук стоп; прослушанным считается только
-        завершённое — у растущего ещё придут предложения."""
+        """Сообщение покинуто по next/prev/клику: звук стоп; прослушанным считается только
+        начатое и завершённое — у растущего ещё придут предложения, а текущее, ставшее им
+        без звука (конец сообщения без автовоспроизведения), не звучало."""
         self._halt()
-        if self._queue.is_complete(message):
+        if self._queue.is_started(message) and self._queue.is_complete(message):
             self._queue.mark_heard(message)
 
     def _begin(self, message: Message) -> None:

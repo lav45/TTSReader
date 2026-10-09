@@ -30,7 +30,7 @@ class MessageQueue:
     """
     DURATION_TOLERANCE_S = 0.05
 
-    def __init__(self, tail: int = 5) -> None:
+    def __init__(self, tail: int) -> None:
         self.tail = tail
         self._forget()
 
@@ -90,6 +90,10 @@ class MessageQueue:
         self._started.append(message)
         while len(self._started) > limit:
             self._drop(self._started.pop(0))
+
+    def is_started(self, message: Message) -> bool:
+        """Сообщение начато и ещё в хвосте (не вытеснено, не забыто)."""
+        return message in self._started
 
     def mark_heard(self, message: Message) -> None:
         message.heard = True

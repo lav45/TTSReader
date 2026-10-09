@@ -13,7 +13,7 @@ class MessageQueueTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
-        self.queue = MessageQueue()
+        self.queue = MessageQueue(tail=5)
 
     def sentence(self, recv_ns, token="t1", index=0, session="s1"):
         path = self.dir / f"{session}-{token}-{index}-{recv_ns}.wav"
@@ -154,8 +154,22 @@ class MessageQueueTest(unittest.TestCase):
     def start_token(self, token):
         self.queue.start(next(m for m in self.queue.messages if m.token == token))
 
-    def test_default_tail_is_five(self):
-        self.assertEqual(5, self.queue.tail)
+    def test_is_started_only_after_start(self):
+        self.queue.add(self.sentence(1, token="t1"))
+        message = self.queue.messages[0]
+        self.assertFalse(self.queue.is_started(message))
+        self.queue.start(message)
+        self.assertTrue(self.queue.is_started(message))
+
+    def test_evicted_message_is_not_started(self):
+        self.queue.tail = 1
+        self.start_messages(2)
+        first = self.queue.messages[0]
+        self.assertTrue(self.queue.is_started(first))
+        self.queue.add(self.sentence(9, token="t9"))
+        evicted = first
+        self.start_token("t9")
+        self.assertFalse(self.queue.is_started(evicted))
 
     def test_smaller_tail_shrinks_by_one_per_start(self):
         """tail 5 → 2 при пяти начатых: каждый start уменьшает хвост на одно сообщение,
