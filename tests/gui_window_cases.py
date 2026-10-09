@@ -73,6 +73,9 @@ class FakePlayer:
     def clear(self) -> None:
         self.calls.append(("clear",))
 
+    def play_message(self, message: Message) -> None:
+        self.calls.append(("play_message", message))
+
 
 class FakeSettings:
     """Контракт DaemonSettings для окна: load() и save(); вызовы записываются.
@@ -128,6 +131,29 @@ class PlayerWindowTest(unittest.TestCase):
             self.player.calls.clear()
             button.clicked()
             self.assertEqual([(call,)], self.player.calls, call)
+
+    def test_row_activation_plays_that_message(self) -> None:
+        w = self.window
+        self.assertTrue(w.message_list.get_activate_on_single_click())
+        w.message_list.get_row_at_index(1).activate()
+        self.assertEqual(1, len(self.player.calls))
+        name, played = self.player.calls[0]
+        self.assertEqual("play_message", name)
+        self.assertIs(self.b, played)
+
+    def test_row_activation_after_rebuild_uses_new_snapshot(self) -> None:
+        w = self.window
+        self.player.change(state("playing", self.b, [self.c, self.a, self.b], 3.0))
+        w.message_list.emit("row-activated", w.message_list.get_row_at_index(0))
+        self.assertEqual(1, len(self.player.calls))
+        self.assertIs(self.c, self.player.calls[0][1])
+
+    def test_row_activation_with_equal_rows_uses_latest_message_objects(self) -> None:
+        w = self.window
+        a2, b2, c2 = message("a"), message("b"), message("c")
+        self.player.change(state("playing", b2, [a2, b2, c2], 4.0))
+        w.message_list.get_row_at_index(2).activate()
+        self.assertIs(c2, self.player.calls[0][1])
 
     def test_user_slider_change_seeks(self) -> None:
         self.window.scale.emit("change-value", Gtk.ScrollType.JUMP, 7.0)

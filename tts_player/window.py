@@ -10,6 +10,7 @@ gi.require_version("XApp", "1.0")
 from gi.repository import Gdk, GLib, Gtk, Pango, XApp  # noqa: E402
 
 from tts_player.daemon_settings import DaemonSettings, SettingsError, Voice  # noqa: E402
+from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.view import (MessageRow, current_title, next_enabled, pause_enabled,  # noqa: E402
                              pause_label, play_stop_label, position_label, prev_enabled, rows)
@@ -41,6 +42,9 @@ class PlayerWindow(Gtk.Window):
         self._dragging = False
         self._drag_value: float | None = None  # change-value за перетаскивание; None — не двигали
         self._shown_rows: list[MessageRow] | None = None
+        # сообщения последнего состояния: строки равны по тексту, а объекты Message могут быть
+        # новыми, поэтому снимок обновляется на каждом состоянии, а не только при перестройке
+        self._shown_messages: list[Message] = []
         self.set_default_size(420, 360)
 
         self.title_label = Gtk.Label(xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
@@ -68,6 +72,8 @@ class PlayerWindow(Gtk.Window):
         buttons.pack_end(self.position_label_widget, False, False, 0)
 
         self.message_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.message_list.set_activate_on_single_click(True)
+        self.message_list.connect("row-activated", self._on_row_activated)
         scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.add(self.message_list)
 
@@ -200,7 +206,12 @@ class PlayerWindow(Gtk.Window):
             # set_range/set_value не шлют change-value: перемотки от обновления нет
             self.scale.set_range(0.0, state.length_s)
             self.scale.set_value(state.position_s)
+        self._shown_messages = state.messages
         self._show_rows(rows(state))
+
+    def _on_row_activated(self, _list, row: Gtk.ListBoxRow) -> None:
+        """Клик по строке: сообщение i-й строки играет с начала."""
+        self._player.play_message(self._shown_messages[row.get_index()])
 
     def _show_rows(self, items: list[MessageRow]) -> None:
         """Список перестраивается, только когда строки изменились, а не на каждый тик."""
