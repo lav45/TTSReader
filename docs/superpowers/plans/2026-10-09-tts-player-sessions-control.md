@@ -6,7 +6,7 @@
 `$XDG_RUNTIME_DIR/tts-player/control/`, плеер забирает его и меняет список сессий
 (`sessions.json`).
 
-**Architecture:** пишущая сторона — подкоманды `session add`/`remove` в `tts_player/__main__.py`
+**Architecture:** пишущая сторона — подкоманды `session add`/`remove` в лёгком `tts_player/session_command.py`
 (рядом с `session has` прошлого среза): сверяются с `sessions.json` через `read_sessions` и
 атомарно кладут JSON-запрос. Читающая — новый `tts_player/control.py` (`ControlRequests`): монитор
 каталога, как `hook_tasks.py`, отдаёт запросы плееру; `Player.add_session`/`remove_session`
@@ -49,7 +49,8 @@
 
 | Файл | Кто создаёт / кто вызывает | Назначение |
 |---|---|---|
-| `tts_player/__main__.py` | `bin/tts-player` | `session add`/`remove`; `Sessions` в плеер |
+| `tts_player/session_command.py` | `bin/tts-player`, `__main__.py` | `session add`/`remove`/`has` без импорта плеера |
+| `tts_player/__main__.py`, `bin/tts-player` | `bin/tts-player` | ветка `session`; `Sessions` в плеер |
 | `tts_player/control.py` | создаёт `player.py` | забор запросов `control/` |
 | `tts_player/player.py` | `__main__.py` | `add_session`/`remove_session`, старт монитора |
 | `tests/test_session_command.py`, `tests/test_control.py`, `tests/test_player_e2e.py` | `unittest discover` | CLI; монитор; стык через процесс |
@@ -62,8 +63,13 @@
 **Goal:** `session add`/`remove` отвечают по `sessions.json` и атомарно пишут запрос в `control/`.
 
 **Files:**
-- Modify: `tts_player/__main__.py`
+- Create: `tts_player/session_command.py` (вся подкоманда `session`: `add`/`remove` и перенесённый `has`)
+- Modify: `tts_player/__main__.py` (ветка `session` зовёт `session_command.main`), `bin/tts-player` (`session` — сразу `python3 -m tts_player.session_command`, без импорта плеера)
 - Test: `tests/test_session_command.py`
+
+Почему отдельный модуль: гейт зовёт `session has` на каждом хуке Claude Code, а импорт
+`tts_player.__main__` тянет `gi`/GLib и весь плеер (~60 мс из ~80–140, замер финального ревью
+среза (15)). `session_command` импортирует только `instance`, `sessions` и стандартную библиотеку.
 
 **Contract:** CLI, пишущая сторона (14)
 
@@ -94,16 +100,18 @@ stdout remove: «сессия передана плееру на удалени�
 - [ ] `control/` нет — создаётся командой
 - [ ] `session add u1` (без cwd), `session remove` → exit 2 и usage
 - [ ] `has` прошлого среза ведёт себя по-прежнему (его тесты зелёные)
+- [ ] `python3 -c "import sys, tts_player.session_command; assert 'gi' not in sys.modules"` — exit 0; `bin/tts-player session …` идёт через `tts_player.session_command`
+- [ ] usage называет все подкоманды (`add <uuid> <cwd>`, `remove <uuid>`, `has <uuid>`) и стоит константой в начале модуля
 
 **Verify:** `python3 -m unittest tests.test_session_command -v` → `OK`
 
 **Steps:**
 
 - [ ] **Step 1: Failing acceptance** — `bin/tts-player session add u1 /p/TTSReader` подпроцессом во временном runtime с взятой блокировкой; ждём файл запроса. Падает: подкоманды нет (exit 2).
-- [ ] **Step 2: Реализовать add/remove** — сверка со списком через `read_sessions` (битый файл — как пустой список); запись через `.tmp` + `os.replace`; ветка `has` не меняется.
+- [ ] **Step 2: Реализовать add/remove** — в новом `session_command.py`, туда же перенести `has` из `__main__.py` без изменения поведения; сверка со списком через `read_sessions` (битый файл — как пустой список); запись через `.tmp` + `os.replace`; `bin/tts-player` направляет `session` в лёгкий модуль (комментарий его шапки обобщить: запуск плеера и подкоманды).
 - [ ] **Step 3: Остальные критерии** — тест на критерий, каждый сначала красный.
 - [ ] **Step 4: Verify** — команда выше, затем весь набор `python3 -m unittest discover -s tests`.
-- [ ] **Step 5: Commit** — `tts_player/__main__.py tests/test_session_command.py`.
+- [ ] **Step 5: Commit** — `tts_player/session_command.py tts_player/__main__.py bin/tts-player tests/test_session_command.py`.
 
 ---
 
