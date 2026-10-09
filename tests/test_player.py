@@ -234,6 +234,15 @@ class PlayerCase(unittest.TestCase):
         self.player.on_change = self.states.append
         self.player.start()
 
+    def play_first(self, tail: int | None = None) -> None:
+        """Клик по первому сообщению и play/pause: сам плеер после старта ничего не начинает,
+        а play/pause без текущего играет последнее.
+        tail — после клика: с фокусом очередь не режется, по нему — только хвост начатых."""
+        self.player.play_message(self.state().messages[0])
+        if tail is not None:
+            self.player.apply_prefs(Prefs(tail=tail))
+        self.player.toggle_play_pause()
+
     def task(self) -> str | None:
         """id задачи демона текущего сообщения (последней, если их несколько)."""
         current = self.state().current
@@ -320,7 +329,9 @@ class PlayerHistoryTest(PlayerCase):
     def test_store_is_taken_from_inbox(self) -> None:
         self.assertEqual(self.store_dir, self.player._inbox.store)
 
-    def test_shutdown_saves_messages_and_restart_plays_unheard(self) -> None:
+    def test_shutdown_saves_messages_and_restart_waits_then_plays_unheard(self) -> None:
+        """Перезапуск: сообщения восстановлены, сам плеер ничего не играет (idle, текущего
+        нет); щелчок по первому и play — непрослушанные играют по порядку."""
         self.start_with(A0, A1, B0)
         self.assertEqual([A0], self.playback.played)
         self.playback.at = 0.3
@@ -331,6 +342,9 @@ class PlayerHistoryTest(PlayerCase):
         self.assertFalse(self.saved_file().exists())
         self.assertEqual(["aa", "bb"], [self.task_of(m) for m in self.state().messages])
         self.assertEqual(["text aa", "text bb"], [m.text for m in self.state().messages])
+        self.assertEqual(("idle", None, []),
+                         (self.state().status, self.state().current, self.playback.starts))
+        self.play_first()
         self.assertEqual([(A0, 0.0)], self.playback.starts)
         self.finish()
         self.finish()
@@ -346,6 +360,8 @@ class PlayerHistoryTest(PlayerCase):
         self.player.shutdown()
         self.assertEqual(sorted([A1, B0]), sorted(p.name for p in self.store_dir.iterdir()))
         self.restart()
+        self.assertEqual([], self.playback.starts)
+        self.play_first()
         self.assertEqual([(A1, 0.0)], self.playback.starts)
         self.finish()
         self.assertEqual(B0, self.playback.played[-1])
@@ -970,14 +986,6 @@ class PlayerPrefsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.assertEqual(("idle", None), (self.state().status, self.state().current))
         self.assertEqual([], self.playback.starts)
-
-    def play_first(self, tail: int | None = None) -> None:
-        """Клик по первому сообщению и play/pause (без текущего play/pause играл бы последнее).
-        tail — после клика: с фокусом очередь не режется, по нему — только хвост начатых."""
-        self.player.play_message(self.state().messages[0])
-        if tail is not None:
-            self.player.apply_prefs(Prefs(tail=tail))
-        self.player.toggle_play_pause()
 
     def test_manual_end_of_message_stops_on_following_at_start(self) -> None:
         self.manual()
@@ -2172,8 +2180,7 @@ class PlayerSessionsTest(PlayerCase):
         self.assertNotIn("C", self.player._queues)
         self.assertFalse(c_file.exists())
         self.assertTrue(self.path(A0).exists())
-        self.assertEqual([A0], self.playback.played)
-
+        self.assertEqual(("idle", []), (self.state().status, self.playback.played))
 
     @staticmethod
     def s_name(index: int, task: str) -> str:
@@ -2191,6 +2198,20 @@ class PlayerSessionsTest(PlayerCase):
 
     def texts(self, session: str) -> list[str]:
         return [m.text for m in self.messages(session)]
+
+    def end_current(self) -> None:
+        """Склейка S другой длины: текущее, доигранное по предложениям, кончается без неё."""
+        path = self.history_dir / JOINED
+        write_wav(path, 3.0)
+        self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "S", "proj", 3.0))
+
+    def finished_aa(self, tail: int) -> None:
+        """S открыта, tail задан, aa доиграно: idle, текущее — aa."""
+        self.player.apply_prefs(Prefs(tail=tail))
+        self.start_with(A0)
+        self.finish()
+        self.end_current()
+        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
 
     def test_closed_session_keeps_last_tail_answers(self) -> None:
         """Закрытая B, tail 2, 4 ответа: остаются 2 последних; у озвученного старого удалены
@@ -2219,16 +2240,70 @@ class PlayerSessionsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.finish()
         self.assertEqual(("playing", 4), (self.state().status, len(self.messages("S"))))
-        path = self.history_dir / JOINED
-        write_wav(path, 3.0)  # другая длина: конец без склейки
-        self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "S", "proj", 3.0))
+        self.end_current()
         self.assertEqual(("idle", last), (self.state().status, self.state().current))
         self.assertEqual(["text e2", "text e3"], self.texts("S"))
         self.assertEqual([False, False, True, True],
                          [p.exists() for p in (self.path(A0), s1, s2, s3)])
-        self.announce("e4")
+        self.arrive(self.s_name(4, "e4"))
+        self.assertEqual(["text e2", "text e3", "text e4"], self.texts("S"))
+        self.finish()
+        self.end_current()
+        self.assertEqual(("idle", "e4"), (self.state().status, self.task()))
         self.assertEqual(["text e3", "text e4"], self.texts("S"))
-        self.assertIs(last, self.state().current)
+
+    def test_tail_one_new_answer_after_finished_current_plays(self) -> None:
+        """tail 1: доигранное текущее места не занимает — новый ответ остаётся и играет."""
+        self.finished_aa(tail=1)
+        self.announce("bb")
+        self.assertEqual(["text aa", "text bb"], self.texts("S"))
+        self.arrive(B0)
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
+        self.assertEqual([A0, B0], self.playback.played)
+        self.finish()
+        self.end_current()
+        self.assertEqual(["text bb"], self.texts("S"))
+
+    def test_deferred_answer_after_finished_current_keeps_both(self) -> None:
+        """tail 1, звучит свой текст: ответ отложен (фокуса нет), но и он, и старшее текущее
+        остаются — текущее сверх tail."""
+        self.finished_aa(tail=1)
+        self.player.hold()
+        self.hook("ab", "S")
+        self.assertEqual(["text aa", "text ab"], self.texts("S"))
+        self.assertIs(self.messages("S")[0], self.state().current)
+
+    def test_two_answers_before_first_sentence_both_play_in_order(self) -> None:
+        """tail 2, текущее доиграно, два ответа подряд до первого предложения: остаются оба и
+        играют по порядку."""
+        self.finished_aa(tail=2)
+        self.announce("e1")
+        self.announce("e2")
+        self.assertEqual(["text aa", "text e1", "text e2"], self.texts("S"))
+        e1, e2 = self.s_name(1, "e1"), self.s_name(2, "e2")
+        self.arrive(e1)
+        self.arrive(e2)
+        self.finish()
+        self.assertEqual([A0, e1, e2], self.playback.played)
+
+    def test_burst_of_answers_in_idle_open_session_is_kept_then_trimmed(self) -> None:
+        """tail 2, три ответа подряд в открытой сессии без текущего: ушедшие в синтез и ждущие
+        автоперехода — фокус, остаются все и играют по порядку; прослушаны, idle — до tail."""
+        self.player.apply_prefs(Prefs(tail=2))
+        self.player.start()
+        for task in ("e1", "e2", "e3"):
+            self.announce(task)
+        self.assertEqual(["text e1", "text e2", "text e3"], self.texts("S"))
+        names = [self.s_name(i, task) for i, task in enumerate(("e1", "e2", "e3"), start=1)]
+        for name in names:
+            self.arrive(name)
+        self.finish()
+        self.finish()
+        self.finish()
+        self.end_current()
+        self.assertEqual(names, self.playback.played)
+        self.assertEqual(("idle", "e3"), (self.state().status, self.task()))
+        self.assertEqual(["text e2", "text e3"], self.texts("S"))
 
     def test_switching_folders_trims_left_and_opened_queues(self) -> None:
         """Ушли из S на паузе — она закрыта, без фокуса: режется. Открытая B (накопленное
@@ -2253,13 +2328,32 @@ class PlayerSessionsTest(PlayerCase):
                          [p.exists() for p in (self.path(A0), s1, s2, s3)])
 
     def test_start_trims_restored_queues_to_tail(self) -> None:
-        """messages.json: у S 7 сообщений при tail 5 — после старта 5 последних."""
+        """messages.json: у закрытой S 7 сообщений при tail 5 — после старта 5 последних."""
         tasks = [f"e{i}" for i in range(1, 7)]
         self.paused_with(*tasks)
         self.assertEqual(7, len(self.messages("S")))
         self.player.shutdown()
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()
+        sessions.deselect()
         self.restart()
         self.assertEqual([f"text {task}" for task in tasks[1:]], self.texts("S"))
+
+    def test_start_restores_open_session_waiting_then_new_answer_plays(self) -> None:
+        """Открытая S восстановлена с 7 непрослушанными (синтез завершён) при tail 5: сама
+        ничего не играет — idle без фокуса, режется до 5; новый ответ играет сам."""
+        tasks = [f"e{i}" for i in range(1, 7)]
+        self.paused_with(*tasks)
+        self.end_current()  # склейка привязалась к последнему: синтез завершён
+        self.player.shutdown()
+        self.restart()
+        state = self.state()
+        self.assertEqual(("S", "idle", None, []),
+                         (state.active, state.status, state.current, self.playback.starts))
+        self.assertEqual([f"text {task}" for task in tasks[1:]], self.texts("S"))
+        self.arrive(self.s_name(7, "e7"))
+        self.assertEqual(("playing", "e7"), (self.state().status, self.task()))
+        self.assertEqual([self.s_name(7, "e7")], self.playback.played)
 
     def test_smaller_tail_trims_unfocused_queues_at_once(self) -> None:
         """tail 5 → 2: закрытая B режется сразу, S на паузе (фокус) — нет."""

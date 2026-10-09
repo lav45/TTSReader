@@ -77,7 +77,7 @@ class MessageQueue:
 
     Очередь не знает, что играет: текущее сообщение и позицию держит Player. Очередь
     связывает предложения с сообщениями по id задач демона (link), отвечает на вопросы о
-    порядке (following/preceding/first_unheard), длине и завершённости сообщения, отображает
+    порядке (following/preceding), длине и завершённости сообщения, отображает
     позицию в файл (locate) и владеет файлами своих сообщений: удаляет их при вытеснении из
     хвоста, обрезке (trim), в forget_audio() и clear(); на выходе плеера отдаёт их вместе с
     сообщениями снимком (release), на старте принимает снимок прошлого запуска (restore).
@@ -162,9 +162,6 @@ class MessageQueue:
         index = self._messages.index(message)
         return self._messages[index - 1] if index > 0 else None
 
-    def first_unheard(self) -> Message | None:
-        return next((m for m in self._messages if not m.heard), None)
-
     def start(self, message: Message) -> None:
         """Сообщение начато: входит в хвост; лишние начатые удаляются, самые старые первыми.
 
@@ -184,14 +181,13 @@ class MessageQueue:
             self._drop(self._started[0])
 
     def trim(self, keep: Message | None = None) -> None:
-        """Оставляет не больше tail сообщений: самые старые — любые, начатые и нет,
-        прослушанные и отложенные — удаляются первыми, с файлами, как при вытеснении из
-        хвоста. keep не удаляется: вместо него — следующее по старшинству."""
-        excess = len(self._messages) - self.tail
-        if excess <= 0:
-            return
-        for message in [m for m in self._messages if m is not keep][:excess]:
-            self._drop(message)
+        """Оставляет tail последних сообщений: старшие — любые, начатые и нет, прослушанные и
+        отложенные — удаляются с файлами, как при вытеснении из хвоста. keep (текущее) места
+        в tail не занимает: старше них — остаётся сверх tail."""
+        older = self._messages[:max(len(self._messages) - self.tail, 0)]
+        for message in older:
+            if message is not keep:
+                self._drop(message)
 
     def is_started(self, message: Message) -> bool:
         """Сообщение начато и ещё в хвосте (не вытеснено, не забыто)."""
