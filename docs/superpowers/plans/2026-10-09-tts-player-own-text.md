@@ -26,7 +26,9 @@
 - `claude_code_tts.bridge.split_sentences(text) -> list[str]` — тем же разбиением режет сообщения
   демон (`daemon.py:805`) — проверено по коду.
 - `active_persona` берётся из `claude_code_tts.config.load_raw_config()` — проверено по коду.
-- Срезы (6) и (9) влиты: ряд служебных кнопок наверху, `Player.toggle_play_pause`, приглушение.
+- Срезы (6) и (9) влиты: ряд служебных кнопок наверху, `Player.toggle_play_pause`, приглушение
+  (`tts_player/ducking.py`, `Player._follow_status`). Свой текст приглушает чужие звуки так же —
+  моё решение при старте среза: пользователь не обсуждал, но слышит «плеер говорит».
 
 ## Global Constraints
 
@@ -136,6 +138,9 @@ toggle_play_pause:
 конец  последнее предложение доиграло и complete → stopped, позиция 0
        доиграло готовое, а синтез идёт → ждёт следующего (status playing)
 ошибка {"error"} / exit ≠ 0 / процесс не запустился → status error, error = текст; готовое можно доиграть
+приглушение: пока свой текст в playing — чужие потоки приглушены так же, как при игре главного
+       плеера (общий Ducker; главный в hold на паузе своё приглушение снимает, TextSpeaker
+       включает своё); выход из playing → restore
 каталог <runtime>/text/<n>/, n растёт; удаляется при set_text с другим текстом и в shutdown
 ```
 
@@ -147,6 +152,7 @@ toggle_play_pause:
 - [ ] `{"error"}` и exit 2 → `status error` с текстом; уже готовое предложение играет
 - [ ] пауза и конец вызывают `release`; `shutdown` убивает процесс, удаляет каталог и вызывает `release`
 - [ ] `cleanup_leftovers` удаляет `<runtime>/text/*` и не трогает `inbox/`
+- [ ] на заглушке Ducker: play своего текста → duck(prefs.duck); пауза/конец/shutdown → restore
 
 **Verify:** `python3 -m unittest tests.test_text_speaker tests.test_player -v` → `OK`
 
