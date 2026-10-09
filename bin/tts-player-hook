@@ -1,25 +1,28 @@
 #!/bin/bash
 #
-# tts-player-hook - включает и выключает плеер вместе с озвучкой сессии.
+# tts-player-hook - поднимает демон озвучки и плеер и регистрирует сессию Claude Code.
 #
 # Демон claude-tts ищет проигрыватель по имени paplay через PATH; обёртка
 # daemon-bin/paplay кладёт звук в буфер плеера, но работает, только если daemon-bin
-# стоит первым в PATH демона. Зовёт tts-toggle.sh: /tts-on -> on, /tts-off -> off.
+# стоит первым в PATH демона. Зовёт tts-toggle.sh на /tts-on.
 #
-# on:  демона нет (нет живого PID в ~/.claude-tts/daemon.pid) -> claude-tts daemon start;
-#      демон жив, а первый элемент PATH в /proc/<pid>/environ не daemon-bin ->
-#      claude-tts daemon restart (до ~15 с, а у хука 5 с, поэтому отвязан через setsid,
-#      вывод в $XDG_RUNTIME_DIR/tts-player/daemon-restart.log);
-#      демон жив с daemon-bin первым -> не трогать.
-#      PID из файла принимается, только если в /proc/<pid>/cmdline есть claude-tts или
-#      claude_code_tts, иначе демона нет (старт, не перезапуск).
-#      Затем плеер: не запущен -> tts-player --tray отвязанным процессом (вывод в
-#      player.log); уже запущен (проба player.lock без записи) -> tts-player play,
-#      продолжает остановленное /tts-off. Хук не ждёт плеер.
-# off: tts-player stop - останавливает текущий звук, сам плеер остаётся.
+# Вызов: tts-player-hook on <uuid> <cwd>; любые другие аргументы - usage, код 1,
+# ничего не запускается.
 #
-# Вызов: tts-player-hook on|off. Код 0; 1 - нет claude-tts или tts-player в PATH,
-# нет XDG_RUNTIME_DIR, неверный аргумент (сообщение в stderr).
+# Демона нет (нет живого PID в ~/.claude-tts/daemon.pid) -> claude-tts daemon start;
+# демон жив, а первый элемент PATH в /proc/<pid>/environ не daemon-bin ->
+# claude-tts daemon restart (до ~15 с, а у хука 5 с, поэтому отвязан через setsid,
+# вывод в $XDG_RUNTIME_DIR/tts-player/daemon-restart.log);
+# демон жив с daemon-bin первым -> не трогать.
+# PID из файла принимается, только если в /proc/<pid>/cmdline есть claude-tts или
+# claude_code_tts, иначе демона нет (старт, не перезапуск).
+# Затем плеер: не запущен -> tts-player --tray отвязанным процессом (вывод в
+# player.log); уже запущен (проба player.lock без записи) -> не трогать. Хук не ждёт плеер.
+# Затем tts-player session add <uuid> <cwd>: сессия попадает в список плеера, вывод
+# команды идёт в stdout хука.
+#
+# Код 0; 1 - нет claude-tts или tts-player в PATH, нет XDG_RUNTIME_DIR, неверные аргументы
+# (сообщение в stderr).
 # Только для тестов: TTS_HOOK_PROC (вместо /proc), TTS_HOOK_HOME (вместо $HOME).
 
 set -u
@@ -28,6 +31,12 @@ fail() {
     echo "tts-player-hook: $1" >&2
     exit 1
 }
+
+# Аргументы проверяются до всего остального: неверный вызов ничего не запускает.
+if [ "$#" -ne 3 ] || [ "$1" != "on" ]; then
+    fail "Usage: tts-player-hook on <uuid> <cwd>"
+fi
+shift
 
 DAEMON_BIN="$(dirname "$(dirname "$(readlink -f "$0")")")/daemon-bin"
 PROC="${TTS_HOOK_PROC:-/proc}"
@@ -75,6 +84,7 @@ daemon_first_path() {
 }
 
 on() {
+    # $1 - uuid сессии, $2 - cwd
     command -v claude-tts > /dev/null || fail "claude-tts не найден в PATH"
     mkdir -p "$STATE" || fail "не удалось создать $STATE"
 
@@ -100,8 +110,7 @@ on() {
     fi
 
     if player_running; then
-        tts-player play < /dev/null > /dev/null 2>&1
-        echo "плеер уже запущен, воспроизведение продолжено"
+        echo "плеер уже запущен"
     else
         setsid tts-player --tray < /dev/null >> "$STATE/player.log" 2>&1 &
         echo "запуск плеера отдан (ошибки - $STATE/player.log)"
@@ -109,21 +118,7 @@ on() {
     if [ "$restarted" = 1 ]; then
         echo "первый ответ после перезапуска может прозвучать мимо плеера - повторите /tts-on через несколько секунд"
     fi
+    tts-player session add "$1" "$2" < /dev/null
 }
 
-off() {
-    local was_running=0
-    player_running && was_running=1
-    tts-player stop < /dev/null > /dev/null 2>&1
-    if [ "$was_running" = 1 ]; then
-        echo "звук плеера остановлен"
-    else
-        echo "плеер не запущен"
-    fi
-}
-
-case "${1:-}" in
-    on) on ;;
-    off) off ;;
-    *) fail "Usage: tts-player-hook on|off" ;;
-esac
+on "$1" "$2"
