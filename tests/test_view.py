@@ -28,7 +28,7 @@ def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=()
     lengths = [0.0] * len(messages) if lengths is None else lengths
     completes = [True] * len(messages) if completes is None else completes
     return PlayerState(status, current, position_s, length_s, messages, False, lengths,
-                       completes, True, list(sessions), active)
+                       completes, list(sessions), active, [0] * len(sessions))
 
 
 def sentence(recv_s: float) -> Sentence:

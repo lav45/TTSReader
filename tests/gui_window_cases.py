@@ -42,12 +42,13 @@ def message(task: str) -> Message:
 
 
 def state(status: str, current: Message | None, messages: list[Message],
-          position_s: float = 0.0, autoplay: bool = True, sessions: tuple = (),
-          active: str | None = None) -> PlayerState:
+          position_s: float = 0.0, sessions: tuple = (),
+          active: str | None = None, counts: tuple | None = None) -> PlayerState:
     length = 0.0 if current is None else 10.0
+    counts = [0] * len(sessions) if counts is None else list(counts)
     return PlayerState(status, current, position_s, length, messages, False,
-                       [10.0] * len(messages), [True] * len(messages), autoplay,
-                       list(sessions), active)
+                       [10.0] * len(messages), [True] * len(messages),
+                       list(sessions), active, counts)
 
 
 class FakePlayer:
@@ -69,13 +70,9 @@ class FakePlayer:
         self.calls.append(("toggle_play_pause",))
 
     def apply_prefs(self, prefs: Prefs) -> None:
-        """Как Player: настройки применены, окно получает новый снимок с autoplay."""
+        """Как Player: настройки применены, окно получает новый снимок."""
         self.calls.append(("apply_prefs", prefs))
-        snapshot = self.snapshot
-        self.change(PlayerState(snapshot.status, snapshot.current, snapshot.position_s,
-                                snapshot.length_s, snapshot.messages, snapshot.output_down,
-                                snapshot.lengths, snapshot.completes, prefs.autoplay,
-                                snapshot.sessions, snapshot.active))
+        self.change(self.snapshot)
 
     def next(self) -> None:
         self.calls.append(("next",))
@@ -203,7 +200,7 @@ class PlayerWindowTest(unittest.TestCase):
         self.player = FakePlayer(state("playing", self.b, [self.a, self.b, self.c], 3.0,
                                        sessions=SESSIONS, active=SESSIONS[0].id))
         self.settings = FakeSettings(voice_settings())
-        self.prefs = FakePrefs(Prefs(tail=7, autoplay=True))
+        self.prefs = FakePrefs(Prefs(tail=7))
         self.text = FakeTextSpeaker()
         self.window = PlayerWindow(self.player, self.settings, self.prefs,
                                    self.text)
@@ -486,48 +483,6 @@ class PlayerWindowTest(unittest.TestCase):
         self.player.change(state("stopped", self.a, [self.a, self.b, self.c]))
         self.assertFalse(self.window.prev_button.get_sensitive())
 
-    def test_autoplay_button_icon_tooltip_right_in_tools_row(self) -> None:
-        w = self.window
-        button = w.autoplay_button
-        self.assertIsInstance(button, Gtk.ToggleButton)
-        self.assertFalse(button.get_label())
-        self.assertEqual("media-playlist-consecutive-symbolic", icon_name(button))
-        self.assertEqual("Автовоспроизведение", button.get_tooltip_text())
-        row = w.clear_button.get_parent()
-        self.assertIs(row, button.get_parent())
-        self.assertEqual(Gtk.PackType.END, row.child_get_property(button, "pack-type"))
-        self.assertTrue(button.get_active())
-
-    def test_autoplay_toggle_saves_prefs_and_applies(self) -> None:
-        """Остальные ключи (хвост, приглушение) — из файла, меняется только autoplay."""
-        w = self.window
-        self.prefs.loaded = Prefs(tail=7, autoplay=True, duck=45)
-        w.autoplay_button.set_active(False)
-        expected = Prefs(tail=7, autoplay=False, duck=45)
-        self.assertIn(("save", expected), self.prefs.calls)
-        self.assertEqual([("apply_prefs", expected)], self.player.calls)
-        self.assertFalse(w.autoplay_button.get_active())
-
-    def test_autoplay_follows_state_without_save(self) -> None:
-        w = self.window
-        self.player.change(state("playing", self.b, [self.a, self.b, self.c], autoplay=False))
-        self.assertFalse(w.autoplay_button.get_active())
-        self.player.change(state("playing", self.b, [self.a, self.b, self.c], autoplay=True))
-        self.assertTrue(w.autoplay_button.get_active())
-        self.assertEqual([], [call for call in self.prefs.calls if call[0] == "save"])
-        self.assertEqual([], self.player.calls)
-
-    def test_autoplay_save_error_reverts_button_and_logs(self) -> None:
-        w = self.window
-        self.prefs.save_error = SettingsError("не удалось записать settings.json")
-        with self.assertLogs("tts_player", "WARNING") as logs:
-            w.autoplay_button.set_active(False)
-        self.assertIn("не удалось записать settings.json", logs.output[0])
-        self.assertTrue(w.autoplay_button.get_active())
-        self.assertEqual([], self.player.calls)
-        saves = [call for call in self.prefs.calls if call[0] == "save"]
-        self.assertEqual(1, len(saves), "возврат кнопки не сохраняет повторно")
-
     def test_close_hides_window(self) -> None:
         self.window.show_all()
         flush()
@@ -541,7 +496,7 @@ class SettingsScreenTest(unittest.TestCase):
     def setUp(self) -> None:
         self.player = FakePlayer(state("stopped", None, []))
         self.settings = FakeSettings(voice_settings())
-        self.prefs = FakePrefs(Prefs(tail=7, autoplay=True))
+        self.prefs = FakePrefs(Prefs(tail=7))
         self.text = FakeTextSpeaker()
         self.window = PlayerWindow(self.player, self.settings, self.prefs,
                                    self.text)
@@ -642,7 +597,7 @@ class SettingsScreenTest(unittest.TestCase):
         w.settings_button.clicked()
         w.tail_spin.set_value(3)
         w.back_button.clicked()
-        self.prefs.loaded = Prefs(tail=12, autoplay=True)
+        self.prefs.loaded = Prefs(tail=12)
         w.settings_button.clicked()
         self.assertEqual(12, w.tail_spin.get_value_as_int())
 
@@ -668,7 +623,7 @@ class SettingsScreenTest(unittest.TestCase):
         w.tail_spin.set_value(9)
         w.duck_spin.set_value(55)
         w.save_button.clicked()
-        expected = Prefs(tail=9, autoplay=True, duck=55)
+        expected = Prefs(tail=9, duck=55)
         self.assertEqual(("save", expected), self.prefs.calls[-1])
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
         self.assertEqual([("load",)], self.settings.calls)
@@ -688,14 +643,14 @@ class SettingsScreenTest(unittest.TestCase):
 
     def test_save_writes_prefs_then_voice_and_stays_with_success(self) -> None:
         w = self.window
-        self.player.change(state("stopped", None, [], autoplay=False))
+        self.player.change(state("stopped", None, []))
         w.settings_button.clicked()
         w.voice_combo.set_active_id("aria")
         w.speed_spin.set_value(2.3)
         w.tail_spin.set_value(4)
         w.duck_spin.set_value(60)
         w.save_button.clicked()
-        expected = Prefs(tail=4, autoplay=False, duck=60)
+        expected = Prefs(tail=4, duck=60)
         self.assertEqual(("save", expected), self.prefs.calls[-1])
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
         self.assertEqual(("save", "aria", 2.3), self.settings.calls[-1])
@@ -722,7 +677,7 @@ class SettingsScreenTest(unittest.TestCase):
 
     def test_duck_spin_reloaded_on_each_open(self) -> None:
         w = self.window
-        self.prefs.loaded = Prefs(tail=7, autoplay=True, duck=80)
+        self.prefs.loaded = Prefs(tail=7, duck=80)
         w.settings_button.clicked()
         self.assertEqual(80, w.duck_spin.get_value_as_int())
         w.duck_spin.set_value(10)
@@ -739,10 +694,10 @@ class SettingsScreenTest(unittest.TestCase):
 
     def test_save_keeps_loaded_duck_when_untouched(self) -> None:
         w = self.window
-        self.prefs.loaded = Prefs(tail=7, autoplay=True, duck=65)
+        self.prefs.loaded = Prefs(tail=7, duck=65)
         w.settings_button.clicked()
         w.save_button.clicked()
-        self.assertEqual(Prefs(tail=7, autoplay=True, duck=65), self.prefs.calls[-1][1])
+        self.assertEqual(Prefs(tail=7, duck=65), self.prefs.calls[-1][1])
 
     def test_save_error_keeps_screen_and_shows_reason(self) -> None:
         w = self.window
@@ -808,7 +763,7 @@ class TextScreenTest(unittest.TestCase):
         self.player = FakePlayer(state("paused", None, []))
         self.text = FakeTextSpeaker()
         self.window = PlayerWindow(self.player, FakeSettings(voice_settings()),
-                                   FakePrefs(Prefs(tail=7, autoplay=True)),
+                                   FakePrefs(Prefs(tail=7)),
                                    self.text)
         self.addCleanup(self.window.destroy)
 

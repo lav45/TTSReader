@@ -85,7 +85,11 @@ class PlayerProcessCase(unittest.TestCase):
         self.daemon_queue.mkdir(parents=True)
         self.hook_queue = self.runtime / "tts-player" / "hook-home" / ".claude-tts" / "queue"
         self.task_ids: dict[str, str] = {}  # token предложений → id задачи демона
-        self.registered: set[str] = set()  # сессии, для которых положен запрос add
+        # открытая сессия прошлого запуска (sessions.json, контракт (15)): без окна сессию больше
+        # нечем открыть, а задачи закрытой в демон не уходят
+        self.session = uuid.uuid4().hex
+        self.write_sessions(self.session, [self.session])
+        self.registered: set[str] = {self.session}  # сессии, для которых положен запрос add
         self.hook_id = ""  # id последней задачи хука из hook_task()
 
     def env(self) -> dict[str, str]:
@@ -161,6 +165,12 @@ class PlayerProcessCase(unittest.TestCase):
         claude_tts.mkdir(exist_ok=True)
         (claude_tts / "playback.json").write_text(json.dumps({"current_message": {
             "id": task_id, "source": "tts-player", "session_id": "s", "project": "p"}}))
+
+    def write_sessions(self, active: str | None, ids: list[str]) -> None:
+        path = self.runtime / "tts-player" / "sessions.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"active": active,
+                                    "sessions": [{"id": i, "project": "proj"} for i in ids]}))
 
     def register(self, session: str) -> None:
         """Запрос `session add` в control/, как его пишет CLI (.tmp, затем rename): плеер
@@ -240,7 +250,7 @@ class PlayerProcessCase(unittest.TestCase):
 
 class PlayerE2ETest(PlayerProcessCase):
     def test_messages_play_in_order(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         paths = [self.sentence(session, "aaaaaa", 0), self.sentence(session, "aaaaaa", 1),
                  self.sentence(session, "bbbbbb", 0)]
@@ -253,7 +263,7 @@ class PlayerE2ETest(PlayerProcessCase):
             [n[n.index("_tts_queue"):] for n in names])
 
     def test_late_sentence_of_finished_message_is_not_played(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         self.drop(self.sentence(session, "aaaaaa", 0))
         self.played(1)
@@ -268,7 +278,7 @@ class PlayerE2ETest(PlayerProcessCase):
 
     def test_backlog_of_previous_run_is_deleted(self) -> None:
         """Файлы в inbox/ до старта несут id задач прошлого запуска — чужие (контракт (13))."""
-        session = uuid.uuid4().hex
+        session = self.session
         self.task("0123456789abcdef")
         subprocess.run([str(PAPLAY), str(self.sentence(session, "aaaaaa", 0))], env=self.env(),
                        check=True)
@@ -278,7 +288,7 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertEqual(([], []), (list(self.inbox.iterdir()), list(self.store.iterdir())))
 
     def test_unknown_task_sentence_is_deleted(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         self.hook_task(session, "text")
         subprocess.run([str(PAPLAY), str(self.sentence(session, "aaaaaa", 0))], env=self.env(),
@@ -288,7 +298,7 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertEqual([], list(self.store.iterdir()))
 
     def test_broken_wav_reports_error_and_next_still_plays(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         self.drop(self.sentence(session, "aaaaaa", 0, valid=False))
         error = self.next_line("error ")
@@ -299,7 +309,7 @@ class PlayerE2ETest(PlayerProcessCase):
     def test_sigterm_keeps_unheard_and_restart_plays_them(self) -> None:
         """Выход сохраняет сообщения в messages.json, их файлы остаются в store/; следующий
         запуск их восстанавливает и играет."""
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         self.drop(self.sentence(session, "aaaaaa", 0, seconds=3.0))
         self.drop(self.sentence(session, "aaaaaa", 1))
@@ -316,7 +326,7 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertFalse((self.runtime / "tts-player" / "messages.json").exists())
 
     def test_sentence_of_task_queued_before_exit_plays_after_restart(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         self.task_ids["aaaaaa"] = self.hook_task(session, "text aaaaaa")["id"]
         self.proc.send_signal(signal.SIGTERM)
@@ -327,7 +337,7 @@ class PlayerE2ETest(PlayerProcessCase):
             f"_{self.task_ids['aaaaaa']}_tts_queue_{session}_aaaaaa_s0.wav"))
 
     def test_output_error_keeps_sentence_and_reports_once(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player(sink="filesink")  # filesink без location не открывается — звука нет
         self.drop(self.sentence(session, "aaaaaa", 0))
         self.drop(self.sentence(session, "bbbbbb", 0))
@@ -357,34 +367,32 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertIn("графическ", result.stderr)
         self.assertFalse(self.inbox.exists())
 
-    def test_autoplay_off_in_settings_file_keeps_new_message_silent(self) -> None:
-        """--settings-file с autoplay: false — первое сообщение не играет само (начать его без окна нечем)."""
+    def assert_ducked_by_half(self) -> None:
+        """Первое сообщение приглушает чужой поток (60000/50000) до duck = 50 % из файла."""
+        self.drop(self.sentence(self.session, "aaaaaa", 0))
+        self.played(1)
+        self.assertEqual([["set-sink-input-volume", "7", "30000", "25000"]],
+                         self.wait_volume_sets(1))
+
+    def test_settings_file_option_is_read(self) -> None:
         settings = self.tmp / "prefs" / "settings.json"
         settings.parent.mkdir()
-        settings.write_text(json.dumps({"tail": 5, "autoplay": False}))
+        settings.write_text(json.dumps({"tail": 5, "duck": 50}))
         self.start_player("fakesink", None, "--settings-file", str(settings))
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0))
-        deadline = time.monotonic() + WAIT  # плеер забрал файл: старт не укладывается в QUIET
-        while not (self.store.is_dir() and any(self.store.iterdir())):
-            self.assertLess(time.monotonic(), deadline, "файл не забран в store/")
-            time.sleep(0.05)
-        self.assert_quiet()
-        self.assertEqual(1, len(list(self.store.iterdir())))
+        self.assert_ducked_by_half()
 
     def test_settings_default_to_xdg_config_home(self) -> None:
         """Без --settings-file файл берётся из XDG_CONFIG_HOME подпроцесса."""
         settings = self.config / "tts-player" / "settings.json"
         settings.parent.mkdir(parents=True)
-        settings.write_text(json.dumps({"tail": 5, "autoplay": False}))
+        settings.write_text(json.dumps({"tail": 5, "duck": 50}))
         self.start_player()
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0))
-        self.assert_quiet()
-        self.assertIsNone(self.proc.poll())
+        self.assert_ducked_by_half()
 
     def test_foreign_stream_ducked_while_playing_and_restored_after_end(self) -> None:
         """Первое сообщение — чужой поток до 30 %; склейка демона завершает сообщение,
         плеер уходит в idle — чужому потоку возвращается исходная громкость."""
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         sentence = self.sentence(session, "aaaaaa", 0)
         self.drop(sentence)
@@ -399,7 +407,7 @@ class PlayerE2ETest(PlayerProcessCase):
     def test_orphan_stream_is_repaired_after_end(self) -> None:
         """Приглушённый чужой поток исчезает во время речи; после конца появляется новый
         поток того же приложения со сниженной громкостью — ему возвращается исходная."""
-        session = uuid.uuid4().hex
+        session = self.session
         orphans = self.runtime / "tts-player" / "duck-orphans.json"
         self.start_player()
         sentence = self.sentence(session, "aaaaaa", 0)
@@ -441,14 +449,14 @@ class PlayerE2ETest(PlayerProcessCase):
 
     def test_sigterm_exits_0(self) -> None:
         self.start_player()
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0))
+        self.drop(self.sentence(self.session, "aaaaaa", 0))
         self.played(1)
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
 
     def test_sighup_exits_0_and_restores_volumes(self) -> None:
         self.start_player()
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=3.0))
+        self.drop(self.sentence(self.session, "aaaaaa", 0, seconds=3.0))
         self.wait_volume_sets(1)
         self.proc.send_signal(signal.SIGHUP)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
@@ -457,7 +465,7 @@ class PlayerE2ETest(PlayerProcessCase):
 
     def test_leftover_duck_state_is_restored_at_start(self) -> None:
         state = self.runtime / "tts-player" / "duck.json"
-        state.parent.mkdir(parents=True)
+        state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(json.dumps({"inputs": {"7": {
             "volumes": [60000, 50000], "name": "app4242", "pid": "4242"}}}))
         self.start_player()
@@ -476,7 +484,7 @@ class SingleInstanceTest(PlayerProcessCase):
 
     def test_second_start_exits_0_with_pid_and_keeps_store(self) -> None:
         self.start_player()
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=3.0))
+        self.drop(self.sentence(self.session, "aaaaaa", 0, seconds=3.0))
         self.played(1)
         kept = sorted(p.name for p in self.store.iterdir())
         self.assertTrue(kept)
@@ -489,7 +497,7 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(kept, sorted(p.name for p in self.store.iterdir()))
 
     def test_lock_is_free_after_exit_and_new_start_passes(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         self.drop(self.sentence(session, "aaaaaa", 0, seconds=3.0))
         self.played(1)
@@ -518,8 +526,10 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual("сессия передана плееру\n", added.stdout)
         self.next_line("session add u1")
         self.assertEqual(0, self.run_bin("session", "has", "u1").returncode)
-        self.assertEqual({"active": "u1", "sessions": [{"id": "u1", "project": "TTSReader"}]},
-                         self.sessions_file())
+        self.assertEqual({"active": self.session,
+                          "sessions": [{"id": self.session, "project": "proj"},
+                                       {"id": "u1", "project": "TTSReader"}]},
+                         self.sessions_file())  # новая сессия закрыта
         again = self.run_bin("session", "add", "u1", "/p/TTSReader")
         self.assertEqual(0, again.returncode)
         self.assertEqual("сессия уже в списке\n", again.stdout)
@@ -527,7 +537,9 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(0, removed.returncode)
         self.next_line("session remove u1")
         self.assertEqual(1, self.run_bin("session", "has", "u1").returncode)
-        self.assertEqual({"active": None, "sessions": []}, self.sessions_file())
+        self.assertEqual({"active": self.session,
+                          "sessions": [{"id": self.session, "project": "proj"}]},
+                         self.sessions_file())
 
     def test_session_add_without_player_is_executed_at_player_start(self) -> None:
         added = self.run_bin("session", "add", "u2", "/p/X")
@@ -553,7 +565,7 @@ class SingleInstanceTest(PlayerProcessCase):
         while self.run_bin("session", "has", "u1").returncode != 0:
             self.assertLess(time.monotonic(), deadline, "u1 не вернулась после перезапуска")
             time.sleep(0.1)
-        self.assertEqual("u1", self.sessions_file()["active"])
+        self.assertIn("u1", [s["id"] for s in self.sessions_file()["sessions"]])
 
     def test_bin_works_from_other_cwd_and_through_symlink(self) -> None:
         link = self.tmp / "tts-player-link"
@@ -573,7 +585,7 @@ class SingleInstanceTest(PlayerProcessCase):
     def test_hook_task_goes_to_daemon_queue_and_its_files_play(self) -> None:
         """Задача хука в hook-home → файл в очереди демона с source и новым id; предложения
         с этим id через настоящую обёртку (playback.json подставной) играют."""
-        session = uuid.uuid4().hex
+        session = self.session
         self.start_player()
         task = self.hook_task(session, "Привет")
         self.assertEqual(("tts-player", "Привет", session, "/w/proj", "p", 1.0),
@@ -650,15 +662,14 @@ class SingleInstanceTest(PlayerProcessCase):
     def test_deferred_task_of_inactive_session_does_not_reach_daemon(self) -> None:
         self.start_player()
         self.wait_lock()
-        self.add_session("sessa")
         self.add_session("sessb")
-        self.assertEqual("sessa", self.sessions_file()["active"])
+        self.assertEqual(self.session, self.sessions_file()["active"])
         before = self.daemon_tasks()
         hook_id = self.put_hook_task("sessb")
         self.assertEqual(f"task {hook_id} sessb deferred", self.next_line(f"task {hook_id} sessb d"))
         self.assertEqual(before, self.daemon_tasks())
-        task = self.hook_task("sessa", "Привет")
-        self.assertEqual("sessa", task["session_id"])
+        task = self.hook_task(self.session, "Привет")
+        self.assertEqual(self.session, task["session_id"])
         self.assertEqual(1, len(self.daemon_tasks() - before))
 
     def test_task_of_session_not_in_list_is_dropped(self) -> None:
@@ -675,28 +686,27 @@ class SingleInstanceTest(PlayerProcessCase):
     def test_restart_keeps_messages_per_session_and_deferred_is_not_sent(self) -> None:
         self.start_player()
         self.wait_lock()
-        self.add_session("sessa")
         self.add_session("sessb")
-        self.drop(self.sentence("sessa", "aaaaaa", 0, seconds=3.0))
-        self.drop(self.sentence("sessa", "aaaaaa", 1))
-        self.drop(self.sentence("sessa", "cccccc", 0))
+        self.drop(self.sentence(self.session, "aaaaaa", 0, seconds=3.0))
+        self.drop(self.sentence(self.session, "aaaaaa", 1))
+        self.drop(self.sentence(self.session, "cccccc", 0))
         self.played(1)
         hook_id = self.put_hook_task("sessb")
         self.next_line(f"task {hook_id} sessb deferred")
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
-        self.assertEqual([("sessa", False), ("sessa", False), ("sessb", True)],
+        self.assertEqual([(self.session, False), (self.session, False), ("sessb", True)],
                          self.saved_messages())
         sent = self.daemon_tasks()
         self.lines = queue.Queue()
         self.start_player()
-        names = self.played(3)  # автовоспроизведение: непрослушанное sessa; sessb молчит
-        self.assertTrue(all("_sessa_" in name for name in names), names)
+        names = self.played(3)  # открытая сессия играет непрослушанное; sessb молчит
+        self.assertTrue(all(f"_{self.session}_" in name for name in names), names)
         self.assert_quiet()
         self.assertEqual(sent, self.daemon_tasks())
         self.proc.send_signal(signal.SIGTERM)  # отложенное sessb восстановлено — снова в снимке
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
-        self.assertEqual([("sessa", False), ("sessa", False), ("sessb", True)],
+        self.assertEqual([(self.session, False), (self.session, False), ("sessb", True)],
                          self.saved_messages())
 
     def saved_messages(self) -> list[tuple[str, bool]]:
@@ -707,20 +717,19 @@ class SingleInstanceTest(PlayerProcessCase):
     def test_session_remove_deletes_its_message_files(self) -> None:
         self.start_player()
         self.wait_lock()
-        self.add_session("sessb")  # первая — активная: её сообщения получают файлы
         self.add_session("sessa")
-        self.drop(self.sentence("sessb", "bbbbbb", 0, seconds=3.0))
-        self.drop(self.sentence("sessb", "bbbbbb", 1))
+        self.drop(self.sentence(self.session, "bbbbbb", 0, seconds=3.0))
+        self.drop(self.sentence(self.session, "bbbbbb", 1))
         self.played(1)
-        self.assertTrue(any("_sessb_" in p.name for p in self.store.iterdir()))
-        self.assertEqual(0, self.run_bin("session", "remove", "sessb").returncode)
-        self.next_line("session remove sessb")
+        self.assertTrue(any(f"_{self.session}_" in p.name for p in self.store.iterdir()))
+        self.assertEqual(0, self.run_bin("session", "remove", self.session).returncode)
+        self.next_line(f"session remove {self.session}")
         deadline = time.monotonic() + WAIT
-        while any("_sessb_" in p.name for p in self.store.iterdir()):
-            self.assertLess(time.monotonic(), deadline, "файлы sessb остались в store/")
+        while any(f"_{self.session}_" in p.name for p in self.store.iterdir()):
+            self.assertLess(time.monotonic(), deadline, "файлы сессии остались в store/")
             time.sleep(0.05)
         self.assertEqual({"active": None, "sessions": [{"id": "sessa", "project": "proj"}]},
-                         self.sessions_file())  # убранная активная — активной не остаётся
+                         self.sessions_file())  # убранная открытая — открытой не остаётся
 
     def test_tray_conflicts(self) -> None:
         for extra in ("--show", "--no-gui"):
