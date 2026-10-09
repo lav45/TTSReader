@@ -19,10 +19,10 @@
 # Затем плеер: не запущен -> tts-player --tray отвязанным процессом (вывод в
 # player.log); уже запущен (проба player.lock без записи) -> не трогать. Хук не ждёт плеер.
 # Затем tts-player session add <uuid> <cwd>: сессия попадает в список плеера, вывод
-# команды идёт в stdout хука.
+# команды идёт в stdout хука, а её код выхода становится кодом хука (1 - запрос не записан).
 #
-# Код 0; 1 - нет claude-tts или tts-player в PATH, нет XDG_RUNTIME_DIR, неверные аргументы
-# (сообщение в stderr).
+# Код 0; 1 - нет claude-tts или tts-player в PATH, нет XDG_RUNTIME_DIR, неверные или пустые
+# аргументы (сообщение в stderr), session add не записал запрос.
 # Только для тестов: TTS_HOOK_PROC (вместо /proc), TTS_HOOK_HOME (вместо $HOME).
 
 set -u
@@ -33,7 +33,7 @@ fail() {
 }
 
 # Аргументы проверяются до всего остального: неверный вызов ничего не запускает.
-if [ "$#" -ne 3 ] || [ "$1" != "on" ]; then
+if [ "$#" -ne 3 ] || [ "$1" != "on" ] || [ -z "$2" ] || [ -z "$3" ]; then
     fail "Usage: tts-player-hook on <uuid> <cwd>"
 fi
 shift

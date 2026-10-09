@@ -101,8 +101,9 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
 
 - `~/.claude/hooks/tts-gate.sh`: вместо проверки флага `/tmp/claude-tts.on` и сравнения с ним
   `session_id` - `tts-player session has <session_id>` (выход 0 - озвучивать, иначе хук молча
-  выходит); пропущенному хуку гейт задаёт `CLAUDE_TTS_SESSION=<session_id>` (настройки сессий
-  `claude-tts` ключены по UUID), вход хука идёт в скрипт без изменений;
+  выходит; так же при пустом `session_id`); иначе гейт запускает хук как
+  `CLAUDE_TTS_SESSION=<session_id> exec <скрипт хука>` (настройки сессий `claude-tts` ведутся по
+  UUID), вход хука идёт в скрипт без изменений;
 - `~/.claude/hooks/tts-toggle.sh`: `on` - `tts-player-hook on "$CLAUDE_CODE_SESSION_ID" "$PWD"`
   (демон, плеер и сессия в списке), `off` - `tts-player session remove "$CLAUDE_CODE_SESSION_ID"`;
   флаг `/tmp/claude-tts.on` не пишется и не снимается;
@@ -116,7 +117,8 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
 1. Слить обновление в `~/Programs/TTSReader`.
 2. Убедиться, что плеер запущен после слияния среза (14) (есть `control/` в
    `$XDG_RUNTIME_DIR/tts-player`); иначе перезапустить. Список сессий перезапуск переживает.
-3. Поправить хуки по списку выше (`tts-player-hook` и `tts-player` - в `PATH`).
+3. Поправить хуки по списку выше (`tts-player-hook` и `tts-player` - в `PATH`) и удалить старый
+   флаг: `rm -f /tmp/claude-tts.on` (его мог записать прежний `/tts-on`).
 4. В каждой сессии, которую нужно озвучивать, выполнить `/tts-on`: пока сессии нет в списке,
    её хуки молчат.
 
@@ -259,8 +261,8 @@ stderr плеера (`player.log`), в `~/.claude-tts/daemon.log` и в
 выключена (флага нет или он пуст), значок неактивен; состояние обновляется при показе окна и
 каждые 250 мс, пока окно видно. После перехода на сессии (см. «Переход на сессии») хук `off`
 зовёт `tts-player session remove`; флаг больше не пишется, и значок остаётся неактивным, пока
-оконный срез не превратит его в «Завершить активную сессию». Поэтому `tts-player` должен быть в `PATH` плеера (иначе в
-логе код 127).
+оконный срез не превратит его в «Завершить активную сессию». Хук `off` зовёт `tts-player`,
+поэтому он должен быть в `PATH` плеера (иначе в логе код 127).
 
 - `--tts-flag FILE` - флаг озвучки (по умолчанию `/tmp/claude-tts.on`);
 - `--tts-off-hook FILE` - хук выключения (по умолчанию `~/.claude/hooks/tts-toggle.sh`).

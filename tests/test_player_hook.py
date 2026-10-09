@@ -185,7 +185,7 @@ class PlayerHookTest(unittest.TestCase):
         self.assertIn("вывод заглушки session", result.stdout)
 
     def test_bad_arguments_print_usage_and_start_nothing(self):
-        for args in (("off",), ("on",), ("on", "u1"), ("on", "u1", "/p", "x"), ("play",), ()):
+        for args in (("off",), ("on",), ("on", "u1"), ("on", "u1", "/p", "x"), ("on", "", "/p"), ("on", "u1", ""), ("play",), ()):
             with self.subTest(args=args):
                 result = self.run_hook(*args)
                 self.assertEqual(result.returncode, 1)

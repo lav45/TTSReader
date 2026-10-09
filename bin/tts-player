@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Запуск плеера и подкоманды stop, play, session из любого каталога и через символическую ссылку.
+# Запуск плеера и подкоманда session из любого каталога и через символическую ссылку.
 set -euo pipefail
 root="$(dirname "$(dirname "$(readlink -f "$0")")")"
 export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"

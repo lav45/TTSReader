@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tts_player.instance import Instance
+from tts_player.instance import Instance, is_locked
 
 
 def hold_lock(runtime: str, ready, release) -> None:
@@ -46,6 +46,13 @@ class InstanceTest(unittest.TestCase):
         again = Instance.acquire(self.runtime)
         self.assertIsNotNone(again)
         again.release()
+
+    def test_probe_of_free_lock_with_dead_pid_does_not_touch_file(self) -> None:
+        Instance.acquire(self.runtime).release()
+        path = self.runtime / "tts-player" / "player.lock"
+        path.write_text("999\n")
+        self.assertFalse(is_locked(self.runtime))
+        self.assertEqual("999\n", path.read_text())
 
     def test_empty_pid_is_reread_until_written(self) -> None:
         instance = Instance.acquire(self.runtime)
