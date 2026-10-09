@@ -658,27 +658,6 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual(("paused", "aa"), (self.state().status, self.task()))
         self.assertEqual([A0], self.playback.played)
 
-    def test_stop_resets_position_and_new_message_does_not_start(self) -> None:
-        self.start_with(A0, A1)
-        self.finish()
-        self.playback.at = 0.2
-        self.player.stop_playback()
-        state = self.state()
-        self.assertEqual(("stopped", 0.0), (state.status, state.position_s))
-        self.assertIsNone(self.playback.playing)
-        self.arrive(B0)
-        self.assertEqual([A0, A1], self.playback.played)
-        self.assertEqual("aa", self.task())
-        self.player.toggle_play_pause()
-        self.assertEqual("playing", self.state().status)
-        self.assertEqual((A0, 0.0), self.playback.starts[-1])
-
-    def test_stop_during_outage_cancels_retry(self) -> None:
-        self.start_with(A0)
-        self.playback.fail("no output", True)
-        self.player.stop_playback()
-        self.glib.source_remove.assert_called_once_with(42)
-
     def test_next_plays_following_from_start_and_marks_left_heard(self) -> None:
         self.start_with(A0, A1, B0)
         self.playback.at = 0.3
@@ -727,11 +706,6 @@ class PlayerButtonsTest(PlayerCase):
         self.start_with(A0, A1, B0)
         self.player.toggle_play_pause()
         self.click_second_message("paused")
-
-    def test_play_message_while_stopped_only_selects_it(self) -> None:
-        self.start_with(A0, A1, B0)
-        self.player.stop_playback()
-        self.click_second_message("stopped")
 
     def test_play_message_heard_only_selects_it(self) -> None:
         self.start_with(A0, B0)
@@ -816,13 +790,6 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual(played, self.playback.played)
         self.assertEqual("bb", self.task())
 
-    def test_next_after_stop_plays(self) -> None:
-        self.start_with(A0, B0)
-        self.player.stop_playback()
-        self.player.next()
-        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
-        self.assertEqual((B0, 0.0), self.playback.starts[-1])
-
     def test_prev_plays_preceding_from_start(self) -> None:
         self.start_with(A0, B0, C0)
         self.player.next()
@@ -845,58 +812,6 @@ class PlayerButtonsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.player.prev()
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
-
-    def test_stop_playback_while_playing_stops_at_start(self) -> None:
-        self.start_with(A0, B0)
-        self.playback.at = 0.3
-        self.player.stop_playback()
-        state = self.state()
-        self.assertEqual(("stopped", 0.0), (state.status, state.position_s))
-        self.assertIsNone(self.playback.playing)
-
-    def test_stop_playback_while_paused_stops_at_start(self) -> None:
-        self.start_with(A0, B0)
-        self.player.toggle_play_pause()
-        self.player.stop_playback()
-        state = self.state()
-        self.assertEqual(("stopped", 0.0), (state.status, state.position_s))
-
-    def test_stop_playback_when_stopped_or_idle_changes_nothing(self) -> None:
-        self.player.start()
-        self.player.stop_playback()
-        self.assertEqual("idle", self.state().status)
-        self.start_with(A0)
-        self.player.stop_playback()
-        count = len(self.states)
-        stops = self.playback.stops
-        self.player.stop_playback()
-        self.assertEqual("stopped", self.state().status)
-        self.assertEqual(stops, self.playback.stops)
-        self.assertEqual(count, len(self.states))
-
-    def test_play_if_stopped_plays_current_after_stop(self) -> None:
-        self.start_with(A0, B0)
-        self.player.stop_playback()
-        self.player.play_if_stopped()
-        state = self.state()
-        self.assertEqual(("playing", 0.0), (state.status, state.position_s))
-        self.assertEqual(A0, self.playback.starts[-1][0])
-
-    def test_play_if_stopped_when_playing_or_paused_changes_nothing(self) -> None:
-        self.start_with(A0, B0)
-        count, starts = len(self.states), len(self.playback.starts)
-        self.player.play_if_stopped()
-        self.assertEqual((count, starts), (len(self.states), len(self.playback.starts)))
-        self.player.toggle_play_pause()
-        count = len(self.states)
-        self.player.play_if_stopped()
-        self.assertEqual("paused", self.state().status)
-        self.assertEqual(count, len(self.states))
-
-    def test_play_if_stopped_without_message_changes_nothing(self) -> None:
-        self.player.start()
-        self.player.play_if_stopped()
-        self.assertEqual("idle", self.state().status)
 
     def test_state_completes_per_message(self) -> None:
         self.start_with(A0, A1, B0)
@@ -959,7 +874,6 @@ class PlayerButtonsTest(PlayerCase):
     def test_on_change_after_each_command(self) -> None:
         self.start_with(A0, A1, B0)
         commands = [self.player.toggle_play_pause, self.player.toggle_play_pause,
-                    self.player.stop_playback, self.player.toggle_play_pause,
                     self.player.next, self.player.prev,
                     lambda: self.player.seek(0.2), self.player.clear]
         for command in commands:
@@ -1011,13 +925,13 @@ class PlayerPrefsTest(PlayerCase):
         self.assertAlmostEqual(0.2, start)
 
     def test_play_pause_when_stopped_plays_current_from_cursor(self) -> None:
-        self.start_with(A0, B0)
-        self.player.stop_playback()
+        self.end_last_manually()
+        self.assertEqual("stopped", self.state().status)
         self.player.seek(0.3)
         self.player.toggle_play_pause()
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         name, start = self.playback.starts[-1]
-        self.assertEqual(A0, name)
+        self.assertEqual(JOINED, name)
         self.assertAlmostEqual(0.3, start)
 
     def test_play_pause_when_idle_at_end_plays_current_from_start(self) -> None:
@@ -1213,10 +1127,10 @@ class PlayerPrefsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.assertEqual(["bb"], self.tasks())
 
-    def test_play_if_stopped_in_silence_plays_first_unheard(self) -> None:
+    def test_play_pause_in_silence_plays_first_unheard(self) -> None:
         self.manual()
         self.start_with(A0, B0)
-        self.player.play_if_stopped()
+        self.player.toggle_play_pause()
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         self.assertEqual([(A0, 0.0)], self.playback.starts)
 
@@ -1286,11 +1200,6 @@ class PlayerDuckingTest(PlayerCase):
         self.start_with(A0, B0)
         self.player.next()
         self.assertEqual([("duck", 30)], self.calls())
-
-    def test_stop_restores(self) -> None:
-        self.start_with(A0, B0)
-        self.player.stop_playback()
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
 
     def test_clear_restores(self) -> None:
         self.start_with(A0, B0)
@@ -1488,16 +1397,6 @@ class PlayerHoldTest(PlayerCase):
         self.player.hold()
         self.player.release()
         self.arrive(A0)
-        self.assertEqual("playing", self.state().status)
-
-    def test_play_command_does_nothing_while_held(self) -> None:
-        self.start_with(A0, B0)
-        self.player.stop_playback()
-        self.player.hold()
-        self.player.play_if_stopped()
-        self.assertEqual("stopped", self.state().status)
-        self.player.release()
-        self.player.play_if_stopped()
         self.assertEqual("playing", self.state().status)
 
     def test_user_commands_work_while_held(self) -> None:
@@ -1726,14 +1625,17 @@ class PlayerRevoiceTest(PlayerCase):
 
     def test_message_in_flight_is_not_revoiced(self) -> None:
         """Задача сообщения ещё синтезируется: оно играет, как растёт, без новой задачи."""
-        self.settings.persona = "q"
         self.start_with(A0)
-        self.finish()
-        self.player.stop_playback()
+        self.announce("bb")  # у второго сообщения нет предложений: «aa» ещё не завершено
+        self.player.play_message(self.player._queue.messages[1])
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertEqual("stopped", self.state().status)
+        self.settings.persona = "q"
+        puts = len(self.daemon.puts)
         self.player.toggle_play_pause()
-        self.assertEqual(1, len(self.daemon.puts))
+        self.assertEqual(puts, len(self.daemon.puts))
         self.assertEqual(0, self.settings.reads)
-        self.assertEqual([A0, A0], self.playback.played)
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
 
     def test_click_only_selects_and_play_revoices(self) -> None:
         self.start_with(A0, B0)

@@ -1,16 +1,12 @@
-"""Команда `tts-player stop` (SIGUSR1, /tts-off): главный плеер стоп, звучащий свой текст — пауза;
-порядок выхода в run() — свой текст раньше плеера, даже если его shutdown упал."""
+"""Порядок выхода в run(): свой текст раньше плеера, даже если его shutdown упал."""
 import unittest
 
-from tts_player.__main__ import run, stop_sound
+from tts_player.__main__ import run
 
 
 class FakePlayer:
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
-
-    def stop_playback(self) -> None:
-        self.calls.append("player.stop_playback")
 
     def start(self) -> None:
         self.calls.append("player.start")
@@ -23,9 +19,6 @@ class FakeTextSpeaker:
     def __init__(self, calls: list[str], shutdown_error: Exception | None = None) -> None:
         self.calls = calls
         self.shutdown_error = shutdown_error
-
-    def pause(self) -> None:
-        self.calls.append("text.pause")
 
     def cleanup_leftovers(self) -> None:
         self.calls.append("text.cleanup_leftovers")
@@ -44,17 +37,7 @@ class FakeHookHome:
         self.calls.append("hook_home.stop")
 
 
-class StopCommandTest(unittest.TestCase):
-    def test_stop_stops_player_and_pauses_text(self) -> None:
-        calls: list[str] = []
-        stop_sound(FakePlayer(calls), FakeTextSpeaker(calls))
-        self.assertEqual(["player.stop_playback", "text.pause"], calls)
-
-    def test_stop_without_text_speaker(self) -> None:
-        calls: list[str] = []
-        stop_sound(FakePlayer(calls), None)
-        self.assertEqual(["player.stop_playback"], calls)
-
+class RunTest(unittest.TestCase):
     def test_run_shuts_text_before_player(self) -> None:
         calls: list[str] = []
         run(FakePlayer(calls), lambda: None, lambda: None, FakeTextSpeaker(calls))

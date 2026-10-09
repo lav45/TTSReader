@@ -1,15 +1,13 @@
-"""Блокировка единственности и команда stop (tts_player.instance) на временных каталогах."""
+"""Блокировка единственности (tts_player.instance) на временных каталогах."""
 import multiprocessing
 import os
-import signal
-import subprocess
 import threading
 import time
 import tempfile
 import unittest
 from pathlib import Path
 
-from tts_player.instance import Instance, send_play, send_stop
+from tts_player.instance import Instance, is_locked
 
 
 def hold_lock(runtime: str, ready, release) -> None:
@@ -49,58 +47,12 @@ class InstanceTest(unittest.TestCase):
         self.assertIsNotNone(again)
         again.release()
 
-    def test_send_stop_with_free_lock_returns_false(self) -> None:
-        self.assertFalse(send_stop(self.runtime))
-        Instance.acquire(self.runtime).release()
-        self.assertFalse(send_stop(self.runtime))
-
-    def test_send_stop_signals_holder(self) -> None:
-        received = []
-        previous = signal.signal(signal.SIGUSR1, lambda *_: received.append(1))
-        self.addCleanup(signal.signal, signal.SIGUSR1, previous)
-        instance = Instance.acquire(self.runtime)
-        self.addCleanup(instance.release)
-        self.assertTrue(send_stop(self.runtime, marker=""))
-        self.assertEqual([1], received)
-
-    def test_send_play_signals_holder_with_sigusr2(self) -> None:
-        received = []
-        previous = signal.signal(signal.SIGUSR2, lambda *_: received.append(2))
-        self.addCleanup(signal.signal, signal.SIGUSR2, previous)
-        instance = Instance.acquire(self.runtime)
-        self.addCleanup(instance.release)
-        self.assertTrue(send_play(self.runtime, marker=""))
-        self.assertEqual([2], received)
-
-    def test_send_play_with_free_lock_returns_false(self) -> None:
-        self.assertFalse(send_play(self.runtime))
-
-    def test_stale_pid_of_foreign_process_is_not_sent_play(self) -> None:
-        sleeper = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(sleeper.wait)
-        self.addCleanup(sleeper.kill)
-        instance = Instance.acquire(self.runtime)
-        self.addCleanup(instance.release)
-        (self.runtime / "tts-player" / "player.lock").write_text(f"{sleeper.pid}\n")
-        self.assertFalse(send_play(self.runtime))
-        self.assertIsNone(sleeper.poll())
-
-    def test_probe_of_free_lock_does_not_touch_file(self) -> None:
+    def test_probe_of_free_lock_with_dead_pid_does_not_touch_file(self) -> None:
         Instance.acquire(self.runtime).release()
         path = self.runtime / "tts-player" / "player.lock"
         path.write_text("999\n")
-        self.assertFalse(send_stop(self.runtime))
+        self.assertFalse(is_locked(self.runtime))
         self.assertEqual("999\n", path.read_text())
-
-    def test_stale_pid_of_foreign_process_is_not_killed(self) -> None:
-        sleeper = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(sleeper.wait)
-        self.addCleanup(sleeper.kill)
-        instance = Instance.acquire(self.runtime)
-        self.addCleanup(instance.release)
-        (self.runtime / "tts-player" / "player.lock").write_text(f"{sleeper.pid}\n")
-        self.assertFalse(send_stop(self.runtime))
-        self.assertIsNone(sleeper.poll())
 
     def test_empty_pid_is_reread_until_written(self) -> None:
         instance = Instance.acquire(self.runtime)

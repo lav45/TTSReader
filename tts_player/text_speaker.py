@@ -207,12 +207,6 @@ class TextSpeaker:
             self._play_from(position)
         self._changed()
 
-    def pause(self) -> None:
-        """Команда `tts-player stop`: звучащий (playing, synthesizing) свой текст — на паузу,
-        иначе ничего."""
-        if self._status in SOUNDING_STATUSES:
-            self.toggle_play_pause()
-
     def seek(self, position_s: float) -> None:
         """Позиция в пределах уже синтезированного; статус не меняется."""
         position = min(max(position_s, 0.0), self._length())

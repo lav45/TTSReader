@@ -5,8 +5,6 @@
                               [--tts-off-hook FILE] [--settings-file FILE]
                               [--tts-python FILE]
                               [--no-gui] [--show] [--tray]
-       python3 -m tts_player stop    (SIGUSR1 запущенному плееру: остановить текущее)
-       python3 -m tts_player play    (SIGUSR2: продолжить остановленное, играющее не трогать)
        python3 -m tts_player session add UUID CWD | remove UUID | has UUID
                                   (подкоманда — в tts_player.session_command; has: выход 0 — сессия в списке)
 Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window) с экраном «Свой текст»
@@ -30,7 +28,7 @@ from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.hook_home import HookHome  # noqa: E402
-from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
+from tts_player.instance import Instance  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
 from tts_player.sessions import Sessions, control_dir, sessions_path  # noqa: E402
@@ -38,17 +36,11 @@ from tts_player import session_command  # noqa: E402
 from tts_player.text_speaker import TextSpeaker  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
 
-log = logging.getLogger(__name__)
-
 SYNTH_WORKER = Path(__file__).resolve().parent / "synth_worker.py"
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv == ["stop"]:
-        return stop_command()
-    if argv == ["play"]:
-        return play_command()
     if argv[:1] == ["session"]:
         return session_command.main(argv[1:])
     parser = argparse.ArgumentParser(prog="tts_player")
@@ -87,10 +79,6 @@ def main(argv: list[str] | None = None) -> int:
         print("tts_player: XDG_RUNTIME_DIR не задан", file=sys.stderr)
         return 1
 
-    # stop может прийти, как только блокировка видна, а обработчик ставит run() позже;
-    # без этого SIGUSR1 по умолчанию завершил бы плеер
-    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
-    signal.signal(signal.SIGUSR2, signal.SIG_IGN)
     instance = Instance.acquire(Path(runtime))  # до Player(): второй экземпляр store/ не трогает
     if instance is None:
         pid = Instance.holder_pid(Path(runtime))
@@ -139,26 +127,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def stop_command() -> int:
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if not runtime:
-        print("плеер не запущен", file=sys.stderr)
-        return 0
-    if not send_stop(Path(runtime)) and is_locked(Path(runtime)):
-        print("плеер не запущен или ещё стартует", file=sys.stderr)
-    return 0
-
-
-def play_command() -> int:
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if not runtime:
-        print("плеер не запущен", file=sys.stderr)
-        return 0
-    if not send_play(Path(runtime)) and is_locked(Path(runtime)):
-        print("плеер не запущен или ещё стартует", file=sys.stderr)
-    return 0
-
-
 def gtk_ready() -> bool:
     gi.require_version("Gtk", "3.0")
     from gi.repository import Gtk
@@ -180,14 +148,6 @@ def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voi
     run(player, Gtk.main, Gtk.main_quit, text_speaker, hook_home)
 
 
-def stop_sound(player: Player, text_speaker: TextSpeaker | None) -> None:
-    """`tts-player stop` (SIGUSR1, /tts-off): главный плеер стоп, звучащий свой текст — на паузу."""
-    log.info("stop requested")
-    player.stop_playback()
-    if text_speaker is not None:
-        text_speaker.pause()
-
-
 def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None],
         text_speaker: TextSpeaker | None = None, hook_home: HookHome | None = None) -> None:
     """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, сообщения сохраняются в
@@ -204,17 +164,6 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, on_signal)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGHUP, on_signal)  # закрытие терминала
 
-    def on_stop() -> bool:
-        stop_sound(player, text_speaker)
-        return GLib.SOURCE_CONTINUE
-
-    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR1, on_stop)
-    def on_play() -> bool:
-        log.info("play requested")
-        player.play_if_stopped()
-        return GLib.SOURCE_CONTINUE
-
-    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR2, on_play)
     try:
         if text_speaker is not None:
             text_speaker.cleanup_leftovers()
