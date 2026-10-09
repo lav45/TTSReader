@@ -115,6 +115,9 @@ class PlayerWindow(Gtk.Window):
         """Экран настроек: стрелка назад, голос, скорость, «Сохранить», причина сбоя."""
         self.back_button = self._icon_button("go-previous-symbolic", "Назад", self._show_main)
         self.voice_combo = Gtk.ComboBoxText()
+        for renderer in self.voice_combo.get_cells():
+            # длинное «имя — описание» обрезается, а не растягивает окно
+            renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
         self.speed_spin = Gtk.SpinButton.new_with_range(
             DaemonSettings.SPEED_MIN, DaemonSettings.SPEED_MAX, self.SPEED_STEP)
         self.speed_spin.set_digits(self.SPEED_DIGITS)
@@ -171,7 +174,10 @@ class PlayerWindow(Gtk.Window):
 
     def _save_settings(self) -> None:
         try:
-            self._settings.save(self.voice_combo.get_active_id(), self.speed_spin.get_value())
+            self.speed_spin.update()  # набранный текст без потери фокуса
+            # стрелка даёт 1.9000000000000001: округляем до знаков спина
+            speed = round(self.speed_spin.get_value(), self.SPEED_DIGITS)
+            self._settings.save(self.voice_combo.get_active_id(), speed)
         except SettingsError as e:
             self.settings_error.set_text(str(e))
             return

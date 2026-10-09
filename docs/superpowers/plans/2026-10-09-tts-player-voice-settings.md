@@ -101,7 +101,8 @@ load:  voices — в порядке ключей personas; active = active_perso
        speed = personas[active].speed
        нет файла / не JSON / нет или пустой personas / active не в personas
              → SettingsError
-       personas[active].speed вне 0.5–4.0 → SettingsError (персона и значение в тексте)
+       у персоны нет speed → 2.0 (как get_persona_config в claude-tts)
+       personas[active].speed не число / bool / вне 0.5–4.0 → SettingsError (персона и значение в тексте)
 save:  config.json перечитывается; persona не в personas или speed вне 0.5–4.0
              → SettingsError, ни один файл не изменён
        config.json: active_persona ← persona; personas[*].speed ← speed;

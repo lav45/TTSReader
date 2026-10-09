@@ -5,6 +5,7 @@
 ничего не попадает. Имя не test_*.py: discover модуль не подбирает. На настоящем
 дисплее — только вручную, с TTS_PLAYER_GUI_TESTS=1. Значок XApp в тестах не создаётся.
 """
+import locale
 import os
 import unittest
 
@@ -246,6 +247,31 @@ class SettingsScreenTest(unittest.TestCase):
         w.speed_spin.update()  # то же, что потеря фокуса: значение заново из текста
         w.save_button.clicked()
         self.assertEqual(("save", "bob", 1.25), self.settings.calls[-1])
+
+    def test_save_rounds_spin_arrow_float_noise(self) -> None:
+        w = self.window
+        self.settings.loaded = VoiceSettings(voices=[Voice("bob", "")], active="bob", speed=1.8)
+        w.settings_button.clicked()
+        w.speed_spin.spin(Gtk.SpinType.STEP_FORWARD, 0.1)
+        w.save_button.clicked()
+        self.assertEqual(("save", "bob", 1.9), self.settings.calls[-1])
+
+    def test_save_takes_typed_text_without_focus_loss(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        w.speed_spin.set_text(locale.format_string("%.1f", 2.7))  # разделитель — по локали
+        w.save_button.clicked()
+        self.assertEqual(("save", "bob", 2.7), self.settings.calls[-1])
+
+    def test_long_voice_description_does_not_widen_window(self) -> None:
+        w = self.window
+        self.settings.loaded = VoiceSettings(
+            voices=[Voice("bob", "очень длинное описание " * 10)], active="bob", speed=1.5)
+        w.settings_button.clicked()
+        w.show_all()
+        flush()
+        minimum, _natural = w.get_preferred_width()
+        self.assertLessEqual(minimum, 420)
 
     def test_reopen_reloads_without_duplicating_voices(self) -> None:
         w = self.window

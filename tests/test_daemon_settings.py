@@ -5,6 +5,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tts_player.daemon_settings import DaemonSettings, SettingsError, Voice
 
@@ -195,6 +196,80 @@ class DaemonSettingsTest(unittest.TestCase):
             self.settings.save("ru-denis", 1.3)
         self.assertTrue(str(ctx.exception))
         self.assertEqual(self.config.read_bytes(), before)
+
+    def test_load_active_not_a_string(self):
+        for active in (["a"], {"a": 1}, 5, None):
+            with self.subTest(active=active):
+                data = make_config()
+                data["active_persona"] = active
+                self.write_config(data)
+                self.assert_load_error()
+
+    def test_load_persona_without_speed_uses_default(self):
+        data = make_config()
+        del data["personas"]["supertonic-3"]["speed"]
+        self.write_config(data)
+        self.assertEqual(2.0, self.settings.load().speed)
+
+    def test_load_non_numeric_speed_is_error(self):
+        for speed in ("1.5", True, None, [1]):
+            with self.subTest(speed=speed):
+                data = make_config()
+                data["personas"]["supertonic-3"]["speed"] = speed
+                self.write_config(data)
+                self.assert_load_error()
+
+    def test_save_rejects_non_number_speed(self):
+        before = self.config.read_bytes()
+        for speed in (True, "1.5", None):
+            with self.subTest(speed=speed):
+                with self.assertRaises(SettingsError):
+                    self.settings.save("ru-denis", speed)
+                self.assertEqual(self.config.read_bytes(), before)
+
+    def test_save_removes_temp_file_on_non_os_error(self):
+        with mock.patch("tts_player.daemon_settings.json.dump", side_effect=TypeError("boom")):
+            with self.assertRaises(TypeError):
+                self.settings.save("ru-denis", 1.3)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["config.json", "sessions.d"])
+
+    def test_save_removes_own_leftover_temp_files(self):
+        own = [self.root / "config.json.ab12.tmp", self.sessions / "a.json.cd34.tmp"]
+        foreign = [self.root / "config.tmp", self.sessions / "sid-1.tmp"]
+        for path in own + foreign:
+            path.write_text("x", encoding="utf-8")
+        self.settings.save("ru-denis", 1.3)
+        for path in own:
+            self.assertFalse(path.exists(), path)
+        for path in foreign:
+            self.assertTrue(path.exists(), path)
+
+    def test_save_does_not_resurrect_session_deleted_meanwhile(self):
+        path = self.sessions / "gone.json"
+        path.write_text(json.dumps({"persona": "x", "tone": "calm"}), encoding="utf-8")
+        real_mkstemp = tempfile.mkstemp
+
+        def delete_then_mkstemp(*args, **kwargs):
+            if kwargs.get("dir") == self.sessions:
+                path.unlink()  # демон удалил сессию между нашим чтением и записью
+            return real_mkstemp(*args, **kwargs)
+
+        with mock.patch("tts_player.daemon_settings.tempfile.mkstemp", delete_then_mkstemp):
+            self.settings.save("ru-denis", 1.3)
+        self.assertEqual([], list(self.sessions.iterdir()))
+        self.assertEqual(self.read_config()["active_persona"], "ru-denis")
+
+    @unittest.skipIf(os.geteuid() == 0, "root игнорирует запрет записи")
+    def test_save_readonly_sessions_dir_keeps_written_config(self):
+        path = self.sessions / "a.json"
+        path.write_text(json.dumps({"speed": 2.0}), encoding="utf-8")
+        self.sessions.chmod(0o500)
+        self.addCleanup(self.sessions.chmod, stat.S_IRWXU)
+        with self.assertRaises(SettingsError) as ctx:
+            self.settings.save("ru-denis", 1.3)
+        self.assertTrue(str(ctx.exception))
+        self.assertEqual(self.read_config()["active_persona"], "ru-denis")  # без отката
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"speed": 2.0})
 
 
 if __name__ == "__main__":
