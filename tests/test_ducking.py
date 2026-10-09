@@ -315,7 +315,7 @@ class DuckerTest(unittest.TestCase):
         self.ducker.refresh()
         self.assertEqual(len(self.set_calls()), 2)
 
-    ORPHAN = {"app200": {"original": [60000, 50000], "ducked": [18000, 15000]}}
+    ORPHAN = {"app200": {"original": [60000, 50000], "ducked": [18000, 15000], "known": []}}
 
     def orphans_data(self):
         return json.loads(self.orphans.read_text())
@@ -349,7 +349,8 @@ class DuckerTest(unittest.TestCase):
         self.set_inputs([sink_input(1, 200, [18000, 15000])])
         self.ducker.refresh()
         self.ducker.restore()
-        self.assertFalse(self.orphans.exists() and "app900" in self.orphans_data())
+        orphans = self.orphans_data() if self.orphans.exists() else {}
+        self.assertNotIn("app900", orphans)
 
     def test_nameless_stream_is_not_orphan(self):
         nameless = sink_input(1, 200, [60000, 50000])
@@ -437,6 +438,109 @@ class DuckerTest(unittest.TestCase):
             ducker = Ducker(self.state, OWN_PID, self.orphans)
         self.assertFalse(ducker.has_orphans)
         self.assertFalse(self.orphans.exists())
+
+    def tab(self, index, pid, values):
+        item = sink_input(index, pid, values)
+        item["properties"]["application.name"] = "Firefox"
+        return item
+
+    def make_tab_orphan(self):
+        """Вкладки A(1) и B(5, пользователь снизил до 20000) глушатся; A кончается; B жива."""
+        self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [20000, 20000])])
+        self.ducker.duck(30)
+        self.set_inputs([self.tab(5, 200, [6000, 6000])])
+        self.ducker.restore()
+        self.set_inputs([self.tab(5, 200, [20000, 20000])])
+        self.clear_log()
+
+    def test_preexisting_sibling_does_not_consume_orphan_in_speech(self):
+        self.make_tab_orphan()
+        self.assertEqual(self.orphans_data()["Firefox"]["known"], [[5, "200"]])
+        self.ducker.duck(30)
+        self.ducker.restore()
+        self.assertEqual(self.set_calls(), [
+            ["set-sink-input-volume", "5", "6000", "6000"],
+            ["set-sink-input-volume", "5", "20000", "20000"],
+        ])
+        self.assertTrue(self.ducker.has_orphans)
+
+    def test_preexisting_sibling_does_not_consume_orphan_in_watch(self):
+        self.make_tab_orphan()
+        self.set_inputs([self.tab(5, 200, [18000, 18000])])
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [])
+        self.assertTrue(self.ducker.has_orphans)
+
+    def test_watch_considers_all_candidates(self):
+        self.make_tab_orphan()
+        self.set_inputs([self.tab(5, 200, [18000, 18000]), self.tab(8, 200, [18000, 18000])])
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "8", "60000", "60000"]])
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_new_stream_with_other_volume_drops_orphan_untouched(self):
+        self.make_tab_orphan()
+        self.set_inputs([self.tab(5, 200, [20000, 20000]), self.tab(8, 200, [40000, 40000])])
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [])
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_new_stream_other_channel_count_drops_orphan(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(7, 200, [18000])])
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [])
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_muted_preexisting_stream_not_raised_with_duck_zero(self):
+        self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [0, 0])])
+        self.ducker.duck(0)
+        self.set_inputs([self.tab(5, 200, [0, 0])])
+        self.ducker.restore()
+        self.clear_log()
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [])
+
+    def test_orphans_changed_at(self):
+        self.assertIsNone(self.ducker.orphans_changed_at)
+        self.now = 1234.0
+        self.make_orphan()
+        self.assertEqual(self.ducker.orphans_changed_at, 1234.0)
+        self.now = 2000.0
+        self.assertEqual(Ducker(self.state, OWN_PID, self.orphans, clock=lambda: self.now).orphans_changed_at, 2000.0)
+
+    def test_restore_same_index_other_pid_only_skipped(self):
+        self.ducker.duck(30)
+        other = sink_input(1, 999, [11111, 22222])
+        other["properties"]["application.name"] = "app200"
+        self.set_inputs([other])
+        self.clear_log()
+        self.ducker.restore()
+        self.assertEqual(self.set_calls(), [])
+
+    def test_restore_same_index_other_name_only_skipped(self):
+        self.ducker.duck(30)
+        other = sink_input(1, 200, [11111, 22222])
+        other["properties"]["application.name"] = "other"
+        self.set_inputs([other])
+        self.clear_log()
+        self.ducker.restore()
+        self.assertEqual(self.set_calls(), [])
+
+    def test_refresh_same_index_only_pid_or_name_changed_is_new(self):
+        for pid, name in ((999, "app200"), (200, "other")):
+            with self.subTest(pid=pid, name=name):
+                self.ducker.duck(50)
+                changed = sink_input(1, pid, [20000, 20000])
+                changed["properties"]["application.name"] = name
+                self.set_inputs([changed])
+                self.ducker.refresh()
+                self.now += Ducker.MIN_AGE_S
+                self.clear_log()
+                self.ducker.refresh()
+                self.assertEqual(self.set_calls(), [["set-sink-input-volume", "1", "10000", "10000"]])
+                self.ducker.restore()
+                self.set_inputs([sink_input(1, 200, [60000, 50000]), sink_input(3, 300, [40000])])
 
 
 if __name__ == "__main__":

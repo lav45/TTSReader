@@ -84,6 +84,7 @@ class FakeDucker:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.has_orphans = False
+        self.orphans_changed_at = 0.0
 
     def watch(self) -> None:
         self.calls.append(("watch",))
@@ -1123,8 +1124,10 @@ class PlayerDuckingTest(PlayerCase):
     def setUp(self) -> None:
         super().setUp()
         self.ducker = FakeDucker()
+        self.now = 0.0
         self.player = Player(self.runtime, None, self.history_dir,
-                             self.runtime / "handy_analysis.db", ducker=self.ducker)
+                             self.runtime / "handy_analysis.db", ducker=self.ducker,
+                             clock=lambda: self.now)
         self.playback = self.player._playback
         self.player.on_change = self.states.append
 
@@ -1230,6 +1233,31 @@ class PlayerDuckingTest(PlayerCase):
         self.assertEqual(1, len(timers))
         self.ducker.has_orphans = False
         self.assertEqual(self.glib.SOURCE_REMOVE, timers[0]())
+
+    def test_watch_stops_ten_minutes_after_last_orphan_change(self) -> None:
+        self.ducker.has_orphans = True
+        self.player.start()
+        timer = self.watch_timers()[0]
+        self.now = 599.0
+        self.assertEqual(self.glib.SOURCE_CONTINUE, timer())
+        self.now = 600.0
+        self.assertEqual(self.glib.SOURCE_REMOVE, timer())
+        self.player.apply_prefs(Prefs(duck=30))
+        self.assertEqual(1, len(self.watch_timers()))
+
+    def test_watch_not_started_when_orphans_are_old(self) -> None:
+        self.ducker.has_orphans = True
+        self.now = 700.0
+        self.player.start()
+        self.assertEqual([], self.watch_timers())
+
+    def test_watch_restarts_when_orphans_change(self) -> None:
+        self.ducker.has_orphans = True
+        self.now = 700.0
+        self.player.start()
+        self.ducker.orphans_changed_at = 690.0
+        self.player.apply_prefs(Prefs(duck=30))
+        self.assertEqual(1, len(self.watch_timers()))
 
     def test_no_watch_timer_without_orphans(self) -> None:
         self.player.start()

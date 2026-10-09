@@ -1,5 +1,6 @@
 """Плеер-контроллер: курсор по очереди, команды кнопок, снимок состояния для окна."""
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -61,17 +62,21 @@ class Player:
     Ожидание предложения растущего сообщения — тоже playing: громкость не дрожит. Решает
     одно место — _follow_status из _changed, после которого видна каждая смена статуса.
     Сироты (громкость приложения, поток которого закончился приглушённым): вне playing,
-    пока ducker.has_orphans — watch раз в WATCH_SECONDS; решает _follow_orphans рядом с
+    пока ducker.has_orphans и не прошло WATCH_LIMIT_SECONDS с их последнего изменения
+    (ducker.orphans_changed_at) — watch раз в WATCH_SECONDS; решает _follow_orphans рядом с
     _follow_status.
     """
     RETRY_SECONDS = 2
     REFRESH_SECONDS = 1
     WATCH_SECONDS = 2
+    WATCH_LIMIT_SECONDS = 600  # опрос сирот вне речи — 10 минут после их последнего изменения
 
     def __init__(self, runtime_dir: Path, audio_sink: str | None,
                  history_dir: Path | None, history_db: Path | None,
-                 ducker: Ducker | None = None) -> None:
-        """ducker None — без приглушения чужих звуков."""
+                 ducker: Ducker | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at."""
+        self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
         self._queue = MessageQueue(defaults.tail)
@@ -446,7 +451,7 @@ class Player:
         """Таймер watch: идёт вне playing, пока есть сироты; иначе снят."""
         if self._ducker is None:
             return
-        wanted = self._status != "playing" and self._ducker.has_orphans
+        wanted = self._status != "playing" and self._watching_orphans()
         if wanted and not self._watch_id:
             self._watch_id = GLib.timeout_add_seconds(self.WATCH_SECONDS, self._watch)
         elif not wanted:
@@ -454,10 +459,17 @@ class Player:
 
     def _watch(self) -> bool:
         self._ducker.watch()
-        if self._ducker.has_orphans:
+        if self._watching_orphans():
             return GLib.SOURCE_CONTINUE
         self._watch_id = 0
         return GLib.SOURCE_REMOVE
+
+    def _watching_orphans(self) -> bool:
+        """Сироты есть и менялись не позже WATCH_LIMIT_SECONDS назад; дальше — при начале речи."""
+        changed_at = self._ducker.orphans_changed_at
+        if not self._ducker.has_orphans or changed_at is None:
+            return False
+        return self._clock() - changed_at < self.WATCH_LIMIT_SECONDS
 
     def _stop_watch(self) -> None:
         if self._watch_id:
