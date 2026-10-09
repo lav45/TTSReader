@@ -72,7 +72,8 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s0.wav"))
         self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s1.wav"))
         name = self.daemon_saves(session, sentences)
-        self.assertEqual(f"complete {session} aaaaaa 1.50s", self.next_line("complete "))
+        self.assertEqual(f"complete {session} {self.task_ids['aaaaaa']} 1.50s",
+                         self.next_line("complete "))
         switched = self.next_line("switched ")
         prefix = f"switched {name} at "
         self.assertTrue(switched.startswith(prefix), switched)
@@ -90,19 +91,19 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         sentences = [*self.message(session, "aaaaaa", 2),
                      self.sentence(session, "bbbbbb", 1, seconds=SECONDS),
                      self.sentence(session, "bbbbbb", 2, seconds=SECONDS)]
-        self.task("0123456789abcdef")
         self.start_player()
         for path in sentences:
-            self.drop(path)
+            self.drop(path, key="aaaaaa")
+        task_id = self.task_ids["aaaaaa"]
         played = [self.next_line("playing ") for _ in range(2)]
         self.daemon_saves(session, sentences[2:])
         lines = self.lines_until("ended ")
-        self.assertEqual(f"ended {session} aaaaaa", lines[-1])
+        self.assertEqual(f"ended {session} {task_id}", lines[-1])
         played += [line for line in lines if line.startswith("playing ")]
         for _ in range(len(sentences) - len(played)):
             lines += self.lines_until("playing ")
             played.append(lines[-1])
-        self.assertEqual([f"_0123456789abcdef_{p.name}" for p in sentences],
+        self.assertEqual([f"_{task_id}_{p.name}" for p in sentences],
                          [line[line.index("_"):] for line in played])
         self.assertEqual(1, len([line for line in lines if line.startswith("ended ")]), lines)
         self.assertEqual([], [line for line in lines if line.startswith("complete ")])
@@ -118,7 +119,7 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s1.wav"))
         self.daemon_saves(session, sentences, duration=2.0)
         lines = self.lines_until("playing ")
-        self.assertIn(f"ended {session} aaaaaa", lines)
+        self.assertIn(f"ended {session} {self.task_ids['aaaaaa']}", lines)
         self.assertEqual([], [line for line in lines if line.startswith("switched ")])
         self.assertTrue(lines[-1].endswith("aaaaaa_s2.wav"), lines)
 
@@ -131,7 +132,8 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
             self.drop(path)
         self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s0.wav"))
         name = self.daemon_saves(queued, sentences)
-        self.assertEqual(f"complete {queued} bbbbbb 1.00s", self.next_line("complete "))
+        self.assertEqual(f"complete {queued} {self.task_ids['bbbbbb']} 1.00s",
+                         self.next_line("complete "))
         lines = self.lines_until("playing ")
         self.assertEqual([], [line for line in lines if line.startswith("switched ")])
         self.assertEqual(f"playing {name}", lines[-1])
@@ -140,10 +142,10 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
     def test_history_written_before_start_gives_no_lines(self) -> None:
         session = uuid.uuid4().hex
         sentence = self.sentence(session, "aaaaaa", 0)
-        self.drop(sentence)
         self.daemon_saves(session, [sentence])
         self.start_player()
-        lines = self.lines_until("playing ")
+        self.drop(sentence)
+        lines = [line for line in self.lines_until("playing ") if line.startswith(e2e.PROTOCOL)]
         self.assertEqual(1, len(lines), lines)
         self.assertTrue(lines[0].endswith("aaaaaa_s0.wav"))
         self.assert_quiet()

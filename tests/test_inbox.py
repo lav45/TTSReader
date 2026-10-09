@@ -10,7 +10,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
-from tts_player.inbox import Inbox  # noqa: E402
+from tts_player.inbox import Inbox, parse_sentence  # noqa: E402
 from tts_player.model import Sentence  # noqa: E402
 
 WRAPPER = Path(__file__).resolve().parent.parent / "daemon-bin" / "paplay"
@@ -184,14 +184,26 @@ class InboxTest(unittest.TestCase):
         self.assertEqual([fresh], [p.name for p in self.store_dir.iterdir()])
         self.assertEqual([fresh], [s.path.name for s in self.got])
 
-    def test_put_back_moves_sentences_to_inbox_under_same_name(self):
-        name = "1000000000000000000_unknown_tts_queue_S_ab_s0.wav"
-        self.drop(name)
-        self.inbox.start()
-        self.inbox.stop()
-        self.inbox.put_back(self.got)
-        self.assertTrue((self.inbox_dir / name).exists())
-        self.assertEqual([], list(self.store_dir.iterdir()))
+    def test_start_keeps_store_files_of_saved_messages(self):
+        """Файлы сообщений, сохранённых прошлым запуском (messages.json), остаются в store/;
+        прочие остатки удаляются."""
+        self.store_dir.mkdir(parents=True)
+        kept = self.store_dir / "1000000000000000000_aa_tts_queue_S_aa_s0.wav"
+        joined = self.store_dir / "tts-1.wav"
+        stray = self.store_dir / "1000000000000000001_bb_tts_queue_S_bb_s0.wav"
+        for path in (kept, joined, stray):
+            path.write_bytes(b"wav")
+        with self.assertLogs("tts_player.inbox", level="WARNING"):
+            self.inbox.start(keep=frozenset({kept, joined}))
+        self.assertEqual(sorted([kept.name, joined.name]),
+                         sorted(p.name for p in self.store_dir.iterdir()))
+        self.assertEqual([], self.got)
+
+    def test_parse_sentence_by_name(self):
+        path = self.store_dir / "1760000000123456789_0a1f_tts_queue_S_ab_s3.wav"
+        self.assertEqual(Sentence(1760000000123456789, "0a1f", "S", "ab", 3, path),
+                         parse_sentence(path))
+        self.assertIsNone(parse_sentence(self.store_dir / "tts-1.wav"))
 
     def test_directory_in_inbox_is_skipped(self):
         self.inbox_dir.mkdir(parents=True)

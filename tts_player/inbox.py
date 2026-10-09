@@ -22,6 +22,21 @@ NAME_PATTERN = re.compile(
 )
 
 
+def parse_sentence(path: Path) -> Sentence | None:
+    """Предложение по имени файла (NAME_PATTERN); имя не по шаблону — None."""
+    match = NAME_PATTERN.match(path.name)
+    if match is None:
+        return None
+    return Sentence(
+        recv_ns=int(match["recv_ns"]),
+        task_id=match["task_id"] or UNKNOWN_TASK,
+        session_id=match["session_id"],
+        token=match["token"],
+        index=int(match["index"]),
+        path=path,
+    )
+
+
 class Inbox:
     """Следит за inbox/ и отдаёт предложения в on_sentence по порядку приёма.
 
@@ -29,8 +44,8 @@ class Inbox:
     Имена с точкой в начале (.part обёртки) не читаются; имя не по NAME_PATTERN остаётся
     в inbox/ с WARNING. Имя прежнего вида, без id задачи, забирается с id "unknown".
 
-    store/ принадлежит одному запуску плеера: start() удаляет остатки прошлого (после
-    падения), штатный выход возвращает незаконченное в inbox/ через put_back().
+    store/ принадлежит запущенному плееру: start() удаляет остатки прошлого запуска, кроме
+    keep — файлов сообщений, сохранённых им при выходе (messages.json).
 
     Порядок: накопленное при start() отдаётся по возрастанию recv_ns; дальше доставка
     идёт в порядке событий каталога. Упорядочивает по Sentence.recv_ns потребитель
@@ -49,10 +64,10 @@ class Inbox:
         """Каталог предложений этого запуска; сюда же очередь копирует склейки."""
         return self._store
 
-    def start(self) -> None:
+    def start(self, keep: frozenset[Path] = frozenset()) -> None:
         self._inbox.mkdir(parents=True, exist_ok=True)
         self._store.mkdir(parents=True, exist_ok=True)
-        self._clear_store()
+        self._clear_store(keep)
         # Сначала монитор, потом скан: файл между ними не потеряется,
         # а повторный забор того же имени пропускается.
         monitor = Gio.File.new_for_path(str(self._inbox)).monitor_directory(
@@ -67,20 +82,10 @@ class Inbox:
             self._monitor.cancel()
             self._monitor = None
 
-    def put_back(self, sentences: list[Sentence]) -> None:
-        """Возвращает предложения из store/ в inbox/ под тем же именем: их заберёт следующий запуск.
-
-        Звать после stop(), иначе монитор заберёт их обратно.
-        """
-        for sentence in sentences:
-            try:
-                os.rename(sentence.path, self._inbox / sentence.path.name)
-            except OSError:
-                log.exception("Не удалось вернуть %s в inbox", sentence.path.name)
-
-    def _clear_store(self) -> None:
+    def _clear_store(self, keep: frozenset[Path]) -> None:
         with os.scandir(self._store) as entries:
-            leftovers = [entry.path for entry in entries if entry.is_file()]
+            leftovers = [entry.path for entry in entries
+                         if entry.is_file() and Path(entry.path) not in keep]
         if not leftovers:
             return
         log.warning("В store/ остались файлы прошлого запуска (%d), удаляю", len(leftovers))
@@ -123,7 +128,6 @@ class Inbox:
         self._take(name)
 
     def _take(self, name: str) -> None:
-        match = NAME_PATTERN.match(name)
         target = self._store / name
         try:
             self._rename(name, target)
@@ -132,14 +136,7 @@ class Inbox:
         except OSError:
             log.exception("Не удалось забрать %s из inbox", name)
             return
-        sentence = Sentence(
-            recv_ns=int(match["recv_ns"]),
-            task_id=match["task_id"] or UNKNOWN_TASK,
-            session_id=match["session_id"],
-            token=match["token"],
-            index=int(match["index"]),
-            path=target,
-        )
+        sentence = parse_sentence(target)
         try:
             self._on_sentence(sentence)
         except Exception:

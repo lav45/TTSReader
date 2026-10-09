@@ -16,8 +16,8 @@ def hms(seconds: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(seconds))
 
 
-def message(token="t", sentences=None, **kw) -> Message:
-    return Message("unknown", "s", token, sentences or [], **kw)
+def message(task="t", sentences=None, **kw) -> Message:
+    return Message("s", task_ids={task}, sentences=sentences or [], **kw)
 
 
 def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=(),
@@ -56,6 +56,19 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(before, f"{hms(CREATED_AT)}  p")
         m.created_at = CREATED_AT + 900
         self.assertEqual(rows(state(messages=[m]))[0].title, before)
+
+    def test_title_time_is_hook_task_arrival_before_and_after_sentences(self):
+        """Сообщение есть в списке с прихода задачи хука; время не прыгает ни с первым
+        предложением, ни с переозвучкой."""
+        m = message(received_at=CREATED_AT, project="p")
+        self.assertEqual(f"{hms(CREATED_AT)}  p", rows(state(messages=[m]))[0].title)
+        m.sentences.append(sentence(CREATED_AT + 700))
+        self.assertEqual(f"{hms(CREATED_AT)}  p", rows(state(messages=[m]))[0].title)
+
+    def test_message_without_sentences_is_pending_with_zero_length(self):
+        m = message(received_at=CREATED_AT)
+        row = rows(state(messages=[m], lengths=[0.0], completes=[False]))[0]
+        self.assertEqual("0:00…", row.duration)
 
     def test_ellipsis_by_completeness_not_duration(self):
         done = message("a", duration_s=None)
@@ -123,7 +136,7 @@ class ControlsTest(unittest.TestCase):
         for current, (prev, following) in cases.items():
             st = state("playing", current, messages=[a, b, c])
             self.assertEqual((prev_enabled(st), next_enabled(st)), (prev, following),
-                             current.token)
+                             current.task_ids)
 
     def test_prev_next_without_current(self):
         st = state(messages=[message("a"), message("b")])

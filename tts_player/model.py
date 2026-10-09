@@ -1,5 +1,5 @@
 """Модель данных плеера."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 UNKNOWN_TASK = "unknown"
@@ -23,23 +23,32 @@ class Sentence:
 
 @dataclass(eq=False)
 class Message:
-    """Сообщение: предложения одной задачи демона по возрастанию recv_ns.
+    """Сообщение: текст задачи хука и предложения его задач демона по возрастанию recv_ns.
 
-    Задача — task_id; при UNKNOWN_TASK — пара (session_id, token), как до id задачи.
-    token — первого прохода синтеза, вошедшего в сообщение (для журнала).
-    Сравнивается по идентичности: два объекта — два разных сообщения очереди.
+    Появляется с задачей хука (контракт (11)), ещё без предложений. task_ids — id задач
+    демона, поставленных для него (контракт (12)): исходной и переозвучек; предложение с
+    одним из них — его (контракт (13)). sent — последняя задача ушла в демон; False — запись
+    не удалась, ждать предложений нечего. persona/speed — голос, которым озвучен (или
+    озвучивается) кэш: сравниваются с текущими при начале проигрывания. received_at — время
+    задачи хука, по нему строка списка. Сравнивается по идентичности: два объекта — два
+    разных сообщения очереди.
     audio — копия склейки демона в store/ (None, пока её нет или длительности
-    разошлись); created_at/project/duration_s — из записи истории, до неё None.
+    разошлись); created_at/duration_s — из записи истории, до неё None; project — из задачи
+    хука, запись истории его подтверждает.
     heard — сообщение прослушано (MessageQueue.mark_heard): его поздние предложения
-    не добавляются, release() его файлы удаляет.
+    не добавляются.
     """
-    task_id: str
     session_id: str
-    token: str
-    sentences: list[Sentence]
+    project: str | None = None
+    text: str | None = None
+    persona: str | None = None
+    speed: float | None = None
+    task_ids: set[str] = field(default_factory=set)
+    sentences: list[Sentence] = field(default_factory=list)
+    received_at: float | None = None
+    sent: bool = True
     audio: Path | None = None
     created_at: float | None = None
-    project: str | None = None
     duration_s: float | None = None
     heard: bool = False
 

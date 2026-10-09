@@ -8,7 +8,8 @@
        python3 -m tts_player stop    (SIGUSR1 запущенному плееру: остановить текущее)
        python3 -m tts_player play    (SIGUSR2: продолжить остановленное, играющее не трогать)
 Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window) с экраном «Свой текст»
-(tts_player.text_speaker); нет графической сессии — выход 1. С --no-gui — GLib.MainLoop без Gtk и XApp (e2e).
+(tts_player.text_speaker); нет графической сессии — выход 1. С --no-gui — GLib.MainLoop без Gtk
+и XApp (e2e).
 """
 import argparse
 import logging
@@ -23,6 +24,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
+from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.hook_home import HookHome  # noqa: E402
@@ -50,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--history-db", default="~/.claude-tts/handy_analysis.db",
                         help="база истории демона (только чтение)")
     parser.add_argument("--tts-config-dir", default="~/.claude-tts",
-                        help="каталог настроек claude-tts (голос и скорость с экрана настроек)")
+                        help="каталог claude-tts: голос и скорость (экран настроек,"
+                             " переозвучка), очередь демона queue/")
     parser.add_argument("--tts-flag", default="/tmp/claude-tts.on",
                         help="флаг озвучки: в нём ID озвучиваемой сессии (кнопка выключения)")
     parser.add_argument("--tts-off-hook", default="~/.claude/hooks/tts-toggle.sh",
@@ -99,20 +102,26 @@ def main(argv: list[str] | None = None) -> int:
                     Path(runtime) / "tts-player" / "duck-orphans.json")
     ducker.recover()  # остаток после падения — до первого duck в player.start()
     # подменённый HOME хука: его queue/ плеер забирает, heartbeat держит HookHome
-    hook_home = HookHome(Path(runtime) / "tts-player", Path("~/.claude-tts").expanduser())
+    tts_config_dir = Path(args.tts_config_dir).expanduser()
+    hook_home = HookHome(Path(runtime) / "tts-player", tts_config_dir)
     hook_home.start()  # до player.start(): к первой задаче хука hook-home уже готов
+    # голос и скорость: экран настроек и переозвучка сообщений с устаревшим кэшем;
+    # очередь демона и ссылки hook-home — в том же каталоге claude-tts, чтобы не разошлись
+    settings = DaemonSettings(tts_config_dir)
     try:
         player = Player(Path(runtime), args.audio_sink,
                         Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
-                        ducker, hook_tasks_dir=hook_home.queue_dir)
+                        ducker, hook_tasks_dir=hook_home.queue_dir,
+                        daemon_queue=DaemonQueue(tts_config_dir / "queue"),
+                        daemon_settings=settings)
         prefs = PlayerSettings(Path(args.settings_file).expanduser())
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:
             loop = GLib.MainLoop()
             run(player, loop.run, loop.quit, hook_home=hook_home)
         else:
-            settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
-            voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
+            voicing = Voicing(Path(args.tts_flag).expanduser(),
+                              Path(args.tts_off_hook).expanduser())
             text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
                                        SYNTH_WORKER, player, args.audio_sink)
             run_gui(player, settings, prefs, voicing, text_speaker, args.show, hook_home)
@@ -172,7 +181,8 @@ def stop_sound(player: Player, text_speaker: TextSpeaker | None) -> None:
 
 def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None],
         text_speaker: TextSpeaker | None = None, hook_home: HookHome | None = None) -> None:
-    """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, незаконченное — обратно в inbox/.
+    """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, сообщения сохраняются в
+    messages.json для следующего запуска (Player.shutdown).
 
     Свой текст (только с окном): остатки прошлых запусков удаляются до player.start(), выход
     TextSpeaker — до player.shutdown(), иначе его release() пришёл бы в остановленный плеер.

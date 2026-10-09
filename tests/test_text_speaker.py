@@ -14,6 +14,8 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
+from tts_player.daemon_queue import DaemonQueue  # noqa: E402
+from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.text_speaker import TextSpeaker, TextState  # noqa: E402
@@ -517,7 +519,9 @@ class TextSpeakerDuckingTest(TextSpeakerCase):
     def setUp(self) -> None:
         super().setUp()
         self.ducker = FakeDucker()
-        self.main = Player(self.runtime, "fakesink", None, None, ducker=self.ducker)
+        self.main = Player(self.runtime, "fakesink", None, None, ducker=self.ducker,
+                           daemon_queue=DaemonQueue(self.runtime / "daemon-queue"),
+                           daemon_settings=DaemonSettings(self.runtime / "claude-tts"))
         self.addCleanup(self.main.shutdown)
         self.main.apply_prefs(Prefs(duck=45))
 
