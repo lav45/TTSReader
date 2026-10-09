@@ -31,10 +31,12 @@ class PlaybackTest(unittest.TestCase):
         self.loop = GLib.MainLoop()
         self.finished: list[Path] = []
         self.errors: list[tuple[Path, str, bool]] = []
+        self.started: list[Path] = []
         self.playback = Playback("fakesink")
         self.addCleanup(self.playback.stop)
         self.playback.on_finished = self._finished
         self.playback.on_error = self._errored
+        self.playback.on_started = self.started.append
 
     def _finished(self, path: Path) -> None:
         self.finished.append(path)
@@ -102,6 +104,30 @@ class PlaybackTest(unittest.TestCase):
         self.assertEqual(wav, self.errors[0][0])
         self.assertTrue(self.errors[0][1])
         self.assertTrue(self.errors[0][2])
+
+    def test_started_reported_once_before_finished(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 0.2)
+        self.playback.on_started = lambda path: self.started.append((path, list(self.finished)))
+        self.playback.play(wav)
+        self.run_loop()
+        self.assertEqual([(wav, [])], self.started)
+
+    def test_started_with_offset_after_seek(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 1.0)
+        self.playback.play(wav, start_s=0.5)
+        self.run_loop()
+        self.assertEqual([wav], self.started)
+        self.assertEqual([wav], self.finished)
+
+    def test_sink_that_fails_to_open_is_never_started(self) -> None:
+        playback = Playback("filesink")
+        self.addCleanup(playback.stop)
+        playback.on_error = self._errored
+        playback.on_started = self.started.append
+        playback.play(make_wav(self.dir / "a.wav", 0.2))
+        self.run_loop()
+        self.assertEqual(1, len(self.errors))
+        self.assertEqual([], self.started)
 
     def test_play_interrupts_current(self) -> None:
         first = make_wav(self.dir / "first.wav", 1.0)

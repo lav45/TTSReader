@@ -17,6 +17,9 @@ Gst.init(None)
 class Playback:
     """Играет один файл; конец — on_finished(path), сбой — on_error(path, text, output_failed).
 
+    on_started(path) — конвейер дошёл до PLAYING (после seek, если он был): вывод звука
+    открыт и звук пошёл. Sink, который не открывается, до PLAYING не доходит.
+
     output_failed=True — Gst.ResourceError от sink: недоступен вывод звука, файл ни при чём.
     Остальное (файл не найден, не декодируется) — ошибка файла, output_failed=False.
     """
@@ -24,6 +27,7 @@ class Playback:
     def __init__(self, audio_sink: str | None = None) -> None:
         self.on_finished: Callable[[Path], None] = lambda path: None
         self.on_error: Callable[[Path, str, bool], None] = lambda path, text, output_failed: None
+        self.on_started: Callable[[Path], None] = lambda path: None
         self._audio_sink = audio_sink
         self._player: Gst.Element | None = None
         self._bus: Gst.Bus | None = None
@@ -86,6 +90,11 @@ class Playback:
     def _on_message(self, bus: Gst.Bus, message: Gst.Message, path: Path) -> None:
         if message.type == Gst.MessageType.ASYNC_DONE:
             self._continue_start(path)
+        elif message.type == Gst.MessageType.STATE_CHANGED:
+            if message.src == self._player:
+                _, new, _ = message.parse_state_changed()
+                if new == Gst.State.PLAYING:
+                    self.on_started(path)
         elif message.type == Gst.MessageType.EOS:
             self.stop()
             self.on_finished(path)

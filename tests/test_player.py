@@ -43,6 +43,7 @@ class FakePlayback:
     def __init__(self, audio_sink: str | None = None) -> None:
         self.on_finished: Callable[[Path], None] = lambda path: None
         self.on_error: Callable[[Path, str, bool], None] = lambda path, text, output_failed: None
+        self.on_started: Callable[[Path], None] = lambda path: None
         self.played: list[str] = []
         self.starts: list[tuple[str, float]] = []
         self.at: float | None = None  # что вернёт position()
@@ -60,6 +61,10 @@ class FakePlayback:
     def stop(self) -> None:
         self.playing = None
         self.stops += 1
+
+    def started(self) -> None:
+        """Конвейер дошёл до PLAYING: звук пошёл."""
+        self.on_started(self.playing)
 
     def finish(self) -> None:
         """EOS играющего файла: как настоящий Playback — сначала stop, потом колбэк."""
@@ -295,9 +300,12 @@ class PlayerHistoryTest(PlayerCase):
         self.start_with(A0, A1)
         self.playback.fail("no output", True)
         self.retry()
-        self.assertTrue(self.state().output_down)  # повтор ещё не заиграл
         self.playback.at = 0.3
-        state = self.state()
+        self.assertTrue(self.state().output_down)  # позиция — ещё не звук
+        count = len(self.states)
+        self.playback.started()
+        self.assertEqual(count + 1, len(self.states))
+        state = self.states[-1]
         self.assertFalse(state.output_down)
         self.assertAlmostEqual(0.3, state.position_s)
         self.player.toggle_pause()
@@ -305,6 +313,18 @@ class PlayerHistoryTest(PlayerCase):
         self.player.toggle_pause()
         self.assertEqual(A0, self.playback.starts[-1][0])
         self.assertAlmostEqual(0.3, self.playback.starts[-1][1])
+
+    def test_outage_after_recovery_is_reported_again_without_state_calls(self) -> None:
+        self.player.on_change = lambda state: None  # --no-gui: state() никто не зовёт
+        self.start_with(A0, A1)
+        with self.assertLogs("tts_player", "INFO") as logs:
+            self.playback.fail("no output", True)
+            self.retry()
+            self.playback.started()
+            self.playback.at = 0.3
+            self.playback.fail("no output", True)
+        errors = [line for line in logs.output if "error " in line]
+        self.assertEqual(2, len(errors), logs.output)
 
     def test_retry_from_offset_is_not_progress(self) -> None:
         self.start_with(A0, A1)
@@ -323,6 +343,7 @@ class PlayerHistoryTest(PlayerCase):
         self.player.next()
         self.glib.source_remove.assert_called_once_with(42)
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
+        self.playback.started()
         self.playback.at = 0.1
         state = self.state()
         self.assertEqual((False, "bb"), (state.output_down, state.current.token))
@@ -350,6 +371,7 @@ class PlayerHistoryTest(PlayerCase):
         name, start = self.playback.starts[-1]
         self.assertEqual(A1, name)
         self.assertAlmostEqual(0.2, start)
+        self.playback.started()
         self.playback.at = 0.4
         state = self.state()
         self.assertFalse(state.output_down)

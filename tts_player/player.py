@@ -41,7 +41,7 @@ class Player:
 
     Ошибка файла — пропуск. Отказ вывода звука — тот же файл с той же позиции через
     RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор. Отказ кончается,
-    когда звук пошёл: позиция ушла дальше точки запуска файла или файл доиграл.
+    когда звук пошёл (Playback.on_started); повтор, упавший до звука, — тот же отказ.
 
     Склейка играющего по предложениям сообщения подменяет их с той же позиции. Пока
     вывод недоступен, звука нет — повтор начнёт склейку с позиции, с которой запускался
@@ -57,6 +57,7 @@ class Player:
         self._playback = Playback(audio_sink)
         self._playback.on_finished = self._on_finished
         self._playback.on_error = self._on_error
+        self._playback.on_started = self._on_started
         self._inbox = Inbox(runtime_dir, self._on_sentence)
         self._history = None
         if history_dir is not None and history_db is not None:
@@ -197,6 +198,11 @@ class Player:
                 self._switch(message)
         self._changed()
 
+    def _on_started(self, path: Path) -> None:
+        if self._output_down:
+            self._output_down = False
+            self._changed()
+
     def _on_finished(self, path: Path) -> None:
         self._output_down = False
         self._after_file()
@@ -302,19 +308,11 @@ class Player:
         return sentences[index] if index < len(sentences) else None
 
     def _now(self) -> float:
-        """Позиция в текущем сообщении: начало играющего файла плюс позиция в нём.
-
-        Позиция дальше точки запуска — звук идёт: отказ вывода закончился. До seek
-        Playback отдаёт саму точку запуска, это ещё не звук.
-        """
+        """Позиция в текущем сообщении: начало играющего файла плюс позиция в нём."""
         if self._file is None:
             return self._position
         at = self._playback.position()
-        if at is None:
-            return self._position
-        if at > self._position - self._file_base:
-            self._output_down = False
-        return self._file_base + at
+        return self._position if at is None else self._file_base + at
 
     def _changed(self) -> None:
         self.on_change(self.state())
