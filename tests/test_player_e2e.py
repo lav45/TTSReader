@@ -416,6 +416,25 @@ class PlayerE2ETest(PlayerProcessCase):
                          self.wait_volume_sets(2)[1])
         self.assertFalse((self.runtime / "tts-player" / "duck.json").exists())
 
+    def test_one_sentence_answer_ends_by_count_and_restores_volume(self) -> None:
+        """Счётчик предложений в окружении «claude-tts» (поддельный claude_code_tts под текущим
+        интерпретатором): ответ из одного предложения кончается сразу после него — без склейки
+        и следующей задачи громкость чужого потока возвращается."""
+        fake = self.tmp / "fake" / "claude_code_tts"
+        fake.mkdir(parents=True)
+        (fake / "__init__.py").write_text("")
+        (fake / "bridge.py").write_text("def split_sentences(text):\n    return [text.strip()]\n")
+        self.extra_env["PYTHONPATH"] = str(fake.parent)
+        session = self.session
+        self.start_player("fakesink", None, "--tts-python", sys.executable)
+        task = self.hook_task(session, "Привет")
+        self.task(task["id"])
+        subprocess.run([str(PAPLAY), str(self.sentence(session, "aaaaaa", 0))], env=self.env(),
+                       check=True)
+        self.played(1)
+        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"],
+                         self.wait_volume_sets(2)[1])
+
     def test_orphan_stream_is_repaired_after_end(self) -> None:
         """Приглушённый чужой поток исчезает во время речи; после конца появляется новый
         поток того же приложения со сниженной громкостью — ему возвращается исходная."""
@@ -617,25 +636,6 @@ class SingleInstanceTest(PlayerProcessCase):
                        check=True)
         self.assertTrue(self.next_line("playing ").endswith(
             f"_{task['id']}_tts_queue_{session}_aaaaaa_s0.wav"))
-
-    def test_one_sentence_answer_ends_by_count_and_restores_volume(self) -> None:
-        """Счётчик предложений в окружении «claude-tts» (поддельный claude_code_tts под текущим
-        интерпретатором): ответ из одного предложения кончается сразу после него — без склейки
-        и следующей задачи громкость чужого потока возвращается."""
-        fake = self.tmp / "fake" / "claude_code_tts"
-        fake.mkdir(parents=True)
-        (fake / "__init__.py").write_text("")
-        (fake / "bridge.py").write_text("def split_sentences(text):\n    return [text.strip()]\n")
-        self.extra_env["PYTHONPATH"] = str(fake.parent)
-        session = self.session
-        self.start_player("fakesink", None, "--tts-python", sys.executable)
-        task = self.hook_task(session, "Привет")
-        self.task(task["id"])
-        subprocess.run([str(PAPLAY), str(self.sentence(session, "aaaaaa", 0))], env=self.env(),
-                       check=True)
-        self.played(1)
-        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"],
-                         self.wait_volume_sets(2)[1])
 
     def test_hook_home_links_follow_tts_config_dir(self) -> None:
         """--tts-config-dir задаёт и ссылки hook-home: хук читает тот же config.json, что и

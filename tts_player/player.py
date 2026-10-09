@@ -361,8 +361,9 @@ class Player:
         нет в списке — задача удалена (строка «dropped»). Иначе (строка «chars» — её читает e2e)
         сообщение с её текстом — в конец очереди сессии, ещё без звука; сессия активна и
         свой текст не звучит — поля задачи как есть уходят в очередь демона, иначе
-        сообщение отложено (строка «deferred»). Число предложений текста запрашивается сразу,
-        и у отложенного тоже: текст не меняется и при переозвучке."""
+        сообщение отложено (строка «deferred»). Число предложений текста запрашивается после
+        отправки (сбой счёта её не задерживает), и у отложенного тоже: текст не меняется и
+        при переозвучке."""
         if self._control is not None:
             self._control.drain()
         session_id = task.session_id
@@ -374,13 +375,13 @@ class Player:
                           persona=task.persona, speed=task.speed, received_at=task.timestamp)
         queue = self._queues[session_id]
         queue.append(message)
-        self._count(message)
         if session_id == self._sessions.active and not self._held:
             self._send(queue, message, task.fields, f"задача хука {task.id}")
         else:
             message.sent = False
             message.deferred = True
             log.info("task %s %s deferred", task.id, session_id)
+        self._count(message)  # после отправки: сбой счёта задачу демону не задерживает
         self._changed()
 
     def _send(self, queue: MessageQueue, message: Message, fields: dict, origin: str) -> None:

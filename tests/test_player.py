@@ -3,6 +3,7 @@
 звука, переход играющего сообщения на склейку демона, приглушение чужих звуков на время
 playing (заглушка Ducker)."""
 import json
+import sys
 import tempfile
 import time
 import unittest
@@ -23,6 +24,7 @@ from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.player import Player, PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
+from tts_player.sentence_counter import SentenceCounter  # noqa: E402
 from tts_player.sessions import Session, Sessions  # noqa: E402
 
 # <recv_ns>_<id задачи демона>_<имя WAV демона>; id задачи = token, кроме N0
@@ -2476,6 +2478,35 @@ class PlayerSentenceCountTest(PlayerCase):
         self.assertEqual(["text aa"], [text for text, _ in self.counter.requests])
         self.counter.answer(2)
         self.assertEqual(2, self.state().messages[0].sentence_count)
+
+    def test_lone_surrogate_in_text_is_still_sent_to_daemon(self) -> None:
+        """json.loads задачи хука пропускает одиночный суррогат ("\\ud83d"): счётчик его
+        принимает, а сбой счёта задачу демону не задерживает никогда."""
+        self.counter = SentenceCounter(Path(sys.executable), self.runtime / "no-worker.py")
+        self.addCleanup(self.counter.stop)
+        self.player = self.make_player(Sessions(self.runtime / "sessions.json"))
+        self.player.add_session("S", "/w/proj")
+        self.player.select_session("S")
+        self.daemon.ids.append("aa")
+        text = json.loads('"Привет \\ud83d."')
+        self.player._on_hook_task(HookTask("hook-aa", 1.0, "S", "proj", text, "p", 1.0,
+                                           {"id": "hook-aa", "text": text}))
+        [message] = self.state().messages
+        self.assertEqual(({"aa"}, True), (message.task_ids, message.sent))
+        self.assertEqual([text], [put["text"] for put in self.daemon.puts])
+
+    def test_count_failure_does_not_block_sending(self) -> None:
+        class BrokenCounter(FakeCounter):
+            def count(self, text: str, on_count: Callable[[int], None]) -> None:
+                raise RuntimeError("boom")
+
+        self.counter = BrokenCounter()
+        self.player = self.make_player(Sessions(self.runtime / "sessions.json"))
+        self.player.add_session("S", "/w/proj")
+        self.player.select_session("S")
+        with self.assertRaises(RuntimeError):
+            self.announce("aa")
+        self.assertEqual(["text aa"], [put["text"] for put in self.daemon.puts])
 
     def test_single_sentence_ends_when_joined_file_came_before_it(self) -> None:
         """Случай из журнала: склейка пришла раньше, чем inbox/ отдал предложение, — «для

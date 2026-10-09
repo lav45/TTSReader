@@ -50,7 +50,9 @@ class SentenceCounter:
         if self._process is None and not self._launch():
             return
         self._pending.append(on_count)
-        self._outbox.append(json.dumps({"text": text}, ensure_ascii=False).encode() + b"\n")
+        # ASCII с \uXXXX: одиночный суррогат (json.loads задачи хука его пропускает) в UTF-8 не
+        # кодируется, а экранированным процесс получает ту же строку, что и демон
+        self._outbox.append(json.dumps({"text": text}).encode("ascii") + b"\n")
         self._write_next()
         self._arm_timeout()
 
@@ -132,7 +134,9 @@ class SentenceCounter:
         return count
 
     def _arm_timeout(self) -> None:
-        """Срок — на самый старый запрос без ответа; уже идёт — не сдвигается."""
+        """Срок TIMEOUT_S — на самый старый запрос без ответа, от момента постановки срока:
+        пока идёт, новый запрос его не сдвигает; ответ снимает срок, и следующий ждущий
+        запрос получает новый полный TIMEOUT_S. Счётчик, ответивший хоть на что-то, жив."""
         if self._pending and not self._timeout_id:
             self._timeout_id = GLib.timeout_add(int(self.TIMEOUT_S * 1000), self._expired)
 

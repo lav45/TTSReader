@@ -101,6 +101,15 @@ class SentenceCounterTest(unittest.TestCase):
         self.assertEqual(("А. Б.", 2), self.counts[-1])
         self.assertEqual(1, len(self.starts()))
 
+    def test_lone_surrogate_is_counted(self) -> None:
+        """Одиночный суррогат (json.loads задачи хука его пропускает) уходит экранированным
+        \\uXXXX: процесс получает ту же строку, что и демон."""
+        counter = self.make()
+        text = "Раз \ud83d. Два."
+        self.ask(counter, text)
+        self.run_until(lambda: self.counts)
+        self.assertEqual([(text, 2)], self.counts)
+
     def test_long_text_does_not_block(self) -> None:
         """Текст больше буфера канала: запись асинхронная, цикл GLib не встаёт."""
         counter = self.make()
