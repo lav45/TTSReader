@@ -24,7 +24,7 @@ class Ducker:
     def __init__(self, state_file: Path, own_pid: int) -> None:
         self._state_file = state_file
         self._own_pid = own_pid
-        self._saved: dict[int, list[int]] = {}
+        self._saved: dict[int, dict] = {}
         self._percent: int | None = None
 
     @property
@@ -52,16 +52,24 @@ class Ducker:
         inputs = self._list_inputs()
         if inputs is None:
             return
-        fresh = {index: values for index, values in self._foreign(inputs).items() if index not in self._saved}
+        fresh = {
+            index: entry
+            for index, entry in self._foreign(inputs).items()
+            if index not in self._saved or self._saved[index]["name"] != entry["name"]
+            or self._saved[index]["pid"] != entry["pid"]
+        }
         self._lower(fresh)
 
     def restore(self) -> None:
-        """Вернуть запомненные громкости потокам, которые ещё есть; удалить state_file."""
-        inputs = self._list_inputs()
-        present = None if inputs is None else {item["index"] for item in inputs}
-        self._apply(self._saved, present)
+        """Вернуть запомненные громкости потокам, которые ещё есть; удалить state_file.
+
+        Нечего возвращать — pactl не зовём. Не удалось получить список потоков —
+        set пробуем вслепую для каждого запомненного."""
+        saved = self._saved
         self._saved = {}
         self._percent = None
+        if saved:
+            self._apply(saved, self._present())
         self._remove_state()
 
     def recover(self) -> None:
@@ -70,43 +78,78 @@ class Ducker:
             return
         try:
             data = json.loads(self._state_file.read_text(encoding="utf-8"))
-            saved = {int(index): [int(v) for v in values] for index, values in data["inputs"].items()}
+            saved = {
+                int(index): {
+                    "volumes": [int(v) for v in entry["volumes"]],
+                    "name": entry["name"],
+                    "pid": entry["pid"],
+                }
+                for index, entry in data["inputs"].items()
+            }
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             log.warning("Файл приглушения %s повреждён, удалён: %s", self._state_file, exc)
             self._remove_state()
             return
-        inputs = self._list_inputs()
-        present = None if inputs is None else {item["index"] for item in inputs}
-        self._apply(saved, present)
+        if saved:
+            self._apply(saved, self._present())
         self._remove_state()
 
-    def _foreign(self, inputs: list[dict]) -> dict[int, list[int]]:
-        """Громкости по каналам у потоков, чей процесс не наш."""
+    @staticmethod
+    def _identity(item: dict) -> tuple[int, str | None, str | None]:
+        """(index, имя приложения, pid) потока; KeyError/TypeError/AttributeError — запись негодна."""
+        properties = item["properties"]
+        return item["index"], properties.get("application.name"), properties.get(PID_PROPERTY)
+
+    def _present(self) -> dict[int, tuple[str | None, str | None]] | None:
+        """{index: (имя, pid)} живых потоков; None — список получить не удалось."""
+        inputs = self._list_inputs()
+        if inputs is None:
+            return None
         result = {}
         for item in inputs:
             try:
-                if item["properties"].get(PID_PROPERTY) == str(self._own_pid):
-                    continue
-                result[item["index"]] = [channel["value"] for channel in item["volume"].values()]
+                index, name, pid = self._identity(item)
             except (KeyError, TypeError, AttributeError):
                 log.warning("Неожиданная запись sink-input: %r", item)
+                continue
+            result[index] = (name, pid)
         return result
 
-    def _lower(self, streams: dict[int, list[int]]) -> None:
+    def _foreign(self, inputs: list[dict]) -> dict[int, dict]:
+        """Запись {volumes, name, pid} для потоков, чей процесс не наш."""
+        result = {}
+        for item in inputs:
+            try:
+                index, name, pid = self._identity(item)
+                if pid == str(self._own_pid):
+                    continue
+                volumes = [channel["value"] for channel in item["volume"].values()]
+            except (KeyError, TypeError, AttributeError):
+                log.warning("Неожиданная запись sink-input: %r", item)
+                continue
+            result[index] = {"volumes": volumes, "name": name, "pid": pid}
+        return result
+
+    def _lower(self, streams: dict[int, dict]) -> None:
         """Запомнить потоки в state_file и снизить их на self._percent."""
         if not streams:
             return
         self._saved.update(streams)
         self._write_state()
-        lowered = {index: [round(v * self._percent / 100) for v in values] for index, values in streams.items()}
-        self._apply(lowered, None)
-
-    def _apply(self, volumes: dict[int, list[int]], present: set[int] | None) -> None:
-        """set-sink-input-volume для потоков из present (None — для всех)."""
-        for index, values in volumes.items():
-            if present is not None and index not in present:
-                continue
+        for index, entry in streams.items():
+            values = [round(v * self._percent / 100) for v in entry["volumes"]]
             self._pactl("set-sink-input-volume", str(index), *map(str, values))
+
+    def _apply(self, saved: dict[int, dict], present: dict | None) -> None:
+        """Вернуть громкости: только потокам с тем же index, именем и pid (present None — всем)."""
+        for index, entry in saved.items():
+            if present is not None:
+                if index not in present:
+                    continue
+                if present[index] != (entry["name"], entry["pid"]):
+                    log.info("Поток %d стал другим приложением, громкость не возвращена", index)
+                    continue
+            self._pactl("set-sink-input-volume", str(index), *map(str, entry["volumes"]))
 
     def _list_inputs(self) -> list[dict] | None:
         out = self._pactl("-f", "json", "list", "sink-inputs")
@@ -135,7 +178,7 @@ class Ducker:
         return proc.stdout
 
     def _write_state(self) -> None:
-        data = {"inputs": {str(index): values for index, values in self._saved.items()}}
+        data = {"inputs": {str(index): entry for index, entry in self._saved.items()}}
         try:
             write_json(self._state_file, data)
         except OSError as exc:

@@ -99,13 +99,15 @@ class DuckerTest(unittest.TestCase):
         self.ducker.refresh()
         self.assertEqual(self.set_calls(), [["set-sink-input-volume", "4", "10000", "10000"]])
         saved = json.loads(self.state.read_text())
-        self.assertIn("4", json.dumps(saved))
+        self.assertIn("4", saved["inputs"])
+        self.assertEqual(saved["inputs"]["4"]["volumes"], [20000, 20000])
 
     def test_duck_twice_acts_as_refresh(self):
         self.ducker.duck(50)
+        self.set_inputs([sink_input(1, 200, [30000, 25000]), sink_input(5, 500, [10000])])
         self.clear_log()
         self.ducker.duck(50)
-        self.assertEqual(self.set_calls(), [])
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "5", "5000"]])
 
     def test_duck_100_noop(self):
         self.ducker.duck(100)
@@ -143,6 +145,74 @@ class DuckerTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
             with self.assertLogs("tts_player.ducking", "WARNING"):
                 self.ducker.duck(30)
+        self.assertFalse(self.ducker.ducked)
+
+    def test_restore_malformed_item(self):
+        self.ducker.duck(30)
+        self.set_inputs([{"no": "index"}, "junk", sink_input(1, 200, [18000, 15000])])
+        self.clear_log()
+        self.ducker.restore()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "1", "60000", "50000"]])
+
+    def test_recover_malformed_item(self):
+        self.ducker.duck(30)
+        self.set_inputs([None, {"index": 1}, sink_input(1, 200, [18000, 15000])])
+        self.clear_log()
+        Ducker(self.state, OWN_PID).recover()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "1", "60000", "50000"]])
+
+    def test_restore_list_failure_is_blind(self):
+        self.ducker.duck(30)
+        self.clear_log()
+        with mock.patch.dict(os.environ, {"PACTL_FIXTURE": str(self.state.parent / "bad")}):
+            (self.state.parent / "bad").write_text("not json")
+            with self.assertLogs("tts_player.ducking", "WARNING"):
+                self.ducker.restore()
+        self.assertEqual(self.set_calls(), [
+            ["set-sink-input-volume", "1", "60000", "50000"],
+            ["set-sink-input-volume", "3", "40000"],
+        ])
+        self.assertFalse(self.state.exists())
+
+    def test_recover_list_failure_is_blind(self):
+        self.ducker.duck(30)
+        self.clear_log()
+        with mock.patch.dict(os.environ, {"PACTL_EXIT": "1"}):
+            with self.assertLogs("tts_player.ducking", "WARNING"):
+                Ducker(self.state, OWN_PID).recover()
+        attempted = [argv for _, argv in self.calls() if argv.startswith("set-sink-input-volume")]
+        self.assertEqual(attempted, ["set-sink-input-volume 1 60000 50000", "set-sink-input-volume 3 40000"])
+        self.assertFalse(self.state.exists())
+
+    def test_restore_not_ducked_no_pactl(self):
+        self.state.write_text("{}")
+        self.ducker.restore()
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(self.state.exists())
+
+    def test_restore_skips_reused_index(self):
+        self.ducker.duck(30)
+        other = sink_input(1, 999, [11111, 22222])
+        other["properties"]["application.name"] = "other"
+        self.set_inputs([other, sink_input(3, 300, [12000])])
+        self.clear_log()
+        self.ducker.restore()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "3", "40000"]])
+
+    def test_recover_skips_reused_index(self):
+        self.ducker.duck(30)
+        self.set_inputs([sink_input(1, 999, [11111, 22222]), sink_input(3, 300, [12000])])
+        self.clear_log()
+        Ducker(self.state, OWN_PID).recover()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "3", "40000"]])
+
+    def test_refresh_treats_reused_index_as_new(self):
+        self.ducker.duck(50)
+        self.set_inputs([sink_input(1, 999, [20000, 20000]), sink_input(3, 300, [20000])])
+        self.clear_log()
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "1", "10000", "10000"]])
+        self.assertEqual(json.loads(self.state.read_text())["inputs"]["1"]["volumes"], [20000, 20000])
 
 
 if __name__ == "__main__":

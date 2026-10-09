@@ -76,10 +76,10 @@ class Ducker:
 pactl:   LC_ALL=C pactl -f json list sink-inputs
          pactl set-sink-input-volume <index> <value> [<value> …]   # по каналам, порядок channel_map
 чужой    properties["application.process.id"] != str(own_pid)
-duck     запомнить {index: [value по каналам]} → state_file (атомарно) → каждому
+duck     запомнить {index: {volumes: [value по каналам], name: application.name, pid: application.process.id}} → state_file (атомарно) → каждому
          set-sink-input-volume round(value × percent / 100); повторный duck без restore — только refresh
-refresh  потоки, которых нет в запомненных, — запомнить и приглушить тем же percent
-restore  каждому запомненному, который ещё есть в списке, — запомненные значения; state_file удалить
+refresh  потоки, которых нет в запомненных или чьи name/pid другие (index переиспользован), — запомнить (запись заменить) и приглушить тем же percent
+restore  каждому запомненному, который ещё есть в списке с тем же index, name и pid, — запомненные значения (иной поток под тем же index пропустить, info); нечего возвращать — pactl не звать; список не получен — set вслепую каждому; state_file удалить
 recover  state_file есть → restore по нему (потоки, которых нет, пропустить) → удалить; битый — удалить, строка в stderr
 ошибки   pactl нет / код ≠ 0 / таймаут 2 с / не JSON → строка в stderr, исключение не выходит
 ```
