@@ -1,6 +1,7 @@
 """Процесс синтеза «Своего текста»: режет текст на предложения и пишет WAV по одному.
 
-Запускается интерпретатором claude-tts: `<python> synth_worker.py <out_dir>`.
+Запускается интерпретатором claude-tts: `<python> -P synth_worker.py <out_dir>` (-P: каталог
+скрипта не в sys.path). Процесс — лидер своей группы: плеер гасит группу целиком.
 Текст читается из stdin целиком, UTF-8. В stdout идут строки JSON в UTF-8 (каждая сразу
 сбрасывается):
 {"count": k}, затем {"index": i, "path": ..., "duration": ...} по порядку, затем
@@ -17,6 +18,7 @@ from pathlib import Path
 EXIT_OK = 0
 EXIT_SYNTH_FAILED = 1
 EXIT_IMPORT_FAILED = 2
+DEFAULT_PERSONA = "claude-prime"  # как у daemon и bridge, когда в конфиге персоны нет
 
 
 PROTOCOL_STREAM = sys.stdout  # main() заменяет его копией fd 1, пока fd 1 не ушёл в stderr
@@ -67,6 +69,7 @@ def protect_protocol() -> None:
 
 def main(argv: list[str]) -> int:
     """Синтезирует предложения текста из stdin в WAV-файлы каталога argv[1]."""
+    os.setpgid(0, 0)  # лидер своей группы: плеер гасит воркера вместе с sherpa/piper/ffmpeg
     protect_protocol()
     out_dir = Path(argv[1])
     try:
@@ -83,12 +86,12 @@ def main(argv: list[str]) -> int:
     if sentences:
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
-            persona = load_raw_config()["active_persona"]
+            persona = load_raw_config().get("active_persona", DEFAULT_PERSONA)
         except Exception as error:
             emit({"error": f"голос не определён: {error!r}"})
             return EXIT_SYNTH_FAILED
-        if not persona:
-            emit({"error": "голос не определён: active_persona пуст"})
+        if not isinstance(persona, str) or not persona:
+            emit({"error": "голос не определён: active_persona пуст или не строка"})
             return EXIT_SYNTH_FAILED
         for index, sentence in enumerate(sentences):
             path = out_dir / f"{index}.wav"

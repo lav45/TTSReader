@@ -29,6 +29,8 @@ def load_raw_config():
         return {"active_persona": ""}
     if mode == "list":
         return []
+    if mode == "number":
+        return {"active_persona": 5}
     return {"active_persona": "fake-persona"}
 '''
 
@@ -134,12 +136,28 @@ class SynthWorkerTest(unittest.TestCase):
         self.assertIn("boom", lines[-1]["error"])
 
     def test_persona_resolution_failures(self):
-        for mode in ("raise", "missing", "empty", "list"):
+        for mode in ("raise", "empty", "list", "number"):
             with self.subTest(mode=mode):
                 code, lines = self.run_worker("Раз.", FAKE_CONFIG_MODE=mode)
                 self.assertEqual(code, 1)
                 self.assertIn("error", lines[-1])
                 self.assertFalse(any(line.get("done") for line in lines))
+
+    def test_missing_persona_defaults_to_claude_prime(self):
+        code, lines = self.run_worker("Раз.", FAKE_CONFIG_MODE="missing")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.log.read_text().splitlines(), ["claude-prime|Раз."])
+
+    def test_worker_leads_its_process_group(self):
+        proc = self.start(FAKE_DELAY="2")
+        try:
+            proc.stdin.write("Раз.")
+            proc.stdin.close()
+            proc.stdout.readline()  # {"count": 1}: setpgid уже выполнен
+            self.assertEqual(proc.pid, os.getpgid(proc.pid))
+        finally:
+            proc.kill()
+            proc.wait()
 
     def test_stdout_is_pure_protocol(self):
         proc = self.start(FAKE_NOISE="1")

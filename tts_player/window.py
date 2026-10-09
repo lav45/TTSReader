@@ -16,7 +16,7 @@ from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import PlayerSettings, Prefs  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
-from tts_player.text_speaker import TextSpeaker, TextState  # noqa: E402
+from tts_player.text_speaker import SOUNDING_STATUSES, TextSpeaker, TextState  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
 from tts_player.view import (MessageRow, next_enabled, play_pause_enabled,  # noqa: E402
                              play_pause_label, position_label, prev_enabled, rows,
@@ -35,8 +35,6 @@ label.success, label.error { padding: 6px 8px; border-radius: 4px; color: #fffff
 label.success { background-color: #2e7d32; border: 1px solid #1b5e20; }
 label.error { background-color: #c62828; border: 1px solid #8e0000; }
 """
-# свой текст звучит или вот-вот зазвучит: главный плеер и стрелка назад сначала ставят его на паузу
-TEXT_SOUNDING = ("playing", "synthesizing")
 
 
 class SeekSlider:
@@ -305,12 +303,13 @@ class PlayerWindow(Gtk.Window):
         self._show_main()
 
     def _pause_text(self) -> None:
-        if self._text_speaker.state().status in TEXT_SOUNDING:
+        if self._text_speaker.state().status in SOUNDING_STATUSES:
             self._text_speaker.toggle_play_pause()
 
     def _toggle_main(self) -> None:
-        """Play/pause главного экрана: один звук за раз — свой текст сначала на паузу."""
-        self._pause_text()
+        """Play/pause главного экрана. Главный экран виден, только когда свой текст молчит
+        (инвариант держит _leave_text), поэтому его кнопки, включая prev/next и клик по
+        строке, свой текст не трогают."""
         self._player.toggle_play_pause()
 
     def _on_text_changed(self, buffer: Gtk.TextBuffer) -> None:

@@ -396,8 +396,8 @@ class Player:
         return self._autoplay and not self._held
 
     def _stop_after(self, message: Message) -> None:
-        """Конец сообщения без автовоспроизведения или в удержании: stopped; текущим становится следующее
-        по порядку с позиции 0, нет его — сообщение остаётся текущим с позицией в конце."""
+        """Конец сообщения без автовоспроизведения: stopped; текущим становится следующее по
+        порядку с позиции 0, нет его — сообщение остаётся текущим с позицией в конце."""
         self._status = "stopped"
         following = self._queue.following(message)
         if following is None:

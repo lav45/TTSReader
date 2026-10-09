@@ -155,6 +155,14 @@ def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voi
     run(player, Gtk.main, Gtk.main_quit, text_speaker)
 
 
+def stop_sound(player: Player, text_speaker: TextSpeaker | None) -> None:
+    """`tts-player stop` (SIGUSR1, /tts-off): главный плеер стоп, звучащий свой текст — на паузу."""
+    log.info("stop requested")
+    player.stop_playback()
+    if text_speaker is not None:
+        text_speaker.pause()
+
+
 def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None],
         text_speaker: TextSpeaker | None = None) -> None:
     """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, незаконченное — обратно в inbox/.
@@ -170,8 +178,7 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGHUP, on_signal)  # закрытие терминала
 
     def on_stop() -> bool:
-        log.info("stop requested")
-        player.stop_playback()
+        stop_sound(player, text_speaker)
         return GLib.SOURCE_CONTINUE
 
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR1, on_stop)
@@ -187,9 +194,11 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
         player.start()
         main_loop()
     finally:
-        if text_speaker is not None:
-            text_speaker.shutdown()
-        player.shutdown()
+        try:
+            if text_speaker is not None:
+                text_speaker.shutdown()
+        finally:
+            player.shutdown()
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from tts_player.model import Message
 from tts_player.player import PlayerState
-from tts_player.text_speaker import TextState
+from tts_player.text_speaker import SOUNDING_STATUSES, TextState
 
 NO_PROJECT = "—"
 PENDING_MARK = "…"
@@ -100,7 +100,7 @@ def text_position_label(state: TextState) -> str:
 
 def text_play_pause_label(state: TextState) -> str:
     """Кнопка экрана «Свой текст»: звучит или вот-вот зазвучит (синтез после play) — пауза."""
-    return "⏸" if state.status in ("playing", "synthesizing") else "⏵"
+    return "⏸" if state.status in SOUNDING_STATUSES else "⏵"
 
 
 def text_play_enabled(state: TextState) -> bool:

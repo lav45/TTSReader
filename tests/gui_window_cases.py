@@ -145,7 +145,7 @@ class FakeVoicing:
 
 def text_state(status: str, position_s: float = 0.0, length_s: float = 0.0,
                error: str = "") -> TextState:
-    return TextState(status, position_s, length_s, False, error)
+    return TextState(status, position_s, length_s, error)
 
 
 class FakeTextSpeaker:
@@ -885,16 +885,6 @@ class TextScreenTest(unittest.TestCase):
             w.text_back_button.clicked()
             self.assertEqual("main", w.stack.get_visible_child_name(), status)
             self.assertEqual([], self.text.calls, status)
-
-    def test_main_play_pauses_sounding_text_first(self) -> None:
-        """Один звук за раз: свой текст встаёт на паузу раньше команды главному плееру."""
-        w = self.window
-        order = []
-        self.text.on_change = lambda st: order.append(("text", st.status))
-        self.player.toggle_play_pause = lambda: order.append(("player", "toggle"))
-        self.text.snapshot = text_state("playing", 1.0, 5.0)
-        w.play_pause_button.clicked()
-        self.assertEqual([("text", "paused"), ("player", "toggle")], order)
 
     def test_main_play_with_silent_text_toggles_only_player(self) -> None:
         w = self.window

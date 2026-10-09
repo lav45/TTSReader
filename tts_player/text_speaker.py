@@ -2,6 +2,7 @@
 готовых подряд, удержание главного плеера на время звучания."""
 import json
 import logging
+import os
 import shutil
 import signal
 import threading
@@ -17,10 +18,14 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player import Player  # noqa: E402
+from tts_player.synth_worker import EXIT_IMPORT_FAILED  # noqa: E402
 
 log = logging.getLogger("tts_player.text_speaker")
 
 TextStatus = Literal["empty", "synthesizing", "playing", "paused", "stopped", "error"]
+# свой текст звучит или вот-вот зазвучит: в этих статусах главный плеер в удержании, а стрелка
+# назад и команда stop ставят текст на паузу
+SOUNDING_STATUSES: tuple[TextStatus, ...] = ("playing", "synthesizing")
 
 
 @dataclass(frozen=True)
@@ -30,7 +35,6 @@ class TextState:
     status: TextStatus
     position_s: float
     length_s: float  # сумма duration пришедших предложений
-    complete: bool  # процесс прислал {"done"}
     error: str
 
 
@@ -68,13 +72,13 @@ class _Synthesis:
         self._read_next()
 
     def stop(self) -> None:
-        """Колбэки сняты; живой процесс получает SIGTERM, выход ждётся здесь не дольше
-        STOP_TIMEOUT_S, затем SIGKILL. Срок отмеряет поток threading.Timer: wait() крутит свой
+        """Колбэки сняты; живой процесс (вся его группа) получает SIGTERM, выход ждётся здесь
+        не дольше STOP_TIMEOUT_S, затем SIGKILL. Срок отмеряет поток threading.Timer: wait() крутит свой
         контекст GLib, таймер главного цикла в нём не сработает."""
         self._cancellable.cancel()
         if self._process.get_identifier() is None:
             return
-        self._process.send_signal(signal.SIGTERM)
+        self._signal(signal.SIGTERM)
         deadline = Gio.Cancellable()
         timer = threading.Timer(self.STOP_TIMEOUT_S, deadline.cancel)
         timer.start()
@@ -86,8 +90,18 @@ class _Synthesis:
                         self.STOP_TIMEOUT_S)
         finally:
             timer.cancel()
-        self._process.force_exit()
+        self._signal(signal.SIGKILL)
         self._process.wait(None)
+
+    def _signal(self, number: signal.Signals) -> None:
+        """Сигнал группе процесса: synth_worker — лидер своей группы, и sherpa/piper/ffmpeg
+        под ним умирают вместе с ним. Группы ещё нет (воркер не дошёл до setpgid) — сигнал
+        самому процессу."""
+        pid = int(self._process.get_identifier())
+        try:
+            os.killpg(pid, number)
+        except ProcessLookupError:
+            self._process.send_signal(number)
 
     def _written(self, stream: Gio.OutputStream, result: Gio.AsyncResult) -> None:
         try:
@@ -161,7 +175,7 @@ class TextSpeaker:
         self._file_base = 0.0
 
     def state(self) -> TextState:
-        return TextState(self._status, self._now(), self._length(), self._complete, self._error)
+        return TextState(self._status, self._now(), self._length(), self._error)
 
     def set_text(self, text: str) -> None:
         """Текст изменился: синтез отменён, звук стоп, каталог удалён; пустой — empty, иначе stopped."""
@@ -176,7 +190,7 @@ class TextSpeaker:
         """synthesizing/playing → paused (синтез идёт дальше); paused → с места; stopped и
         error — готовое с курсора (в конце — с начала), нет готового и синтеза — новый
         процесс; empty — ничего."""
-        if self._status in ("synthesizing", "playing"):
+        if self._status in SOUNDING_STATUSES:
             self._position = self._now()
             self._halt()
             self._status = "paused"
@@ -192,6 +206,12 @@ class TextSpeaker:
                 self._error = ""
             self._play_from(position)
         self._changed()
+
+    def pause(self) -> None:
+        """Команда `tts-player stop`: звучащий (playing, synthesizing) свой текст — на паузу,
+        иначе ничего."""
+        if self._status in SOUNDING_STATUSES:
+            self.toggle_play_pause()
 
     def seek(self, position_s: float) -> None:
         """Позиция в пределах уже синтезированного; статус не меняется."""
@@ -230,7 +250,8 @@ class TextSpeaker:
         while (self._text_root / str(self._serial)).exists():
             self._serial += 1
         out_dir = self._text_root / str(self._serial)
-        argv = [str(self._python), str(self._worker), str(out_dir)]
+        # -P: каталог воркера не в sys.path, иначе tts_player/queue.py затенит stdlib queue
+        argv = [str(self._python), "-P", str(self._worker), str(out_dir)]
         try:
             out_dir.mkdir(parents=True)
         except OSError as error:
@@ -285,15 +306,21 @@ class TextSpeaker:
 
     def _on_ready(self, sentence: _Ready) -> None:
         self._sentences.append(sentence)
-        if self._status in ("synthesizing", "playing") and self._index is None:
+        if self._status in SOUNDING_STATUSES and self._index is None:
             self._play_from(self._position)
 
     def _on_exit(self, process: Gio.Subprocess) -> None:
         self._run = None
+        exited = process.get_if_exited()
+        code = process.get_exit_status() if exited else None
+        if code == EXIT_IMPORT_FAILED and not self._complete:
+            self._fail(f"процесс синтеза завершился с кодом {code} без строки error")
+            self._error = f"синтез недоступен: {self._error}"
+            self._changed()
+            return
         if self._complete or self._synth_failed:
             return
-        if process.get_if_exited():
-            code = process.get_exit_status()
+        if exited:
             self._fail(f"процесс синтеза завершился с кодом {code} без строки done")
         else:
             self._fail(f"процесс синтеза остановлен сигналом {process.get_term_sig()}")
@@ -408,7 +435,7 @@ class TextSpeaker:
 
     def _changed(self) -> None:
         """Каждая смена статуса доходит сюда: сначала удержание главного плеера, затем экран."""
-        holding = self._status in ("synthesizing", "playing")
+        holding = self._status in SOUNDING_STATUSES
         if holding != self._holding:
             self._holding = holding
             if holding:

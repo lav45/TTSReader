@@ -2,6 +2,7 @@
 звук — Playback с fakesink, главный плеер — запись hold/release или настоящий Player с
 заглушкой Ducker (pactl не зовётся)."""
 import json
+import os
 import sys
 import tempfile
 import time
@@ -159,7 +160,7 @@ class TextSpeakerCase(unittest.TestCase):
 class TextSpeakerPlayTest(TextSpeakerCase):
     def test_initial_state_is_empty(self) -> None:
         speaker = self.make([])
-        self.assertEqual(TextState("empty", 0.0, 0.0, False, ""), speaker.state())
+        self.assertEqual(TextState("empty", 0.0, 0.0, ""), speaker.state())
 
     def test_blank_text_does_not_start(self) -> None:
         speaker = self.make([["count", 0], ["done"]])
@@ -182,10 +183,10 @@ class TextSpeakerPlayTest(TextSpeakerCase):
         self.assertAlmostEqual(0.3, self.plays[0][2])
         lengths = sorted({round(s.length_s, 3) for s in self.states})
         self.assertEqual([0.0, 0.3, 0.6, 0.9], lengths)
-        self.assertIn("playing", [s.status for s in self.states if not s.complete])
+        self.assertIn("playing", [s.status for s in self.states])
         state = speaker.state()
         self.assertEqual(("stopped", 0.0, True, ""),
-                         (state.status, state.position_s, state.complete, state.error))
+                         (state.status, state.position_s, speaker._complete, state.error))
         self.assertAlmostEqual(0.9, state.length_s)
         self.assertEqual(["hold", "release"], self.player.calls)
         self.assertEqual(["start Раз. Два. Три. 1"], self.starts())
@@ -225,8 +226,8 @@ class TextSpeakerPlayTest(TextSpeakerCase):
         speaker.toggle_play_pause()
         speaker.toggle_play_pause()
         self.assertEqual("paused", self.status())
-        self.run_until(lambda: speaker.state().complete)
-        self.assertEqual(TextState("paused", 0.0, 0.2, True, ""), speaker.state())
+        self.run_until(lambda: speaker._complete)
+        self.assertEqual(TextState("paused", 0.0, 0.2, ""), speaker.state())
         self.assertEqual([], self.plays)
         speaker.toggle_play_pause()
         self.run_until(lambda: self.status() == "stopped")
@@ -237,7 +238,7 @@ class TextSpeakerPlayTest(TextSpeakerCase):
         speaker.set_text("Раз. Два.")
         speaker.toggle_play_pause()
         speaker.toggle_play_pause()
-        self.run_until(lambda: speaker.state().complete)
+        self.run_until(lambda: speaker._complete)
         speaker.seek(5.0)
         self.assertAlmostEqual(1.0, speaker.state().position_s)
         speaker.seek(0.7)
@@ -253,11 +254,40 @@ class TextSpeakerPlayTest(TextSpeakerCase):
         speaker.set_text("Раз.")
         speaker.toggle_play_pause()
         speaker.toggle_play_pause()
-        self.run_until(lambda: speaker.state().complete)
+        self.run_until(lambda: speaker._complete)
         speaker.seek(0.3)
         speaker.toggle_play_pause()
         self.assertEqual(("0.wav", 0.0), self.plays[-1][:2])
         self.run_until(lambda: self.status() == "stopped")
+
+
+class TextSpeakerPauseTest(TextSpeakerCase):
+    """pause() — команда `tts-player stop`: звучащий текст на паузу, иначе ничего."""
+
+    def test_pause_while_playing(self) -> None:
+        speaker = self.make([["count", 2], ["wav", 0, 1.0], ["sleep", 30]])
+        speaker.set_text("Раз. Два.")
+        speaker.toggle_play_pause()
+        self.run_until(lambda: self.status() == "playing")
+        speaker.pause()
+        self.assertEqual("paused", self.status())
+        self.assertEqual(["hold", "release"], self.player.calls)
+
+    def test_pause_while_synthesizing(self) -> None:
+        speaker = self.make([["sleep", 30]])
+        speaker.set_text("Раз.")
+        speaker.toggle_play_pause()
+        speaker.pause()
+        self.assertEqual("paused", self.status())
+
+    def test_pause_otherwise_is_noop(self) -> None:
+        speaker = self.make([])
+        speaker.pause()
+        self.assertEqual("empty", self.status())
+        speaker.set_text("Раз.")
+        speaker.pause()
+        self.assertEqual("stopped", self.status())
+        self.assertEqual([], self.player.calls)
 
 
 class TextSpeakerCancelTest(TextSpeakerCase):
@@ -270,7 +300,7 @@ class TextSpeakerCancelTest(TextSpeakerCase):
         speaker.set_text("Другой.")
         self.assertIn("term", self.log_lines())
         self.assertFalse((self.text_dir / "1").exists())
-        self.assertEqual(TextState("stopped", 0.0, 0.0, False, ""), speaker.state())
+        self.assertEqual(TextState("stopped", 0.0, 0.0, ""), speaker.state())
         self.assertEqual(["hold", "release"], self.player.calls)
         speaker.toggle_play_pause()
         self.run_until(lambda: len(self.starts()) == 2)
@@ -284,7 +314,7 @@ class TextSpeakerCancelTest(TextSpeakerCase):
         self.run_until(lambda: self.status() == "stopped")
         speaker.set_text("Два.")
         self.assertFalse((self.text_dir / "1").exists())
-        self.assertEqual(TextState("stopped", 0.0, 0.0, False, ""), speaker.state())
+        self.assertEqual(TextState("stopped", 0.0, 0.0, ""), speaker.state())
         speaker.set_text("")
         self.assertEqual("empty", self.status())
 
@@ -304,6 +334,52 @@ class TextSpeakerCancelTest(TextSpeakerCase):
         self.assertLess(time.monotonic() - started, 3.0)
         self.assertFalse((self.text_dir / "1").exists())
         self.assertEqual("stopped", self.status())
+
+    def test_set_text_kills_grandchildren_of_worker_group(self) -> None:
+        speaker = self.make([])
+        child_pid_file = self.root / "child.pid"
+        self.worker.write_text(
+            'import os, subprocess, sys, time\n'
+            'os.setpgid(0, 0)\n'  # как настоящий synth_worker: лидер своей группы
+            'sys.stdin.read()\n'
+            'child = subprocess.Popen(["sleep", "60"])\n'
+            f'open({str(child_pid_file)!r}, "w").write(str(child.pid))\n'
+            'time.sleep(60)\n')
+        speaker.set_text("Раз.")
+        speaker.toggle_play_pause()
+        self.run_until(child_pid_file.exists)
+        child_pid = int(child_pid_file.read_text())
+        speaker.set_text("Два.")
+        self.assertTrue(self.wait_gone(child_pid), "внук процесса синтеза пережил set_text")
+
+    def test_worker_argv_has_isolated_flag(self) -> None:
+        speaker = self.make([])
+        argv_file = self.root / "argv.json"
+        self.worker.write_text(
+            'import json, sys\n'
+            f'open({str(argv_file)!r}, "w").write(json.dumps([sys.flags.safe_path, sys.path[0]]))\n'
+            'import time; time.sleep(60)\n')
+        speaker.set_text("Раз.")
+        speaker.toggle_play_pause()
+        self.run_until(argv_file.exists)
+        time.sleep(0.1)
+        safe_path, first = json.loads(argv_file.read_text())
+        self.assertTrue(safe_path)  # -P: каталог скрипта не в sys.path, queue.py не затеняет stdlib
+        self.assertNotEqual(str(self.root), first)
+
+    @staticmethod
+    def wait_gone(pid: int, limit: float = 3.0) -> bool:
+        """Процесс исчез (зомби до подбора init считается исчезнувшим)."""
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return True
+            if state == "Z":
+                return True
+            time.sleep(0.02)
+        return False
 
     def test_shutdown_kills_process_removes_dir_and_releases(self) -> None:
         speaker = self.make([["count", 2], ["sleep", 30]])
@@ -345,7 +421,7 @@ class TextSpeakerErrorTest(TextSpeakerCase):
         self.run_until(lambda: self.status() == "error")
         state = speaker.state()
         self.assertEqual("сбой синтеза", state.error)
-        self.assertFalse(state.complete)
+        self.assertFalse(speaker._complete)
         self.assertAlmostEqual(0.3, state.length_s)
         self.assertEqual(["0.wav"], [name for name, _, _ in self.plays])
         self.assertEqual(["hold", "release"], self.player.calls)
@@ -365,10 +441,18 @@ class TextSpeakerErrorTest(TextSpeakerCase):
         speaker = self.make([["error", "import claude_code_tts: нет пакета"], ["exit", 2]])
         speaker.set_text("Раз.")
         speaker.toggle_play_pause()
-        self.run_until(lambda: self.status() == "error")
-        self.assertEqual("import claude_code_tts: нет пакета", speaker.state().error)
+        self.run_until(lambda: speaker.state().error.startswith("синтез недоступен"))
+        self.assertEqual("error", self.status())
+        self.assertEqual("синтез недоступен: import claude_code_tts: нет пакета", speaker.state().error)
         self.assertEqual([], self.plays)
         self.assertEqual(["hold", "release"], self.player.calls)
+
+    def test_exit_2_without_error_line_is_unavailable(self) -> None:
+        speaker = self.make([["exit", 2]])
+        speaker.set_text("Раз.")
+        speaker.toggle_play_pause()
+        self.run_until(lambda: speaker.state().error.startswith("синтез недоступен: "))
+        self.assertEqual("error", self.status())
 
     def test_play_after_error_without_sound_starts_new_process(self) -> None:
         speaker = self.make([["error", "нет голоса"], ["exit", 1]])
@@ -377,7 +461,7 @@ class TextSpeakerErrorTest(TextSpeakerCase):
         self.run_until(lambda: self.status() == "error")
         self.assertTrue((self.text_dir / "1").exists())
         speaker.toggle_play_pause()
-        self.assertEqual(TextState("synthesizing", 0.0, 0.0, False, ""), speaker.state())
+        self.assertEqual(TextState("synthesizing", 0.0, 0.0, ""), speaker.state())
         self.assertFalse((self.text_dir / "1").exists())
         self.run_until(lambda: self.status() == "error")
         self.assertEqual(2, len(self.starts()))

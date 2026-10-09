@@ -138,7 +138,7 @@ class TextViewTest(unittest.TestCase):
 
     @staticmethod
     def text(status: str, position_s: float = 0.0, length_s: float = 0.0) -> TextState:
-        return TextState(status, position_s, length_s, False, "")
+        return TextState(status, position_s, length_s, "")
 
     def test_play_pause_label_per_status(self):
         for status, label in (("synthesizing", "⏸"), ("playing", "⏸"), ("paused", "⏵"),
