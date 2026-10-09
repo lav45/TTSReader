@@ -44,6 +44,7 @@
 - Синтез — внутренней функцией пакета `claude-tts` отдельным процессом.
 - Play своего текста ставит главный плеер на паузу; после — главный остаётся на паузе.
 - Синтез по предложениям, звук — с первого готового.
+- Выход стрелкой назад ставит свой текст на паузу; продолжает пользователь кнопкой play.
 
 ## Файлы
 
@@ -176,7 +177,8 @@ PlayerWindow(…, text_speaker: TextSpeaker)
   text_play_button → text_speaker.toggle_play_pause(); неактивна при пустом тексте
   text_scale, сдвинутый пользователем → text_speaker.seek(value)
   status error → текст ошибки под ползунком
-  стрелка назад → главный экран; звук своего текста продолжает играть
+  стрелка назад → главный экран; свой текст встаёт на паузу (playing/synthesizing → paused, синтез идёт дальше);
+                 продолжает пользователь кнопкой play на экране «Свой текст»
 __main__: TextSpeaker(<runtime>, Path("~/.local/share/uv/tools/claude-code-tts/bin/python").expanduser(),
           <пакет>/synth_worker.py, player); cleanup_leftovers() до start; shutdown() при выходе
           --tts-python FILE переопределяет интерпретатор
@@ -184,7 +186,7 @@ __main__: TextSpeaker(<runtime>, Path("~/.local/share/uv/tools/claude-code-tts/b
 
 **Acceptance Criteria:**
 - [ ] кнопка: иконка, подсказка, без текста, место в ряду служебных кнопок
-- [ ] клик → экран `"text"`; стрелка → `"main"`
+- [ ] клик → экран `"text"`; стрелка → `"main"`, играющий свой текст встал на паузу
 - [ ] ввод текста вызывает `set_text` с содержимым буфера; play — `toggle_play_pause`; пустой текст — play неактивна
 - [ ] подпись play и ползунок следуют `TextState` (playing, paused, synthesizing, stopped, error)
 - [ ] сдвиг ползунка пользователем вызывает `seek`; обновление из состояния — не вызывает
