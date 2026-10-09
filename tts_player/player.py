@@ -199,9 +199,11 @@ class Player:
         self._changed()
 
     def play_message(self, message: Message) -> None:
-        """Клик по строке списка: сообщение становится текущим и играет с начала, из любого
-        статуса. Покинутое прослушано, только если начато и завершено (как у next/prev);
-        клик по текущему и по вытесненному из очереди сообщению ничего не меняет."""
+        """Клик по строке списка: только выбор. Сообщение становится текущим с позиции 0 в
+        статусе stopped и не начатым (в хвост входит при первом play/pause, как после
+        `_stop_after`); звук играет, только когда пользователь нажмёт play/pause. Покинутое
+        прослушано, только если начато и завершено (как у next/prev); клик по текущему и по
+        вытесненному из очереди сообщению ничего не меняет."""
         if not any(message is queued for queued in self._queue.messages):
             return
         current = self._current
@@ -209,7 +211,10 @@ class Player:
             return
         if current is not None:
             self._leave(current)
-        self._begin(message)
+        self._current = message
+        self._sentence = None
+        self._position = 0.0
+        self._status = "stopped"
         self._changed()
 
     def seek(self, position_s: float) -> None:

@@ -224,7 +224,7 @@ class PlayerWindowTest(unittest.TestCase):
         self.addCleanup(window.destroy)
         self.assertTrue(window.voicing_off_button.get_sensitive())
 
-    def test_row_activation_plays_that_message(self) -> None:
+    def test_row_activation_selects_that_message(self) -> None:
         w = self.window
         self.assertTrue(w.message_list.get_activate_on_single_click())
         w.message_list.get_row_at_index(1).activate()
