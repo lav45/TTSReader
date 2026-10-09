@@ -23,7 +23,8 @@ class PlayerWindow(Gtk.Window):
     """Два экрана в одном Gtk.Stack.
 
     "main": кнопки prev / pause / play|stop / next, ползунок позиции, список сообщений,
-    внизу слева значки «Очистить буфер» и «Настройки». "settings": голос и скорость
+    внизу слева значки «Очистить буфер», «Настройки» и «Выключить озвучку» (активен, пока
+    озвучка включена; состояние читается при показе окна и на тике таймера). "settings": голос и скорость
     claude-tts через DaemonSettings; «Сохранить» пишет их и возвращает на главный экран,
     стрелка назад возвращает без записи.
 
@@ -34,10 +35,11 @@ class PlayerWindow(Gtk.Window):
     SPEED_STEP = 0.1
     SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
 
-    def __init__(self, player, settings: DaemonSettings) -> None:
+    def __init__(self, player, settings: DaemonSettings, voicing) -> None:
         super().__init__(title="TTS Player")
         self._player = player
         self._settings = settings
+        self._voicing = voicing
         self._refresh_id = 0
         self._dragging = False
         self._drag_value: float | None = None  # change-value за перетаскивание; None — не двигали
@@ -64,6 +66,8 @@ class PlayerWindow(Gtk.Window):
                                               player.clear)
         self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
                                                  self._open_settings)
+        self.voicing_off_button = self._icon_button(
+            "system-shutdown-symbolic", "Выключить озвучку (/tts-off)", voicing.turn_off)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         for button in (self.prev_button, self.pause_button, self.play_stop_button,
@@ -79,7 +83,7 @@ class PlayerWindow(Gtk.Window):
 
         # ряд значков внизу слева; следующие значки — pack_start сюда же
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        for button in (self.clear_button, self.settings_button):
+        for button in (self.clear_button, self.settings_button, self.voicing_off_button):
             tools.pack_start(button, False, False, 0)
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -101,6 +105,7 @@ class PlayerWindow(Gtk.Window):
         self.connect("hide", self._on_hide)
         player.on_change = self._show_state
         self._show_state(player.state())
+        self._show_voicing()
 
     @staticmethod
     def _button(label: str, command) -> Gtk.Button:
@@ -294,6 +299,7 @@ class PlayerWindow(Gtk.Window):
 
     def _on_show(self, _window) -> None:
         self._show_state(self._player.state())
+        self._show_voicing()
         if not self._refresh_id:
             self._refresh_id = GLib.timeout_add(self.REFRESH_MS, self._refresh)
 
@@ -305,7 +311,12 @@ class PlayerWindow(Gtk.Window):
 
     def _refresh(self) -> bool:
         self._show_state(self._player.state())
+        self._show_voicing()
         return GLib.SOURCE_CONTINUE
+
+    def _show_voicing(self) -> None:
+        """Флаг озвучки читается с диска, поэтому не на каждое событие плеера, а на показ и тик."""
+        self.voicing_off_button.set_sensitive(self._voicing.is_on())
 
 
 def tray_menu(quit_app: Callable[[], None]) -> Gtk.Menu:
