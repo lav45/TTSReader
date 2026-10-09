@@ -137,7 +137,8 @@ class Player:
         self._daemon_settings = daemon_settings
         self._control = None
         if control_dir is not None:
-            self._control = ControlRequests(control_dir, self.add_session, self.remove_session)
+            self._control = ControlRequests(control_dir, self.add_session, self.remove_session,
+                                            self.clear_session)
         self._hook_tasks = None
         if hook_tasks_dir is not None:
             self._hook_tasks = HookTasks(hook_tasks_dir, self._on_hook_task)
@@ -162,6 +163,10 @@ class Player:
         self._ducking = False  # duck() вызван, restore() ещё нет
         self._refresh_id = 0
         self._watch_id = 0
+        # cwd очищенной `/clear` активной сессии: сессия оттуда станет активной вместо неё.
+        # Инвариант: ожидание замены => активной сессии нет (ставится только при снятии
+        # активной, любая активация его снимает)
+        self._replace_cwd: str | None = None
 
     def apply_prefs(self, prefs: Prefs) -> None:
         """Настройки плеера: хвост очереди каждой сессии, процент приглушения; играющее не трогается. Новый процент во время игры — restore, затем
@@ -245,41 +250,69 @@ class Player:
         return frozenset(files)
 
     def add_session(self, session_id: str, cwd: str) -> None:
-        """Запрос `session add`: у новой сессии пустая очередь; стала активной (первая в
-        пустом списке) — играет её очередь. Строку журнала (её читает e2e) пишет только
-        настоящая смена."""
+        """Запрос `session add`: у новой сессии пустая очередь; активной сама не становится
+        (её открывает пользователь), кроме замены очищенной `/clear` активной из того же cwd:
+        тогда она активна как после клика по папке (текущего нет, idle), ожидание снято. Строки
+        журнала (их читает e2e) пишет только настоящая смена."""
         if not self._sessions.add(session_id, cwd):
             return
         log.info("session add %s", session_id)
         self._queues[session_id] = self._new_queue()
+        if cwd == self._replace_cwd:
+            self._replace_cwd = None
+            self._activate(session_id)
+            log.info("session replace %s", session_id)
         self._changed()
 
     def remove_session(self, session_id: str) -> None:
         """Запрос `session remove` («Завершить»): файлы и тексты сессии удалены, её поздние
         предложения — чужие. Была активной — звук стоп, активной нет, пока пользователь не
-        выберет сессию: текущего нет, статус idle. Строка журнала — только при настоящей
-        смене."""
+        выберет сессию: текущего нет, статус idle. Замены не ждёт. Строка журнала — только при
+        настоящей смене."""
+        if self._end_session(session_id) is not None:
+            log.info("session remove %s", session_id)
+            self._changed()
+
+    def clear_session(self, session_id: str, cwd: str) -> None:
+        """Запрос `session clear` (`/clear` в Claude Code): сессия кончилась как при remove.
+        Была активной — следующая сессия из cwd станет активной вместо неё (add_session).
+        Нет в списке — ничего. Строка журнала — только при настоящей смене."""
+        was_active = self._end_session(session_id)
+        if was_active is None:
+            return
+        log.info("session clear %s", session_id)
+        if was_active:
+            self._replace_cwd = cwd
+        self._changed()
+
+    def _end_session(self, session_id: str) -> bool | None:
+        """Общая часть remove и clear: сессия и её очередь убраны, была активной — звук стоп,
+        курсор сброшен. None — сессии нет в списке, было ли активной — иначе."""
         was_active = session_id == self._sessions.active
         if not self._sessions.remove(session_id):
-            return
-        log.info("session remove %s", session_id)
+            return None
         if was_active:
             self._halt()
             self._reset_cursor()
         self._queues.pop(session_id).clear()
-        self._changed()
+        return was_active
 
     def select_session(self, session_id: str) -> None:
         """Клик по закрытой папке: активная или не из списка — ничего. Иначе звук стоп, она
         активна, фокуса нет (текущего нет, idle): играть начнёт ▶, клик по строке или её новое
-        сообщение."""
+        сообщение. Выбор пользователя снимает ожидание замены после `/clear`."""
         if session_id == self._sessions.active or not self._sessions.has(session_id):
             return
+        self._replace_cwd = None
+        self._activate(session_id)
+        log.info("session select %s", session_id)
+        self._changed()
+
+    def _activate(self, session_id: str) -> None:
+        """Сессия из списка становится активной: звук стоп, фокуса нет (текущего нет, idle)."""
         self._halt()
         self._sessions.select(session_id)
-        log.info("session select %s", session_id)
         self._reset_cursor()
-        self._changed()
 
     def close_session(self) -> None:
         """Клик по открытой папке: звук стоп, активной нет, пока пользователь не выберет

@@ -1,4 +1,4 @@
-"""Забор запросов `tts-player session add/remove` из control/ (контракт (14))."""
+"""Забор запросов `tts-player session add/remove/clear` из control/ (контракт (14))."""
 import json
 import logging
 from collections.abc import Callable
@@ -11,17 +11,19 @@ log = logging.getLogger("tts_player.control")
 
 class ControlRequests:
     """Следит за control/ и выполняет запросы по порядку имён: add -> on_add(session, cwd),
-    remove -> on_remove(session).
+    remove -> on_remove(session),
+    clear -> on_clear(session, cwd).
 
     Забор файлов — Mailbox; здесь разбор: битый запрос (не JSON, не объект, неизвестный op,
-    нет строкового session, add без строкового cwd) удаляется со строкой WARNING в журнал,
+    нет строкового session, add и clear без строкового cwd) удаляется со строкой WARNING в журнал,
     колбэк не зван. Остатки *.tmp после упавшего писателя убирает start().
     """
 
     def __init__(self, control_dir: Path, on_add: Callable[[str, str], None],
-                 on_remove: Callable[[str], None]) -> None:
+                 on_remove: Callable[[str], None], on_clear: Callable[[str, str], None]) -> None:
         self._on_add = on_add
         self._on_remove = on_remove
+        self._on_clear = on_clear
         self._mailbox = Mailbox(control_dir, self._handle, log, "control", clean_leftovers=True)
 
     def start(self) -> None:
@@ -51,11 +53,14 @@ class ControlRequests:
         if op == "remove":
             self._on_remove(session)
             return
-        if op != "add":
+        if op not in ("add", "clear"):
             log.warning("control: в %s неизвестный op %r, удаляю", name, op)
             return
         cwd = fields.get("cwd")
         if not isinstance(cwd, str):
-            log.warning("control: в %s add без строкового cwd, удаляю", name)
+            log.warning("control: в %s %s без строкового cwd, удаляю", name, op)
+            return
+        if op == "clear":
+            self._on_clear(session, cwd)
             return
         self._on_add(session, cwd)

@@ -28,7 +28,8 @@ class ControlCase(unittest.TestCase):
         self.control = ControlRequests(
             self.control_dir,
             lambda session, cwd: self.calls.append(("add", session, cwd)),
-            lambda session: self.calls.append(("remove", session)))
+            lambda session: self.calls.append(("remove", session)),
+            lambda session, cwd: self.calls.append(("clear", session, cwd)))
         self.addCleanup(self.control.stop)
 
     def write(self, name, data):
@@ -81,6 +82,14 @@ class ControlCase(unittest.TestCase):
         self.assertEqual([("add", "u1", "/p"), ("remove", "u1")], self.calls)
         self.assertEqual([], list(self.control_dir.iterdir()))
 
+    def test_clear_calls_on_clear_and_mixed_order_kept(self):
+        self.write("3.json", {"op": "clear", "session": "u1", "cwd": "/p"})
+        self.write("1.json", {"op": "add", "session": "u1", "cwd": "/p"})
+        self.write("2.json", {"op": "remove", "session": "u2"})
+        self.control.start()
+        self.assertEqual([("add", "u1", "/p"), ("remove", "u2"), ("clear", "u1", "/p")], self.calls)
+        self.assertEqual([], list(self.control_dir.iterdir()))
+
     def test_bad_requests_deleted_with_warning(self):
         bad = {
             "1.json": "не json",
@@ -90,6 +99,9 @@ class ControlCase(unittest.TestCase):
             "5.json": {"op": "add", "session": "u1"},
             "6.json": {"op": "add", "session": "u1", "cwd": 5},
             "7.json": {"op": "remove", "session": 5},
+            "8.json": {"op": "clear", "session": "u1"},
+            "9.json": {"op": "clear", "session": "u1", "cwd": 5},
+            "10.json": {"op": "clear", "cwd": "/p"},
         }
         for name, data in bad.items():
             self.write(name, data)
@@ -147,7 +159,7 @@ class ControlCase(unittest.TestCase):
         def boom(session, cwd):
             raise RuntimeError("x")
 
-        control = ControlRequests(self.control_dir, boom, lambda s: None)
+        control = ControlRequests(self.control_dir, boom, lambda s: None, lambda s, c: None)
         path = self.write("1.json", {"op": "add", "session": "u1", "cwd": "/p"})
         with self.assertLogs("tts_player.control", "ERROR") as logs:
             control.drain()

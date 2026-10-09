@@ -98,8 +98,9 @@ class PlayerHookTest(unittest.TestCase):
         payload = json.dumps({"session_id": session, "cwd": cwd, "source": "startup"})
         return self.run_hook("start", stdin=payload, **kwargs)
 
-    def end(self, session="u1", **kwargs):
-        payload = json.dumps({"session_id": session, "reason": "clear"})
+    def end(self, session="u1", reason="other", cwd=None, **kwargs):
+        data = {"session_id": session, "reason": reason, "cwd": cwd}
+        payload = json.dumps({key: value for key, value in data.items() if value is not None})
         return self.run_hook("end", stdin=payload, **kwargs)
 
     def hook_log(self):
@@ -275,6 +276,31 @@ class PlayerHookTest(unittest.TestCase):
         self.assertEqual(self.calls("tts-player", 1, wait=0), ["session remove u1"])
         self.assertFalse((self.records / "claude-tts.args").exists())
         self.assertIn("вывод заглушки session", self.hook_log())
+
+    def test_end_clear_calls_session_clear_with_cwd(self):
+        result = self.end(reason="clear", cwd="/p")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls("tts-player", 1), ["session clear u1 /p"])
+        self.assertIn("вывод заглушки session", self.hook_log())
+
+    def test_end_other_reasons_remove_session(self):
+        for reason in ("other", "logout", "resume", "prompt_input_exit", None):
+            with self.subTest(reason=reason):
+                (self.records / "tts-player.calls").unlink(missing_ok=True)
+                result = self.end(reason=reason, cwd="/p")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.calls("tts-player", 1), ["session remove u1"])
+
+    def test_end_clear_without_cwd_fails_and_runs_nothing(self):
+        for cwd in (None, ""):
+            with self.subTest(cwd=cwd):
+                payload = {"session_id": "u1", "reason": "clear"}
+                if cwd is not None:
+                    payload["cwd"] = cwd
+                result = self.run_hook("end", stdin=json.dumps(payload))
+                self.assertEqual(result.returncode, 1)
+                self.assertNotEqual(result.stderr.strip(), "")
+                self.assertFalse((self.records / "tts-player.calls").exists())
 
     def test_end_works_without_claude_tts(self):
         (self.stubs / "claude-tts").unlink()

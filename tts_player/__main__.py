@@ -4,7 +4,7 @@
                               [--tts-config-dir DIR] [--settings-file FILE]
                               [--tts-python FILE]
                               [--no-gui] [--show] [--tray]
-       python3 -m tts_player session add UUID CWD | remove UUID | has UUID
+       python3 -m tts_player session add UUID CWD | remove UUID | clear UUID CWD | has UUID
                                   (подкоманда — в tts_player.session_command; has: выход 0 — сессия в списке)
 Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window) с экраном «Свой текст»
 (tts_player.text_speaker); нет графической сессии — выход 1. С --no-gui — GLib.MainLoop без Gtk

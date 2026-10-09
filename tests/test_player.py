@@ -2025,6 +2025,52 @@ class PlayerSessionsTest(PlayerCase):
         self.player.add_session("D", "/w/d")
         self.assertIsNone(self.state().active)
 
+    def test_clear_active_then_add_from_same_cwd_makes_new_session_active(self) -> None:
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.player.clear_session("S", "/w/proj")
+            self.player.add_session("C", "/w/proj")
+        state = self.state()
+        self.assertEqual(("C", "idle", None, None),
+                         (state.active, state.status, state.current, self.playback.playing))
+        self.assertEqual(["session clear S", "session add C", "session replace C"],
+                         [m.split(":", 2)[2] for m in logs.output])
+
+    def test_clear_active_then_add_from_other_cwd_waits_for_same_cwd(self) -> None:
+        self.player.clear_session("S", "/w/proj")
+        self.player.add_session("C", "/w/q")
+        self.assertIsNone(self.state().active)
+        self.player.add_session("D", "/w/proj")
+        self.assertEqual("D", self.state().active)
+
+    def test_replacement_is_one_shot(self) -> None:
+        self.player.clear_session("S", "/w/proj")
+        self.player.add_session("C", "/w/proj")
+        self.player.add_session("D", "/w/proj")
+        self.assertEqual("C", self.state().active)
+
+    def test_clear_inactive_keeps_active_and_sets_no_replacement(self) -> None:
+        self.player.clear_session("B", "/w/other")
+        self.player.add_session("C", "/w/other")
+        self.assertEqual("S", self.state().active)
+        self.assertNotIn("B", self.player._queues)
+
+    def test_select_session_drops_pending_replacement(self) -> None:
+        self.player.clear_session("S", "/w/proj")
+        self.player.select_session("B")
+        self.player.add_session("C", "/w/proj")
+        self.assertEqual("B", self.state().active)
+
+    def test_remove_active_sets_no_replacement(self) -> None:
+        self.player.remove_session("S")
+        self.player.add_session("C", "/w/proj")
+        self.assertIsNone(self.state().active)
+
+    def test_clear_unknown_session_does_nothing_and_logs_nothing(self) -> None:
+        with self.assertNoLogs("tts_player.player", "INFO"):
+            self.player.clear_session("nope", "/w/proj")
+        self.player.add_session("C", "/w/proj")
+        self.assertEqual("S", self.state().active)
+
     def test_first_session_in_empty_list_stays_closed(self) -> None:
         self.player.remove_session("S")
         self.player.remove_session("B")

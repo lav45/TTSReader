@@ -1,7 +1,7 @@
-"""Подкоманда `tts-player session add|remove|has`: гейт хука Claude Code зовёт её на каждом хуке,
+"""Подкоманда `tts-player session add|remove|clear|has`: гейт хука Claude Code зовёт её на каждом хуке,
 поэтому модуль не импортирует плеер и gi — только instance, sessions и стандартную библиотеку.
 
-add и remove не трогают sessions.json: кладут запрос в $XDG_RUNTIME_DIR/tts-player/control/<ns>.json
+add, remove и clear не трогают sessions.json: кладут запрос в $XDG_RUNTIME_DIR/tts-player/control/<ns>.json
 (atomic_json.write_json: временный *.tmp рядом, затем rename; сбой убирает его);
 список меняет плеер. has только читает sessions.json.
 """
@@ -14,7 +14,7 @@ from tts_player.atomic_json import write_json
 from tts_player.instance import is_locked
 from tts_player.sessions import control_dir, read_sessions, sessions_path
 
-SESSION_USAGE = "usage: tts-player session add <uuid> <cwd> | remove <uuid> | has <uuid>"
+SESSION_USAGE = "usage: tts-player session add <uuid> <cwd> | remove <uuid> | clear <uuid> <cwd> | has <uuid>"
 
 
 def main(args: list[str]) -> int:
@@ -22,6 +22,8 @@ def main(args: list[str]) -> int:
         return session_add(args[1], args[2])
     if len(args) == 2 and args[0] == "remove":
         return session_remove(args[1])
+    if len(args) == 3 and args[0] == "clear":
+        return session_clear(args[1], args[2])
     if len(args) == 2 and args[0] == "has":
         return session_has(args[1])
     print(SESSION_USAGE, file=sys.stderr)
@@ -70,16 +72,25 @@ def session_add(session_id: str, cwd: str) -> int:
 
 
 def session_remove(session_id: str) -> int:
-    request = {"op": "remove", "session": session_id}
+    return submit_drop(session_id, {"op": "remove", "session": session_id})
+
+
+def session_clear(session_id: str, cwd: str) -> int:
+    """`/clear` в Claude Code: плеер убирает сессию, как remove, и ждёт замену из того же cwd."""
+    return submit_drop(session_id, {"op": "clear", "session": session_id, "cwd": cwd})
+
+
+def submit_drop(session_id: str, request: dict) -> int:
+    """Общая часть remove и clear: запрос нужен, пока UUID в списке (или список отстаёт от control/)."""
     return submit(session_id, request, noop_text="сессия не в списке", sent_text="сессия передана плееру на удаление",
                   offline_text="плеер не запущен — сессия уберётся при его запуске", noop_when_listed=False)
 
 
 def submit(session_id: str, request: dict, noop_text: str, sent_text: str, offline_text: str,
            noop_when_listed: bool) -> int:
-    """Запрос не нужен, если список уже в нужном состоянии: add — UUID есть, remove — UUID нет.
+    """Запрос не нужен, если список уже в нужном состоянии: add — UUID есть, remove и clear — UUID нет.
     Но пока в control/ лежат необработанные запросы, sessions.json устарел: тогда пишем всегда
-    (add и remove в плеере идемпотентны)."""
+    (add, remove и clear в плеере идемпотентны)."""
     runtime = runtime_dir()
     if runtime is None:
         print("tts-player: XDG_RUNTIME_DIR не задан", file=sys.stderr)
