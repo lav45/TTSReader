@@ -1,8 +1,7 @@
 """Процесс плеера: разбор аргументов и главный цикл; устройство — в tts_player.player.
 
 Запуск: python3 -m tts_player [--audio-sink NAME] [--history-dir DIR] [--history-db FILE]
-                              [--tts-config-dir DIR] [--tts-flag FILE]
-                              [--tts-off-hook FILE] [--settings-file FILE]
+                              [--tts-config-dir DIR] [--settings-file FILE]
                               [--tts-python FILE]
                               [--no-gui] [--show] [--tray]
        python3 -m tts_player session add UUID CWD | remove UUID | has UUID
@@ -34,7 +33,6 @@ from tts_player.player_settings import PlayerSettings  # noqa: E402
 from tts_player.sessions import Sessions, control_dir, sessions_path  # noqa: E402
 from tts_player import session_command  # noqa: E402
 from tts_player.text_speaker import TextSpeaker  # noqa: E402
-from tts_player.voicing import Voicing  # noqa: E402
 
 SYNTH_WORKER = Path(__file__).resolve().parent / "synth_worker.py"
 
@@ -52,10 +50,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tts-config-dir", default="~/.claude-tts",
                         help="каталог claude-tts: голос и скорость (экран настроек,"
                              " переозвучка), очередь демона queue/")
-    parser.add_argument("--tts-flag", default="/tmp/claude-tts.on",
-                        help="флаг озвучки: в нём ID озвучиваемой сессии (кнопка выключения)")
-    parser.add_argument("--tts-off-hook", default="~/.claude/hooks/tts-toggle.sh",
-                        help="хук, который кнопка выключения зовёт как `<хук> off`")
     parser.add_argument("--settings-file",
                         default=str(PlayerSettings.default_path(os.environ)),
                         help="файл настроек плеера: хвост, автовоспроизведение, приглушение")
@@ -117,11 +111,9 @@ def main(argv: list[str] | None = None) -> int:
             loop = GLib.MainLoop()
             run(player, loop.run, loop.quit, hook_home=hook_home)
         else:
-            voicing = Voicing(Path(args.tts_flag).expanduser(),
-                              Path(args.tts_off_hook).expanduser())
             text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
                                        SYNTH_WORKER, player, args.audio_sink)
-            run_gui(player, settings, prefs, voicing, text_speaker, args.show, hook_home)
+            run_gui(player, settings, prefs, text_speaker, args.show, hook_home)
     finally:
         hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
     return 0
@@ -135,13 +127,13 @@ def gtk_ready() -> bool:
     return initialized
 
 
-def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voicing: Voicing,
+def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings,
             text_speaker: TextSpeaker, show: bool, hook_home: HookHome) -> None:
     from gi.repository import Gtk
 
     from tts_player.window import PlayerWindow, TrayIcon
 
-    window = PlayerWindow(player, settings, prefs, voicing, text_speaker)
+    window = PlayerWindow(player, settings, prefs, text_speaker)
     tray = TrayIcon(window, Gtk.main_quit)  # noqa: F841 — значок живёт, пока жива ссылка
     if show:
         window.present()

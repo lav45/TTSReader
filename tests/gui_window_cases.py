@@ -25,6 +25,7 @@ from tts_player.text_speaker import TextState  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
+from tts_player.sessions import Session  # noqa: E402
 from tts_player.view import play_pause_label, position_label  # noqa: E402
 from tts_player.window import PlayerWindow, tray_menu  # noqa: E402
 
@@ -32,15 +33,21 @@ if not Gtk.init_check(None)[0]:
     raise RuntimeError("Gtk.init_check: дисплей недоступен")
 
 
+SESSIONS = [Session("1dd2b064-b8fd-4c1e-9a77-000000000001", "TTSReader"),
+            Session("abcdef12-0000-4000-8000-000000000002", "")]
+
+
 def message(task: str) -> Message:
     return Message("s", task_ids={task}, created_at=1_700_000_000.0, project="p", duration_s=10.0)
 
 
 def state(status: str, current: Message | None, messages: list[Message],
-          position_s: float = 0.0, autoplay: bool = True) -> PlayerState:
+          position_s: float = 0.0, autoplay: bool = True, sessions: tuple = (),
+          active: str | None = None) -> PlayerState:
     length = 0.0 if current is None else 10.0
     return PlayerState(status, current, position_s, length, messages, False,
-                       [10.0] * len(messages), [True] * len(messages), autoplay, [], None)
+                       [10.0] * len(messages), [True] * len(messages), autoplay,
+                       list(sessions), active)
 
 
 class FakePlayer:
@@ -85,6 +92,12 @@ class FakePlayer:
     def play_message(self, message: Message) -> None:
         self.calls.append(("play_message", message))
 
+    def select_session(self, session_id: str) -> None:
+        self.calls.append(("select_session", session_id))
+
+    def remove_session(self, session_id: str) -> None:
+        self.calls.append(("remove_session", session_id))
+
 
 class FakeSettings:
     """Контракт DaemonSettings для окна: load() и save(); вызовы записываются.
@@ -128,20 +141,6 @@ class FakePrefs:
         if self.save_error is not None:
             raise self.save_error
         self.loaded = prefs
-
-
-class FakeVoicing:
-    """Контракт Voicing для окна: is_on() и turn_off(); on задаёт ответ, вызовы считаются."""
-
-    def __init__(self, on: bool = True) -> None:
-        self.on = on
-        self.turn_off_calls = 0
-
-    def is_on(self) -> bool:
-        return self.on
-
-    def turn_off(self) -> None:
-        self.turn_off_calls += 1
 
 
 def text_state(status: str, position_s: float = 0.0, length_s: float = 0.0,
@@ -201,12 +200,12 @@ def flush() -> None:
 class PlayerWindowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.a, self.b, self.c = message("a"), message("b"), message("c")
-        self.player = FakePlayer(state("playing", self.b, [self.a, self.b, self.c], 3.0))
+        self.player = FakePlayer(state("playing", self.b, [self.a, self.b, self.c], 3.0,
+                                       sessions=SESSIONS, active=SESSIONS[0].id))
         self.settings = FakeSettings(voice_settings())
         self.prefs = FakePrefs(Prefs(tail=7, autoplay=True))
-        self.voicing = FakeVoicing(on=False)
         self.text = FakeTextSpeaker()
-        self.window = PlayerWindow(self.player, self.settings, self.prefs, self.voicing,
+        self.window = PlayerWindow(self.player, self.settings, self.prefs,
                                    self.text)
         self.addCleanup(self.window.destroy)
 
@@ -218,50 +217,113 @@ class PlayerWindowTest(unittest.TestCase):
             button.clicked()
             self.assertEqual([(call,)], self.player.calls, call)
 
-    def test_voicing_off_button_is_third_icon_without_text(self) -> None:
+    def test_end_session_button_is_third_icon_without_text(self) -> None:
         w = self.window
-        button = w.voicing_off_button
+        button = w.end_session_button
         self.assertFalse(button.get_label())
         self.assertEqual("system-shutdown-symbolic", icon_name(button))
-        self.assertEqual("Выключить озвучку (/tts-off)", button.get_tooltip_text())
+        self.assertEqual("Завершить активную сессию (/tts-off)", button.get_tooltip_text())
+        self.assertEqual("Очистить сообщения активной сессии", w.clear_button.get_tooltip_text())
         row = w.clear_button.get_parent()
         self.assertEqual([w.settings_button, w.clear_button, button], row.get_children()[:3])
 
-    def test_voicing_off_button_follows_is_on_on_show_and_tick(self) -> None:
-        button = self.window.voicing_off_button
-        self.assertFalse(button.get_sensitive())
-        self.voicing.on = True
-        self.window._refresh()  # тик REFRESH_MS
-        self.assertTrue(button.get_sensitive())
-        self.voicing.on = False
-        self.window._refresh()
-        self.assertFalse(button.get_sensitive())
-        self.voicing.on = True
-        self.window.show()
+    def test_end_session_button_removes_active_session_once(self) -> None:
+        self.player.calls.clear()
+        self.window.end_session_button.clicked()
+        self.assertEqual([("remove_session", SESSIONS[0].id)], self.player.calls)
+
+    def test_session_buttons_follow_active_session(self) -> None:
+        w = self.window
+        self.assertTrue(w.clear_button.get_sensitive())
+        self.assertTrue(w.end_session_button.get_sensitive())
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
+                                 sessions=SESSIONS))
+        self.assertFalse(w.clear_button.get_sensitive())
+        self.assertFalse(w.end_session_button.get_sensitive())
+
+    def test_session_list_sits_between_tools_and_messages(self) -> None:
+        w = self.window
+        main = w.clear_button.get_parent().get_parent()
+        children = main.get_children()
+        tools = w.clear_button.get_parent()
+        container = w.session_list.get_ancestor(Gtk.Box)
+        while container.get_parent() is not main:
+            container = container.get_parent()
+        scrolled = w.message_list.get_ancestor(Gtk.ScrolledWindow)
+        self.assertEqual(children.index(tools) + 1, children.index(container))
+        self.assertEqual(children.index(container) + 1, children.index(scrolled))
+        self.assertFalse(main.query_child_packing(container)[0])  # expand не отнимает
+
+    def session_texts(self) -> list[str]:
+        rows = self.window.session_list.get_children()
+        return [row.get_child().get_children()[0].get_text() for row in rows]
+
+    def test_session_list_shows_rows_with_bold_active(self) -> None:
+        self.assertEqual(["TTSReader · 1dd2b064", "— · abcdef12"], self.session_texts())
+        labels = [row.get_child().get_children()[0]
+                  for row in self.window.session_list.get_children()]
+        bold = [label.get_attributes() is not None for label in labels]
+        self.assertEqual([True, False], bold)
+
+    def test_session_row_activation_selects_that_session(self) -> None:
+        w = self.window
+        self.assertTrue(w.session_list.get_activate_on_single_click())
+        self.player.calls.clear()
+        w.session_list.get_row_at_index(1).activate()
+        w.session_list.get_row_at_index(0).activate()
+        self.assertEqual([("select_session", SESSIONS[1].id), ("select_session", SESSIONS[0].id)],
+                         self.player.calls)
+
+    def focused_session(self) -> int | None:
+        row = self.window.session_list.get_focus_child()
+        return None if row is None else row.get_index()
+
+    def test_session_rebuild_keeps_focus_on_active_row(self) -> None:
+        w = self.window
+        w.show_all()
         flush()
-        self.assertTrue(button.get_sensitive())
+        w.session_list.get_row_at_index(0).grab_focus()
+        flush()
+        self.assertEqual(0, self.focused_session())
+        # Enter по второй строке: активной стала она, строки перестроились
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
+                                 sessions=SESSIONS, active=SESSIONS[1].id))
+        flush()
+        self.assertEqual(1, self.focused_session())
 
-    def test_voicing_off_button_click_turns_off_once(self) -> None:
-        self.voicing.on = True
-        self.window._refresh()
-        self.window.voicing_off_button.clicked()
-        self.assertEqual(1, self.voicing.turn_off_calls)
+    def test_session_rebuild_without_active_keeps_same_index(self) -> None:
+        w = self.window
+        w.show_all()
+        flush()
+        w.session_list.get_row_at_index(1).grab_focus()
+        flush()
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
+                                 sessions=SESSIONS[:1]))
+        flush()
+        self.assertEqual(0, self.focused_session())
 
-    def test_voicing_off_button_insensitive_right_after_click(self) -> None:
-        """Двойной клик не запускает второй хук: кнопка гаснет сразу, не дожидаясь тика."""
-        self.voicing.on = True
-        self.window._refresh()
-        button = self.window.voicing_off_button
-        button.clicked()
-        self.assertFalse(button.get_sensitive())
-        self.window._refresh()  # флаг остался: следующий тик возвращает кнопку
-        self.assertTrue(button.get_sensitive())
+    def test_no_sessions_hides_list_and_disables_buttons(self) -> None:
+        w = self.window
+        container = w.session_list.get_parent()
+        self.assertTrue(container.get_visible())
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0))
+        self.assertEqual([], w.session_list.get_children())
+        self.assertFalse(container.get_visible())
+        self.assertFalse(w.clear_button.get_sensitive())
+        self.assertFalse(w.end_session_button.get_sensitive())
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
+                                 sessions=SESSIONS, active=SESSIONS[0].id))
+        self.assertTrue(container.get_visible())
 
-    def test_voicing_off_button_sensitive_at_construction_when_on(self) -> None:
-        window = PlayerWindow(self.player, self.settings, self.prefs, FakeVoicing(on=True),
-                              self.text)
-        self.addCleanup(window.destroy)
-        self.assertTrue(window.voicing_off_button.get_sensitive())
+    def test_session_list_rebuilds_only_on_change(self) -> None:
+        w = self.window
+        row = w.session_list.get_row_at_index(0)
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 4.0,
+                                 sessions=SESSIONS, active=SESSIONS[0].id))
+        self.assertIs(row, w.session_list.get_row_at_index(0))
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 4.0,
+                                 sessions=SESSIONS, active=SESSIONS[1].id))
+        self.assertIsNot(row, w.session_list.get_row_at_index(0))
 
     def test_row_activation_selects_that_message(self) -> None:
         w = self.window
@@ -400,7 +462,8 @@ class PlayerWindowTest(unittest.TestCase):
         while scrolled.get_parent() is not main:  # ListBox в ScrolledWindow через Viewport
             scrolled = scrolled.get_parent()
         transport = w.play_pause_button.get_parent()
-        self.assertEqual([tools, scrolled, w.scale, transport], main.get_children())
+        sessions = w.session_list.get_parent()  # свой контейнер между значками и сообщениями
+        self.assertEqual([tools, sessions, scrolled, w.scale, transport], main.get_children())
         self.assertTrue(main.child_get_property(scrolled, "expand"))
 
     def test_play_pause_label_and_sensitivity_per_state(self) -> None:
@@ -479,16 +542,16 @@ class SettingsScreenTest(unittest.TestCase):
         self.player = FakePlayer(state("stopped", None, []))
         self.settings = FakeSettings(voice_settings())
         self.prefs = FakePrefs(Prefs(tail=7, autoplay=True))
-        self.voicing = FakeVoicing(on=False)
         self.text = FakeTextSpeaker()
-        self.window = PlayerWindow(self.player, self.settings, self.prefs, self.voicing,
+        self.window = PlayerWindow(self.player, self.settings, self.prefs,
                                    self.text)
         self.addCleanup(self.window.destroy)
 
     def test_icon_buttons_without_text_first_in_one_row(self) -> None:
         w = self.window
+        clear_tooltip = "Очистить сообщения активной сессии"
         for button, icon, tooltip in ((w.settings_button, "emblem-system-symbolic", "Настройки"),
-                                      (w.clear_button, "user-trash-symbolic", "Очистить буфер")):
+                                      (w.clear_button, "user-trash-symbolic", clear_tooltip)):
             self.assertFalse(button.get_label(), tooltip)
             self.assertEqual(icon, icon_name(button))
             self.assertEqual(tooltip, button.get_tooltip_text())
@@ -745,21 +808,21 @@ class TextScreenTest(unittest.TestCase):
         self.player = FakePlayer(state("paused", None, []))
         self.text = FakeTextSpeaker()
         self.window = PlayerWindow(self.player, FakeSettings(voice_settings()),
-                                   FakePrefs(Prefs(tail=7, autoplay=True)), FakeVoicing(on=True),
+                                   FakePrefs(Prefs(tail=7, autoplay=True)),
                                    self.text)
         self.addCleanup(self.window.destroy)
 
     def calls(self, name: str) -> list[tuple]:
         return [call for call in self.text.calls if call[0] == name]
 
-    def test_text_button_icon_tooltip_after_voicing_off(self) -> None:
+    def test_text_button_icon_tooltip_after_end_session(self) -> None:
         w = self.window
         button = w.text_button
         self.assertFalse(button.get_label())
         self.assertEqual("document-edit-symbolic", icon_name(button))
         self.assertEqual("Озвучить свой текст", button.get_tooltip_text())
         row = w.clear_button.get_parent()
-        self.assertEqual([w.settings_button, w.clear_button, w.voicing_off_button, button],
+        self.assertEqual([w.settings_button, w.clear_button, w.end_session_button, button],
                          row.get_children()[:4])
         self.assertEqual(Gtk.PackType.START, row.child_get_property(button, "pack-type"))
 
