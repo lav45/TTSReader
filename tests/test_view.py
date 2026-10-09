@@ -4,9 +4,11 @@ from pathlib import Path
 
 from tts_player.model import Message, Sentence
 from tts_player.player import PlayerState
+from tts_player.sessions import Session
 from tts_player.text_speaker import TextState
 from tts_player.view import (next_enabled, play_pause_enabled, play_pause_label, position_label,
-                             prev_enabled, rows, text_play_enabled, text_play_pause_label,
+                             prev_enabled, rows, session_buttons_enabled, session_rows,
+                             text_play_enabled, text_play_pause_label,
                              text_position_label)
 
 CREATED_AT = 1_700_000_000.0
@@ -21,12 +23,12 @@ def message(task="t", sentences=None, **kw) -> Message:
 
 
 def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=(),
-          lengths=None, completes=None) -> PlayerState:
+          lengths=None, completes=None, sessions=(), active=None) -> PlayerState:
     messages = list(messages)
     lengths = [0.0] * len(messages) if lengths is None else lengths
     completes = [True] * len(messages) if completes is None else completes
     return PlayerState(status, current, position_s, length_s, messages, False, lengths,
-                       completes, True, [], None)
+                       completes, True, list(sessions), active)
 
 
 def sentence(recv_s: float) -> Sentence:
@@ -99,6 +101,30 @@ class RowsTest(unittest.TestCase):
         a, b = message("a"), message("b", duration_s=9)
         result = rows(state(messages=[a, b], lengths=[4.0, 9.0], completes=[False, True]))
         self.assertEqual([r.duration for r in result], ["0:04…", "0:09"])
+
+
+class SessionRowsTest(unittest.TestCase):
+    SESSIONS = [Session("1dd2b064-b8fd-4c1e-9a77-000000000001", "TTSReader"),
+                Session("abcdef12-0000-4000-8000-000000000002", "")]
+
+    def test_titles_and_active(self):
+        result = session_rows(state(sessions=self.SESSIONS, active=self.SESSIONS[0].id))
+        self.assertEqual([(r.title, r.active) for r in result],
+                         [("TTSReader · 1dd2b064", True), ("— · abcdef12", False)])
+        self.assertTrue(session_buttons_enabled(
+            state(sessions=self.SESSIONS, active=self.SESSIONS[0].id)))
+
+    def test_no_active(self):
+        current = state(sessions=self.SESSIONS)
+        self.assertEqual([r.active for r in session_rows(current)], [False, False])
+        self.assertFalse(session_buttons_enabled(current))
+
+    def test_empty(self):
+        self.assertEqual(session_rows(state()), [])
+
+    def test_deferred_message_duration_is_pending(self):
+        m = message(created_at=CREATED_AT, deferred=True)
+        self.assertEqual(rows(state(messages=[m]))[0].duration, "0:00…")
 
 
 class LabelsTest(unittest.TestCase):

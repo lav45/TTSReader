@@ -53,16 +53,37 @@ def _duration(complete: bool, length_s: float) -> str:
     return text if complete else text + PENDING_MARK
 
 
+@dataclass(frozen=True)
+class SessionRow:
+    title: str  # "<project> · <id[:8]>"; project пуст — NO_PROJECT
+    active: bool
+
+
 def rows(state: PlayerState) -> list[MessageRow]:
     return [
         MessageRow(
             title=f"{_start_time(m)}  {_project(m)}",
-            duration=_duration(complete, length_s),
+            duration=_duration(complete and not m.deferred, length_s),
             current=m is state.current,
             heard=m.heard,
         )
         for m, length_s, complete in zip(state.messages, state.lengths, state.completes)
     ]
+
+
+def session_rows(state: PlayerState) -> list[SessionRow]:
+    return [
+        SessionRow(
+            title=f"{session.project or NO_PROJECT} · {session.id[:8]}",
+            active=session.id == state.active,
+        )
+        for session in state.sessions
+    ]
+
+
+def session_buttons_enabled(state: PlayerState) -> bool:
+    """Мусорка и [stop] действуют на активную сессию: без неё им нечего делать."""
+    return state.active is not None
 
 
 def _clock(position_s: float, length_s: float) -> str:
