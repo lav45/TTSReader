@@ -1,0 +1,21 @@
+{
+  "planPath": "docs/superpowers/plans/2026-10-09-tts-player-row-click.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 1: Команда `Player.play_message`",
+      "status": "pending",
+      "description": "**Goal:** плеер делает переданное сообщение текущим и играет его с начала.\n\n**Files:**\n- Modify: `tts_player/player.py`\n- Test: `tests/test_player.py`\n\n**Contract:** контракт (8), сторона плеера\n\n```\nPlayer.play_message(message: Message) -> None\n  message нет в очереди (вытеснено / очищено к моменту клика) → ничего не меняется\n  покидаемое текущее → прослушано, только если синтезировано целиком (то же правило, что next/prev)\n  message → текущее, позиция 0, статус playing — из playing, paused и stopped\n  message == текущее → играет с начала, прослушанным не отмечается\n  on_change вызывается\n```\n\n**Acceptance Criteria:**\n- [ ] из `playing`, `paused`, `stopped`: после `play_message(m)` текущее — `m`, статус `playing`, воспроизведение начато с позиции 0\n- [ ] покинутое завершённое сообщение отмечено прослушанным, растущее — нет\n- [ ] `play_message(текущее)` играет его с начала и не отмечает прослушанным\n- [ ] сообщение, которого нет в `queue.messages` (после `clear`), — состояние и воспроизведение не меняются\n- [ ] из `idle` без текущего — `m` становится текущим и играет\n\n**Verify:** `python3 -m unittest tests.test_player -v` → `OK`\n\n```json:metadata\n{\"files\": [\"tts_player/player.py\", \"tests/test_player.py\"], \"verifyCommand\": \"python3 -m unittest tests.test_player -v\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"из `playing`, `paused`, `stopped`: после `play_message(m)` текущее — `m`, статус `playing`, воспроизведение начато с позиции 0\", \"покинутое завершённое сообщение отмечено прослушанным, растущее — нет\", \"`play_message(текущее)` играет его с начала и не отмечает прослушанным\", \"сообщение, которого нет в `queue.messages` (после `clear`), — состояние и воспроизведение не меняются\", \"из `idle` без текущего — `m` становится текущим и играет\"]}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 2: Строки списка активируются кликом",
+      "status": "pending",
+      "description": "**Goal:** одиночный клик по строке зовёт `player.play_message` с сообщением этой строки.\n\n**Files:**\n- Modify: `tts_player/window.py`\n- Test: `tests/gui_window_cases.py`\n\n**Contract:** контракт (8), сторона окна\n\n```\nmessage_list: activate-on-single-click = True; строки активируемые\nrow-activated(row) → player.play_message(state.messages[row.get_index()])\n  state — снимок, по которому построены строки (тот, что показан)\nFakePlayer.play_message(message) записывает (\"play_message\", message)\n```\n\n**Acceptance Criteria:**\n- [ ] активация второй строки вызывает `play_message` с `state.messages[1]` (тот же объект)\n- [ ] после перестройки списка (новый снимок с другим порядком) активация строки берёт сообщение из нового снимка\n- [ ] существующие GUI-случаи проходят\n\n**Verify:** `python3 -m unittest discover -s tests` → `OK`, GUI-случаи не пропущены; `pgrep broadwayd` пуст\n\n```json:metadata\n{\"files\": [\"tts_player/window.py\", \"tests/gui_window_cases.py\"], \"verifyCommand\": \"python3 -m unittest discover -s tests\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"активация второй строки вызывает `play_message` с `state.messages[1]` (тот же объект)\", \"после перестройки списка (новый снимок с другим порядком) активация строки берёт сообщение из нового снимка\", \"существующие GUI-случаи проходят\"]}\n```",
+      "blockedBy": [
+        0
+      ]
+    }
+  ],
+  "lastUpdated": "2026-10-09"
+}
