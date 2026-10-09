@@ -147,7 +147,7 @@ __main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start(
 **Goal:** «Приглушать другие звуки до, %» на экране настроек сохраняется в `Prefs.duck`.
 
 **Files:**
-- Modify: `tts_player/window.py`, `README.md`
+- Modify: `tts_player/window.py`, `tts_player/ducking.py` (докстринг), `README.md`
 - Test: `tests/gui_window_cases.py`
 
 **Contract:** экран настроек ↔ `PlayerSettings`
@@ -156,12 +156,18 @@ __main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start(
 duck_spin: Gtk.SpinButton 0–100, шаг 5, 0 знаков, подпись «Приглушать другие звуки до, %»;
            значение = prefs.load().duck при открытии экрана; доступен при ошибке настроек claude-tts
 «Сохранить»: Prefs(tail, autoplay, duck_spin) → prefs.save → player.apply_prefs
+Главный экран: нижний ряд — position_label слева (pack_start), кнопки [prev][play/pause][next] справа (pack_end);
+               верхний ряд — settings_button, clear_button, voicing_off_button слева, autoplay справа
 ```
 
 **Acceptance Criteria:**
 - [ ] поле показывает загруженное значение; «Сохранить» пишет новое и вызывает `apply_prefs` с ним
 - [ ] при ошибке настроек claude-tts поле активно и сохраняется
 - [ ] README: что делает приглушение, 100 — выключено, восстановление после падения, `pactl` нужен
+- [ ] порядок нижнего ряда: время (position_label) слева, кнопки prev / play-pause / next справа; GUI-тест закрепляет порядок детей и pack-type
+- [ ] порядок верхнего ряда: шестерёнка «Настройки», «Очистить буфер», «Выключить озвучку» слева, выключатель автовоспроизведения справа; GUI-тест закрепляет порядок и pack-type
+- [ ] «Сохранить» не сбрасывает duck: Prefs(tail, autoplay, duck_spin)
+- [ ] ducking.py: докстринг `ducked` — «снижение запрошено», не «громкость снижена»; README: порядок кнопок и времени
 
 **Verify:** `python3 -m unittest discover -s tests` → `OK`, GUI-случаи не пропущены; `pgrep broadwayd` пуст
 

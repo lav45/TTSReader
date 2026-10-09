@@ -38,11 +38,11 @@ label.error { background-color: #c62828; border: 1px solid #8e0000; }
 class PlayerWindow(Gtk.Window):
     """Два экрана в одном Gtk.Stack.
 
-    "main" сверху вниз: ряд служебных значков — слева «Очистить буфер», «Настройки» и
+    "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить буфер» и
     «Выключить озвучку» (активен, пока озвучка включена; состояние читается при показе окна
     и на тике таймера), справа выключатель автовоспроизведения; список сообщений; ползунок
-    позиции; ряд prev / play-pause / next со временем справа. "settings": хвост очереди
-    (PlayerSettings), голос и скорость claude-tts (DaemonSettings); «Сохранить» пишет их и
+    позиции; ряд со временем слева и prev / play-pause / next справа. "settings": хвост очереди и
+    приглушение (PlayerSettings), голос и скорость claude-tts (DaemonSettings); «Сохранить» пишет их и
     остаётся на экране, итог — в блоке внизу; стрелка назад возвращает без записи.
 
     Обновляется по player.on_change и, пока окно видно, таймером REFRESH_MS — позиция
@@ -50,6 +50,7 @@ class PlayerWindow(Gtk.Window):
     """
     REFRESH_MS = 250
     SPEED_STEP = 0.1
+    DUCK_STEP = 5
     SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
 
     def __init__(self, player, settings: DaemonSettings, prefs: PlayerSettings,
@@ -75,7 +76,7 @@ class PlayerWindow(Gtk.Window):
         self.scale.connect("button-release-event", self._on_scale_release)
         self.scale.connect("change-value", self._on_scale_change)
         self.scale.connect("grab-broken-event", self._on_scale_grab_broken)
-        self.position_label_widget = Gtk.Label(xalign=1.0)
+        self.position_label_widget = Gtk.Label(xalign=0.0)
 
         self.prev_button = self._button(PREV_LABEL, player.prev)
         self.play_pause_button = self._button("", player.toggle_play_pause)
@@ -92,10 +93,11 @@ class PlayerWindow(Gtk.Window):
         self.autoplay_button.set_tooltip_text("Автовоспроизведение")
         self._autoplay_handler = self.autoplay_button.connect("toggled", self._on_autoplay_toggled)
 
+        # время слева, кнопки справа: pack_end выкладывает от правого края, поэтому next первым
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        for button in (self.prev_button, self.play_pause_button, self.next_button):
-            buttons.pack_start(button, False, False, 0)
-        buttons.pack_end(self.position_label_widget, False, False, 0)
+        buttons.pack_start(self.position_label_widget, False, False, 0)
+        for button in (self.next_button, self.play_pause_button, self.prev_button):
+            buttons.pack_end(button, False, False, 0)
 
         self.message_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         self.message_list.set_activate_on_single_click(True)
@@ -105,7 +107,7 @@ class PlayerWindow(Gtk.Window):
 
         # ряд служебных значков наверху: команды слева, выключатели справа
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        for button in (self.clear_button, self.settings_button, self.voicing_off_button):
+        for button in (self.settings_button, self.clear_button, self.voicing_off_button):
             tools.pack_start(button, False, False, 0)
         tools.pack_end(self.autoplay_button, False, False, 0)
 
@@ -145,7 +147,7 @@ class PlayerWindow(Gtk.Window):
         return button
 
     def _settings_screen(self) -> Gtk.Box:
-        """Экран настроек: стрелка назад, голос, скорость, хвост, «Сохранить», блок итога."""
+        """Экран настроек: стрелка назад, голос, скорость, хвост, приглушение, «Сохранить», блок итога."""
         self.back_button = self._icon_button("go-previous-symbolic", "Назад", self._show_main)
         self.voice_combo = Gtk.ComboBoxText()
         for renderer in self.voice_combo.get_cells():
@@ -157,6 +159,9 @@ class PlayerWindow(Gtk.Window):
         self.tail_spin = Gtk.SpinButton.new_with_range(
             PlayerSettings.TAIL_MIN, PlayerSettings.TAIL_MAX, 1)
         self.tail_spin.set_digits(0)
+        self.duck_spin = Gtk.SpinButton.new_with_range(
+            PlayerSettings.DUCK_MIN, PlayerSettings.DUCK_MAX, self.DUCK_STEP)
+        self.duck_spin.set_digits(0)
         self.save_button = self._button("Сохранить", self._save_settings)
         self.settings_status = Gtk.Label(xalign=0.0, wrap=True, selectable=True)
         self.settings_status.set_no_show_all(True)  # show_all окна не открывает пустой блок
@@ -176,6 +181,8 @@ class PlayerWindow(Gtk.Window):
         fields.attach(self.speed_spin, 1, 1, 1, 1)
         fields.attach(Gtk.Label(label="Хвост очереди", xalign=0.0), 0, 2, 1, 1)
         fields.attach(self.tail_spin, 1, 2, 1, 1)
+        fields.attach(Gtk.Label(label="Приглушать другие звуки до, %", xalign=0.0), 0, 3, 1, 1)
+        fields.attach(self.duck_spin, 1, 3, 1, 1)
         self.voice_combo.set_hexpand(True)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -190,10 +197,12 @@ class PlayerWindow(Gtk.Window):
 
     def _open_settings(self) -> None:
         """Каждый вход читает настройки заново: несохранённое с прошлого раза не остаётся.
-        Хвост — из файла плеера и доступен всегда; голос и скорость — только если
+        Хвост и приглушение — из файла плеера и доступны всегда; голос и скорость — только если
         настройки claude-tts прочитались."""
         self._hide_status()
-        self.tail_spin.set_value(self._prefs.load().tail)
+        loaded_prefs = self._prefs.load()
+        self.tail_spin.set_value(loaded_prefs.tail)
+        self.duck_spin.set_value(loaded_prefs.duck)
         self.voice_combo.remove_all()
         try:
             loaded = self._settings.load()
@@ -220,14 +229,16 @@ class PlayerWindow(Gtk.Window):
             widget.set_sensitive(enabled)
 
     def _save_settings(self) -> None:
-        """Сначала хвост (с текущим автовоспроизведением) в файл плеера и в плеер, затем
+        """Сначала хвост и приглушение (с текущим автовоспроизведением) в файл плеера и в плеер, затем
         голос и скорость, если они прочитались. Экран остаётся, итог — в блоке внизу."""
         try:
             self.tail_spin.update()  # набранный текст без потери фокуса
+            self.duck_spin.update()
             # autoplay здесь не правится: берём текущее значение плеера (его же показывает
-            # кнопка), хвост — из спина
+            # кнопка), хвост и приглушение — из спинов
             prefs = Prefs(tail=self.tail_spin.get_value_as_int(),
-                          autoplay=self._player.state().autoplay)
+                          autoplay=self._player.state().autoplay,
+                          duck=self.duck_spin.get_value_as_int())
             self._prefs.save(prefs)
             self._player.apply_prefs(prefs)
             if self._voice_loaded:

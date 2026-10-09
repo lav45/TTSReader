@@ -37,7 +37,7 @@ class Ducker:
 
     @property
     def ducked(self) -> bool:
-        """Громкость сейчас снижена (duck был, restore ещё нет)."""
+        """Снижение запрошено (duck был, restore ещё нет); потоки могут быть ещё не тронуты."""
         return self._percent is not None
 
     def duck(self, percent: int) -> None:
