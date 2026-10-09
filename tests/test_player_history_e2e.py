@@ -88,8 +88,10 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
     def test_two_passes_of_one_task_end_as_one_message(self) -> None:
         """Обёртка с playback.json (id задачи X) кладёт два прохода синтеза, как у демона:
         проход 1 (aaaaaa) оборван паузой на s1 без записи истории, проход 2 (bbbbbb) начинает
-        с того же s1; склейка — только прохода 2. Плеер играет все четыре файла одним
-        сообщением по recv_ns; склейка короче сообщения — одна строка ended, без complete."""
+        с того же s1; склейка — только прохода 2. Плеер играет одним сообщением по recv_ns,
+        s1 — один раз: поздний проход заменяет ещё не звучавшее (какое из двух успело начать
+        звучать, решает время прихода файлов); склейка короче сообщения — одна строка ended,
+        без complete."""
         session = self.session
         sentences = [*self.message(session, "aaaaaa", 2),
                      self.sentence(session, "bbbbbb", 1, seconds=SECONDS),
@@ -103,11 +105,14 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         lines = self.lines_until("ended ")
         self.assertEqual(f"ended {session} {task_id}", lines[-1])
         played += [line for line in lines if line.startswith("playing ")]
-        for _ in range(len(sentences) - len(played)):
+        while not played[-1].endswith(sentences[3].name):
             lines += self.lines_until("playing ")
             played.append(lines[-1])
-        self.assertEqual([f"_{task_id}_{p.name}" for p in sentences],
-                         [line[line.index("_"):] for line in played])
+        names = [line[line.index("_"):] for line in played]
+        self.assertEqual(3, len(names), names)
+        self.assertEqual(f"_{task_id}_{sentences[0].name}", names[0])
+        self.assertIn(names[1], (f"_{task_id}_{sentences[1].name}", f"_{task_id}_{sentences[2].name}"))
+        self.assertEqual(f"_{task_id}_{sentences[3].name}", names[2])
         self.assertEqual(1, len([line for line in lines if line.startswith("ended ")]), lines)
         self.assertEqual([], [line for line in lines if line.startswith("complete ")])
         self.assert_quiet()

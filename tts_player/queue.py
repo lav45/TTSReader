@@ -123,10 +123,15 @@ class MessageQueue:
         """Задача — одного из живых сообщений очереди."""
         return self.message_of(task_id) is not None
 
-    def add(self, sentence: Sentence) -> None:
+    def add(self, sentence: Sentence, sounded: Sentence | None = None) -> None:
         """Добавляет предложение в сообщение его задачи. Задача чужая (нет сообщения:
         unknown, прошлый запуск, вытесненное или очищенное) — файл удалён, WARNING; сообщение
-        прослушано — файл удалён."""
+        прослушано — файл удалён.
+
+        Дубль индекса той же задачи (пауза демона: новый проход начат с оборванного
+        предложения) — остаётся предложение позднего прохода (больший recv_ns), файл другого
+        удалён; но уже звучавшее (sounded — играющее предложение сообщения, и всё до него)
+        не заменяется: удаляется пришедшее."""
         message = self.message_of(sentence.task_id)
         if message is None:
             log.warning("чужое предложение %s (задача %s), удаляю", sentence.path.name,
@@ -139,8 +144,31 @@ class MessageQueue:
             self._unlink(sentence)
             return
         self._order.deliver(sentence.task_id)
+        if not self._replace_duplicate(message, sentence, sounded):
+            return
         received = [s.recv_ns for s in message.sentences]
         message.sentences.insert(bisect.bisect_right(received, sentence.recv_ns), sentence)
+
+    def _replace_duplicate(self, message: Message, sentence: Sentence,
+                           sounded: Sentence | None) -> bool:
+        """Дубль индекса sentence в message: True — sentence добавлять (дубля нет или он убран),
+        False — sentence удалено."""
+        duplicate = next((s for s in message.sentences
+                          if s.task_id == sentence.task_id and s.index == sentence.index), None)
+        if duplicate is None:
+            return True
+        played = (message.sentences[:message.sentences.index(sounded) + 1]
+                 if sounded in message.sentences else [])
+        if duplicate in played or sentence.recv_ns < duplicate.recv_ns:
+            log.info("дубль предложения %d задачи %s, оставлено %s", sentence.index,
+                     sentence.task_id, duplicate.path.name)
+            self._unlink(sentence)
+            return False
+        log.info("дубль предложения %d задачи %s, оставлено %s", sentence.index,
+                 sentence.task_id, sentence.path.name)
+        message.sentences.remove(duplicate)
+        self._unlink(duplicate)
+        return True
 
     def forget_audio(self, message: Message) -> None:
         """Кэш сообщения устарел: файлы предложений и склейки удалены, сообщение — как только

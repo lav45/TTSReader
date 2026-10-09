@@ -646,6 +646,26 @@ class PlayerCursorTest(PlayerCase):
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual([A0, B0], self.playback.played)
 
+    def test_later_pass_duplicate_replaces_unplayed_sentence(self) -> None:
+        """Пауза демона: проход оборван на s1, новый проход (token ab) начат с s1 — пока играет
+        s0, его s1 заменяет прежнее, повтора нет."""
+        self.start_with(A0, A1)
+        self.play_first()
+        later = "1000000000000000009_aa_tts_queue_S_ab_s1.wav"
+        self.arrive(later)
+        self.finish()
+        self.assertEqual((later, 0.0), self.playback.starts[-1])
+        self.assertFalse(self.path(A1).exists())
+
+    def test_later_pass_duplicate_of_playing_sentence_is_dropped(self) -> None:
+        self.start_with(A0, A1)
+        self.play_first()
+        self.finish()  # играет A1
+        later = "1000000000000000009_aa_tts_queue_S_ab_s1.wav"
+        self.arrive(later)
+        self.assertEqual((A1, 0.0), self.playback.starts[-1])
+        self.assertEqual([A0, A1], [s.path.name for s in self.state().current.sentences])
+
     def test_tail_keeps_five_started_messages(self) -> None:
         """Сообщения приходят, пока играет первое (фокус): копятся; next по ним вытесняет
         самое старое начатое сверх хвоста."""

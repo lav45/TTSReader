@@ -49,16 +49,40 @@ class MessageQueueTest(unittest.TestCase):
         self.assertEqual(["t1", "t2"], self.tasks())
 
     def test_two_passes_of_one_task_make_one_message_by_recv_ns(self):
-        """Два прохода синтеза одной задачи (новый token) — одно сообщение."""
+        """Два прохода синтеза одной задачи (новый token) — одно сообщение: пауза демона оборвала
+        проход aa на предложении 1, проход bb начат с него же; дубль индекса 1 — поздний проход
+        (больший recv_ns), в каком бы порядке файлы ни пришли."""
         message = self.message("f00d")
         a0 = self.sentence(1, "f00d", 0, token="aa")
         a1 = self.sentence(2, "f00d", 1, token="aa")
-        b0 = self.sentence(4, "f00d", 0, token="bb")
-        b1 = self.sentence(5, "f00d", 1, token="bb")
-        for s in (a0, b1, a1, b0):
+        b1 = self.sentence(4, "f00d", 1, token="bb")
+        b2 = self.sentence(5, "f00d", 2, token="bb")
+        for s in (a0, b1, a1, b2):
             self.queue.add(s)
         self.assertEqual([message], self.queue.messages)
-        self.assertEqual([a0, a1, b0, b1], message.sentences)
+        self.assertEqual([a0, b1, b2], message.sentences)
+        self.assertFalse(a1.path.exists())
+
+    def test_duplicate_index_of_later_pass_replaces_unsounded(self):
+        message = self.message("f00d")
+        a0, a1 = self.sentence(1, "f00d", 0), self.sentence(2, "f00d", 1)
+        for s in (a0, a1):
+            self.queue.add(s)
+        b1 = self.sentence(4, "f00d", 1, token="bb")
+        self.queue.add(b1, sounded=a0)
+        self.assertEqual([a0, b1], message.sentences)
+        self.assertFalse(a1.path.exists())
+
+    def test_duplicate_index_of_sounded_sentence_is_deleted_not_added(self):
+        message = self.message("f00d")
+        a0, a1 = self.sentence(1, "f00d", 0), self.sentence(2, "f00d", 1)
+        for s in (a0, a1):
+            self.queue.add(s)
+        b1 = self.sentence(4, "f00d", 1, token="bb")
+        self.queue.add(b1, sounded=a1)
+        self.assertEqual([a0, a1], message.sentences)
+        self.assertFalse(b1.path.exists())
+        self.assertTrue(a1.path.exists())
 
     def test_message_is_in_queue_before_its_sentences(self):
         message = self.message("t1")

@@ -56,7 +56,8 @@ class QueueHistoryTest(unittest.TestCase):
     def test_clip_of_second_pass_ends_message_of_both_passes(self):
         """Как у демона: пауза обрывает проход 1 на s1 без записи истории, проход 2 (новый
         token) начинает с того же s1, склейка — только из предложений прохода 2. Длительность
-        не сходится с сообщением обоих проходов: audio нет, но сообщение завершено."""
+        не сходится с сообщением обоих проходов: audio нет, но сообщение завершено. Дубль s1
+        прохода 1 заменён поздним (ничего не звучало)."""
         self.add(1_000_000_000, 1, token="aa", index=0, task="f00d")
         self.add(2_000_000_000, 1, token="aa", index=1, task="f00d")
         self.add(3_000_000_000, 1, token="bb", index=1, task="f00d")
@@ -64,7 +65,8 @@ class QueueHistoryTest(unittest.TestCase):
         with self.assertLogs("tts_player.queue", "WARNING"):
             message = self.queue.attach(self.entry(2), self.store)
         self.assertEqual([message], self.queue.messages)
-        self.assertEqual(4, len(message.sentences))
+        self.assertEqual([("aa", 0), ("bb", 1), ("bb", 2)],
+                         [(x.token, x.index) for x in message.sentences])
         self.assertIsNone(message.audio)
         self.assertEqual(100.0, message.created_at)
         self.assertTrue(self.queue.is_complete(message))
