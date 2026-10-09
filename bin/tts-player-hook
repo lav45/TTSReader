@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+# tts-player-hook - включает и выключает плеер вместе с озвучкой сессии.
+#
+# Демон claude-tts ищет проигрыватель по имени paplay через PATH; обёртка
+# daemon-bin/paplay кладёт звук в буфер плеера, но работает, только если daemon-bin
+# стоит первым в PATH демона. Зовёт tts-toggle.sh: /tts-on -> on, /tts-off -> off.
+#
+# on:  демона нет (нет живого PID в ~/.claude-tts/daemon.pid) -> claude-tts daemon start;
+#      демон жив, а первый элемент PATH в /proc/<pid>/environ не daemon-bin ->
+#      claude-tts daemon restart (до ~15 с, а у хука 5 с, поэтому отвязан через setsid,
+#      вывод в $XDG_RUNTIME_DIR/tts-player/daemon-restart.log);
+#      демон жив с daemon-bin первым -> не трогать.
+#      Затем tts-player --tray отвязанным процессом (вывод в player.log); второй
+#      экземпляр плеер не пускает сам, пробой player.lock без записи хук лишь выбирает
+#      сообщение. Хук не ждёт плеер.
+# off: tts-player stop - останавливает текущий звук, сам плеер остаётся.
+#
+# Вызов: tts-player-hook on|off. Код 0; 1 - нет claude-tts или tts-player в PATH,
+# нет XDG_RUNTIME_DIR, неверный аргумент (сообщение в stderr).
+# Только для тестов: TTS_HOOK_PROC (вместо /proc), TTS_HOOK_HOME (вместо $HOME).
+
+set -u
+
+fail() {
+    echo "tts-player-hook: $1" >&2
+    exit 1
+}
+
+DAEMON_BIN="$(dirname "$(dirname "$(readlink -f "$0")")")/daemon-bin"
+PROC="${TTS_HOOK_PROC:-/proc}"
+HOME_DIR="${TTS_HOOK_HOME:-$HOME}"
+PID_FILE="$HOME_DIR/.claude-tts/daemon.pid"
+
+[ -z "${XDG_RUNTIME_DIR:-}" ] && fail "XDG_RUNTIME_DIR не задан"
+STATE="$XDG_RUNTIME_DIR/tts-player"
+LOCK="$STATE/player.lock"
+
+command -v tts-player > /dev/null || fail "tts-player не найден в PATH"
+
+# Проба без записи: общая блокировка занята - плеер работает.
+player_running() {
+    [ -e "$LOCK" ] && ! flock -n -s "$LOCK" true 2> /dev/null
+}
+
+# Живой PID демона или пусто.
+daemon_pid() {
+    local pid
+    [ -f "$PID_FILE" ] || return 0
+    pid="$(< "$PID_FILE")"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    [ -d "$PROC/$pid" ] && echo "$pid"
+    return 0
+}
+
+# Первый элемент PATH демона.
+daemon_first_path() {
+    local entry
+    while IFS= read -r -d '' entry; do
+        case "$entry" in
+            PATH=*)
+                entry="${entry#PATH=}"
+                echo "${entry%%:*}"
+                return 0
+                ;;
+        esac
+    done < "$PROC/$1/environ"
+}
+
+on() {
+    command -v claude-tts > /dev/null || fail "claude-tts не найден в PATH"
+    mkdir -p "$STATE" || fail "не удалось создать $STATE"
+
+    local pid first
+    pid="$(daemon_pid)"
+    if [ -z "$pid" ]; then
+        PATH="$DAEMON_BIN:$PATH" claude-tts daemon start < /dev/null > /dev/null 2>&1
+        echo "демон запущен"
+    else
+        first="$(daemon_first_path "$pid")"
+        if [ "$first" = "$DAEMON_BIN" ]; then
+            echo "демон уже с обёрткой"
+        else
+            PATH="$DAEMON_BIN:$PATH" setsid claude-tts daemon restart \
+                < /dev/null >> "$STATE/daemon-restart.log" 2>&1 &
+            echo "перезапуск демона с обёрткой запущен"
+        fi
+    fi
+
+    if player_running; then
+        echo "плеер уже запущен"
+    else
+        setsid tts-player --tray < /dev/null >> "$STATE/player.log" 2>&1 &
+        echo "плеер запущен"
+    fi
+}
+
+off() {
+    local was_running=0
+    player_running && was_running=1
+    tts-player stop < /dev/null > /dev/null 2>&1
+    if [ "$was_running" = 1 ]; then
+        echo "звук плеера остановлен"
+    else
+        echo "плеер не запущен"
+    fi
+}
+
+case "${1:-}" in
+    on) on ;;
+    off) off ;;
+    *) fail "Usage: tts-player-hook on|off" ;;
+esac
