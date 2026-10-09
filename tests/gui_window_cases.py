@@ -73,6 +73,9 @@ class FakePlayer:
     def clear(self) -> None:
         self.calls.append(("clear",))
 
+    def play_message(self, message: Message) -> None:
+        self.calls.append(("play_message", message))
+
 
 class FakeSettings:
     """Контракт DaemonSettings для окна: load() и save(); вызовы записываются.
@@ -128,6 +131,68 @@ class PlayerWindowTest(unittest.TestCase):
             self.player.calls.clear()
             button.clicked()
             self.assertEqual([(call,)], self.player.calls, call)
+
+    def test_row_activation_plays_that_message(self) -> None:
+        w = self.window
+        self.assertTrue(w.message_list.get_activate_on_single_click())
+        w.message_list.get_row_at_index(1).activate()
+        self.assertEqual(1, len(self.player.calls))
+        name, played = self.player.calls[0]
+        self.assertEqual("play_message", name)
+        self.assertIs(self.b, played)
+
+    def test_row_activation_after_rebuild_uses_new_snapshot(self) -> None:
+        w = self.window
+        self.player.change(state("playing", self.b, [self.c, self.a, self.b], 3.0))
+        w.message_list.emit("row-activated", w.message_list.get_row_at_index(0))
+        self.assertEqual(1, len(self.player.calls))
+        self.assertIs(self.c, self.player.calls[0][1])
+
+    def test_row_activation_with_equal_rows_uses_latest_message_objects(self) -> None:
+        w = self.window
+        a2, b2, c2 = message("a"), message("b"), message("c")
+        self.player.change(state("playing", b2, [a2, b2, c2], 4.0))
+        row = w.message_list.get_row_at_index(2)
+        self.player.change(state("playing", b2, [a2, b2, c2], 4.0))
+        self.assertIs(row, w.message_list.get_row_at_index(2))  # строки равны: без перестройки
+        w.message_list.get_row_at_index(2).activate()
+        self.assertIs(c2, self.player.calls[0][1])
+
+    def focused_index(self) -> int | None:
+        row = self.window.message_list.get_focus_child()
+        return None if row is None else row.get_index()
+
+    def test_rebuild_keeps_keyboard_focus_on_current_row(self) -> None:
+        w = self.window
+        w.show_all()
+        flush()
+        w.message_list.get_row_at_index(0).grab_focus()
+        flush()
+        self.assertEqual(0, self.focused_index())
+        # клик по строке: текущим стало сообщение c, список перестроился
+        self.player.change(state("playing", self.c, [self.a, self.b, self.c], 0.0))
+        flush()
+        self.assertEqual(2, self.focused_index())
+
+    def test_rebuild_without_current_keeps_focus_on_same_index(self) -> None:
+        w = self.window
+        w.show_all()
+        flush()
+        w.message_list.get_row_at_index(1).grab_focus()
+        flush()
+        self.player.change(state("stopped", None, [self.a, self.b], 0.0))
+        flush()
+        self.assertEqual(1, self.focused_index())
+
+    def test_rebuild_does_not_steal_focus_from_elsewhere(self) -> None:
+        w = self.window
+        w.show_all()
+        flush()
+        w.next_button.grab_focus()
+        flush()
+        self.player.change(state("playing", self.c, [self.a, self.b, self.c], 0.0))
+        flush()
+        self.assertIsNone(self.focused_index())
 
     def test_user_slider_change_seeks(self) -> None:
         self.window.scale.emit("change-value", Gtk.ScrollType.JUMP, 7.0)

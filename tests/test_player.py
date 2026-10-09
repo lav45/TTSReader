@@ -252,7 +252,8 @@ class PlayerHistoryTest(PlayerCase):
     def test_broken_first_sentence_is_tried_not_skipped(self) -> None:
         (self.inbox_dir / A0).write_bytes(b"not a wav")
         write_wav(self.inbox_dir / A1, SECONDS)
-        self.player.start()
+        with self.assertLogs("tts_player.queue", "WARNING"):  # длительность не-WAV не читается
+            self.player.start()
         self.assertEqual([(A0, 0.0)], self.playback.starts)
         self.playback.fail("broken", False)
         self.assertEqual([(A0, 0.0), (A1, 0.0)], self.playback.starts)
@@ -561,6 +562,100 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual(2, len(bb.sentences))
         self.assertFalse(bb.heard)
         self.assertTrue(all(s.path.exists() for s in bb.sentences))
+
+    def click_second_message(self, before: str) -> None:
+        """Клик по второму сообщению из статуса before (playing / paused / stopped)."""
+        self.assertEqual(before, self.state().status)
+        self.player.play_message(self.player._queue.messages[1])
+        self.assertEqual(("playing", "bb", 0.0), (self.state().status, self.token(),
+                                                  self.player._position))
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
+
+    def test_play_message_while_playing_plays_it_from_start(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.click_second_message("playing")
+
+    def test_play_message_while_paused_plays_it_from_start(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.player.toggle_pause()
+        self.click_second_message("paused")
+
+    def test_play_message_while_stopped_plays_it_from_start(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.player.toggle_play_stop()
+        self.click_second_message("stopped")
+
+    def test_play_message_heard_plays_it_from_start(self) -> None:
+        self.start_with(A0, B0)
+        self.player.next()
+        self.assertTrue(self.state().messages[0].heard)
+        self.playback.at = 0.3
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
+        # клик не снимает отметку «прослушано»
+        self.assertTrue(self.state().messages[0].heard)
+
+    def test_play_message_marks_left_complete_heard_and_growing_not(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.player.play_message(self.player._queue.messages[1])
+        self.assertTrue(self.state().messages[0].heard)
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertFalse(self.state().messages[1].heard)
+
+    def assert_click_on_current_changes_nothing(self) -> None:
+        current = self.player._queue.messages[0]
+        before = (self.state().status, self.player._position, list(self.playback.starts),
+                  self.state().messages[0].heard, len(self.states))
+        self.player.play_message(current)
+        after = (self.state().status, self.player._position, list(self.playback.starts),
+                 self.state().messages[0].heard, len(self.states))
+        self.assertEqual(before, after)
+        self.assertFalse(self.state().messages[0].heard)
+
+    def test_play_message_current_changes_nothing(self) -> None:
+        # A завершено (за ним есть B): _leave(current) пометила бы его прослушанным
+        self.start_with(A0, B0)
+        self.playback.at = 0.3
+        self.assert_click_on_current_changes_nothing()
+
+    def test_play_message_current_while_paused_changes_nothing(self) -> None:
+        self.start_with(A0, B0)
+        self.player.toggle_pause()
+        self.assert_click_on_current_changes_nothing()
+
+    def test_play_message_current_during_outage_keeps_retry(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.fail("no output", True)
+        self.player.play_message(self.player._queue.messages[0])
+        self.glib.source_remove.assert_not_called()
+
+    def test_play_message_not_in_queue_changes_nothing(self) -> None:
+        self.start_with(A0, B0)
+        stale = self.player._queue.messages[1]
+        self.player.clear()
+        self.arrive(C0)
+        starts = list(self.playback.starts)
+        token = self.token()
+        self.player.play_message(stale)
+        self.assertEqual(starts, self.playback.starts)
+        self.assertEqual(token, self.token())
+
+    def test_play_message_current_while_idle_changes_nothing(self) -> None:
+        self.start_with(A0)
+        self.finish()
+        self.player._on_entry(self.joined(seconds=3.0))  # другая длина: конец без склейки
+        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        starts = list(self.playback.starts)
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        self.assertEqual(starts, self.playback.starts)
+
+    def test_play_message_other_during_outage_cancels_retry(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.fail("no output", True)
+        self.player.play_message(self.player._queue.messages[1])
+        self.glib.source_remove.assert_called_once_with(42)
 
     def test_next_on_last_does_nothing(self) -> None:
         self.start_with(A0, B0)
