@@ -79,12 +79,15 @@ class SessionRow:
 
 def session_rows(state: PlayerState) -> list[SessionRow]     # в порядке state.sessions
 def session_buttons_enabled(state: PlayerState) -> bool      # state.active is not None
+
+rows(state): MessageRow.duration для m.deferred — с PENDING_MARK (текст ещё не отдан демону)
 ```
 
 **Acceptance Criteria:**
 - [ ] сессии `Session("1dd2b064-b8fd-…", "TTSReader")` и `Session("abcdef12-…", "")`, активна первая → `[SessionRow("TTSReader · 1dd2b064", True), SessionRow("— · abcdef12", False)]`
 - [ ] `active None` → все `active False`; `session_buttons_enabled` → `False`
 - [ ] пустой список → `[]`
+- [ ] строка сообщения с `deferred=True` показывает длительность с меткой ожидания (`0:00…`), а не как завершённое тихое сообщение (`rows`)
 
 **Verify:** `python3 -m unittest tests.test_view -v` → `OK`
 
