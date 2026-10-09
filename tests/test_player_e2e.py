@@ -521,6 +521,61 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
         self.assertIsNone(self.proc.poll())
 
+    def sessions_file(self) -> dict:
+        return json.loads((self.runtime / "tts-player" / "sessions.json").read_text())
+
+    def wait_lock(self) -> None:
+        lock = self.runtime / "tts-player" / "player.lock"
+        deadline = time.monotonic() + WAIT
+        while not (lock.exists() and lock.read_text().strip()):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
+    def test_session_add_has_remove_cycle_through_player_process(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        added = self.run_bin("session", "add", "u1", "/p/TTSReader")
+        self.assertEqual(0, added.returncode)
+        self.assertEqual("сессия передана плееру\n", added.stdout)
+        self.next_line("session add u1")
+        self.assertEqual(0, self.run_bin("session", "has", "u1").returncode)
+        self.assertEqual({"active": "u1", "sessions": [{"id": "u1", "project": "TTSReader"}]},
+                         self.sessions_file())
+        again = self.run_bin("session", "add", "u1", "/p/TTSReader")
+        self.assertEqual(0, again.returncode)
+        self.assertEqual("сессия уже в списке\n", again.stdout)
+        removed = self.run_bin("session", "remove", "u1")
+        self.assertEqual(0, removed.returncode)
+        self.next_line("session remove u1")
+        self.assertEqual(1, self.run_bin("session", "has", "u1").returncode)
+        self.assertEqual({"active": None, "sessions": []}, self.sessions_file())
+
+    def test_session_add_without_player_is_executed_at_player_start(self) -> None:
+        added = self.run_bin("session", "add", "u2", "/p/X")
+        self.assertEqual(0, added.returncode)
+        self.assertIn("плеер не запущен", added.stdout)
+        self.assertEqual(1, self.run_bin("session", "has", "u2").returncode)
+        self.assertEqual(1, len(list((self.runtime / "tts-player" / "control").glob("*.json"))))
+        self.start_player()
+        self.next_line("session add u2")
+        self.assertEqual(0, self.run_bin("session", "has", "u2").returncode)
+        self.assertEqual([], list((self.runtime / "tts-player" / "control").glob("*.json")))
+
+    def test_session_survives_player_restart(self) -> None:
+        self.start_player()
+        self.assertEqual(0, self.run_bin("session", "add", "u1", "/p/TTSReader").returncode)
+        self.next_line("session add u1")
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        self.assertEqual(1, self.run_bin("session", "has", "u1").returncode)  # плеера нет
+        self.lines = queue.Queue()
+        self.start_player()
+        deadline = time.monotonic() + WAIT
+        while self.run_bin("session", "has", "u1").returncode != 0:
+            self.assertLess(time.monotonic(), deadline, "u1 не вернулась после перезапуска")
+            time.sleep(0.1)
+        self.assertEqual("u1", self.sessions_file()["active"])
+
     def test_sigusr2_before_player_is_up_does_not_kill(self) -> None:
         self.start_player()
         lock = self.runtime / "tts-player" / "player.lock"

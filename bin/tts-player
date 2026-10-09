@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Запуск плеера и команда stop из любого каталога и через символическую ссылку.
+# Запуск плеера и подкоманды stop, play, session из любого каталога и через символическую ссылку.
 set -euo pipefail
 root="$(dirname "$(dirname "$(readlink -f "$0")")")"
 export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+# session зовут на каждом хуке: лёгкий модуль без gi и плеера.
+if [ "${1:-}" = session ]; then
+    shift
+    exec python3 -m tts_player.session_command "$@"
+fi
 exec python3 -m tts_player "$@"

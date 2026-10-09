@@ -7,7 +7,8 @@
                               [--no-gui] [--show] [--tray]
        python3 -m tts_player stop    (SIGUSR1 запущенному плееру: остановить текущее)
        python3 -m tts_player play    (SIGUSR2: продолжить остановленное, играющее не трогать)
-       python3 -m tts_player session has UUID    (выход 0 — сессия в списке запущенного плеера)
+       python3 -m tts_player session add UUID CWD | remove UUID | has UUID
+                                  (подкоманда — в tts_player.session_command; has: выход 0 — сессия в списке)
 Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window) с экраном «Свой текст»
 (tts_player.text_speaker); нет графической сессии — выход 1. С --no-gui — GLib.MainLoop без Gtk
 и XApp (e2e).
@@ -32,7 +33,8 @@ from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
-from tts_player.sessions import read_sessions, sessions_path  # noqa: E402
+from tts_player.sessions import Sessions, control_dir, sessions_path  # noqa: E402
+from tts_player import session_command  # noqa: E402
 from tts_player.text_speaker import TextSpeaker  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
 
@@ -48,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv == ["play"]:
         return play_command()
     if argv[:1] == ["session"]:
-        return session_command(argv[1:])
+        return session_command.main(argv[1:])
     parser = argparse.ArgumentParser(prog="tts_player")
     parser.add_argument("--audio-sink", default=None, help="элемент GStreamer для вывода звука")
     parser.add_argument("--history-dir", default="~/.claude-tts/speech_history",
@@ -112,12 +114,15 @@ def main(argv: list[str] | None = None) -> int:
     # голос и скорость: экран настроек и переозвучка сообщений с устаревшим кэшем;
     # очередь демона и ссылки hook-home — в том же каталоге claude-tts, чтобы не разошлись
     settings = DaemonSettings(tts_config_dir)
+    sessions = Sessions(sessions_path(Path(runtime)))
+    sessions.load()  # сессии прошлого запуска — до player.start()
     try:
         player = Player(Path(runtime), args.audio_sink,
                         Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
                         ducker, hook_tasks_dir=hook_home.queue_dir,
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
-                        daemon_settings=settings)
+                        daemon_settings=settings, sessions=sessions,
+                        control_dir=control_dir(Path(runtime)))
         prefs = PlayerSettings(Path(args.settings_file).expanduser())
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:
@@ -152,30 +157,6 @@ def play_command() -> int:
     if not send_play(Path(runtime)) and is_locked(Path(runtime)):
         print("плеер не запущен или ещё стартует", file=sys.stderr)
     return 0
-
-
-SESSION_USAGE = "usage: tts-player session has UUID"
-
-
-def session_command(args: list[str]) -> int:
-    """`tts-player session <подкоманда> …`: подкоманды отвечают кодом выхода, без вывода."""
-    if len(args) == 2 and args[0] == "has":
-        return session_has(args[1])
-    print(SESSION_USAGE, file=sys.stderr)
-    return 2
-
-
-def session_has(session_id: str) -> int:
-    """0 — UUID в sessions.json запущенного плеера; иначе 1 (нет runtime-каталога, плеера,
-    файла, битый файл, нет UUID). Ничего не создаёт и не пишет."""
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if not runtime or not is_locked(Path(runtime)):
-        return 1
-    try:
-        _active, sessions = read_sessions(sessions_path(Path(runtime)))
-    except ValueError:
-        return 1
-    return 0 if any(s.id == session_id for s in sessions) else 1
 
 
 def gtk_ready() -> bool:
