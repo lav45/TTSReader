@@ -513,10 +513,6 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual([], self.queue.messages)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SharedTaskOrderTest(unittest.TestCase):
     """Очереди сессий делят один порядок задач демона: он синтезирует их по одной."""
 
@@ -565,6 +561,7 @@ class SharedTaskOrderTest(unittest.TestCase):
     def test_restore_of_two_snapshots_puts_new_task_after_all(self):
         self.message(self.queue_a, "a", "sa")
         self.message(self.queue_b, "b", "sb")
+        self.offer(self.queue_a, "a", "sa")
         self.offer(self.queue_b, "b", "sb")
         snapshots = [self.queue_a.release(), self.queue_b.release()]
         order = TaskOrder()
@@ -576,4 +573,10 @@ class SharedTaskOrderTest(unittest.TestCase):
         self.offer(queue_a, "c", "sa")
         self.assertFalse(queue_a.is_complete(fresh))
         self.assertTrue(queue_a.is_complete(queue_a.messages[0]))
+        self.assertGreater(order.order("c"), order.order("a"))
         self.assertGreater(order.order("c"), order.order("b"))
+        self.assertTrue(queue_b.is_complete(queue_b.messages[0]))
+
+
+if __name__ == "__main__":
+    unittest.main()
