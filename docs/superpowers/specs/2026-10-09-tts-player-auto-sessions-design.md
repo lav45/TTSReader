@@ -1,6 +1,6 @@
 # TTS Player — сессии без `/tts-on`
 
-**Статус:** срез хуков сессии (`tts-player-hook start|end`) реализован 2026-10-09 и влит, живая установка переключена; поведение плеера по фокусу — следующий срез, не начат. Меняет решения спеки сессий
+**Статус:** срез хуков сессии (`tts-player-hook start|end`) реализован 2026-10-09 и влит, живая установка переключена; замена сессии при `/clear` — контракт согласован, на ревью пользователя; поведение плеера по фокусу — следующий срез, не начат. Меняет решения спеки сессий
 `2026-10-09-tts-player-sessions-design.md` (сессию добавляет `/tts-on`, убирает `/tts-off`).
 
 ## Задача
@@ -51,6 +51,19 @@
   активную: как «Завершить» — звук стоп, тексты и файлы сессии удалены. Кнопка «Завершить»
   остаётся (выбрано пользователем из: SessionEnd убирает любую / кроме активной / только кнопка;
   я рекомендовал «кроме активной» — `/clear` посреди прослушивания обрывает звук и удаляет хвост).
+- `/clear` — замена сессии, а не завершение: очищенная сессия уходит вместе с текстами, а если она
+  была активной, активной становится новая сессия из того же каталога (`cwd`). «Завершить», выход
+  и `/resume` активную не передают — её выбирает пользователь (выбрано из: замена по каталогу /
+  любая новая активна, когда активной нет; причина — `/clear` по смыслу «стереть текущую и начать
+  новую», а остальные сессии на выбор активной не влияют; моя рекомендация, принята 2026-10-09
+  после замечания пользователя, что `/clear` выглядел как безвозвратное завершение).
+- Порядок хуков при `/clear` проверен пробной сессией 2026-10-09 (`hook.log`): сначала `SessionEnd`
+  (reason `clear`) старой сессии, затем `SessionStart` (source `clear`) новой.
+- Плеер ждёт сессию-замену после `/clear` активной без таймаута: ожидание снимают пришедшая замена
+  (add с тем же `cwd`) и выбор сессии пользователем; живёт в памяти плеера, перезапуск его сбрасывает.
+  Разошёлся `cwd` (в сессии менялся каталог) — замены нет, новую сессию выбирают кликом (выбрано из:
+  без таймаута / ждать ~10 с; причина — лишний таймер, а медленный старт мог бы не успеть; моя
+  рекомендация, принята).
 - Повторный `SessionStart` той же сессии (`--resume`) ничего не меняет: сессия уже в списке.
 - Хук `SessionStart` зовёт `tts-player-hook start` (JSON хука на stdin) — то, что звал `/tts-on`: демон с
   обёрткой, плеер в трее, `session add`. Гейт `tts-gate.sh` остаётся как есть (выбрано из:
@@ -73,14 +86,15 @@ Claude Code SessionStart ─► tts-player-hook start  (stdin: JSON хука)
                               ├─ tts-player --tray
                               └─ tts-player session add <uuid> <cwd> ─► control/ ─► Player.add_session
 Claude Code SessionEnd ───► tts-player-hook end    (stdin: JSON хука)
-                              └─ tts-player session remove <uuid> ─► control/ ─► Player.remove_session
+                              ├─ reason clear: tts-player session clear <uuid> <cwd> ─► control/ ─► Player.clear_session
+                              └─ иначе:        tts-player session remove <uuid>      ─► control/ ─► Player.remove_session
 Stop / PostToolUse ─► tts-gate.sh ─► claude-tts speak ─► hook-home/queue ─► Player._on_hook_task
                                     (сессия активна и автовоспроизведение → демон, иначе отложено)
 ```
 
 Удаляются (вне репозитория): `~/.claude/hooks/tts-command.sh` и его строка UserPromptSubmit,
 `tts-toggle.sh`, `~/.claude/commands/tts-on.md`, `tts-off.md`. Стык `session add|remove` →
-`control/` — контракт (14) спеки сессий, не меняется.
+`control/` — контракт (14) спеки сессий; к нему добавляется `session clear` (контракт ниже).
 
 ## Контракты
 
@@ -111,7 +125,32 @@ stdout:   пусто
                     "command": "/home/lav45/.local/bin/tts-player-hook end", "timeout": 5}]}]
 ```
 
+### `tts-player session clear` → `control/` → плеер (замена при `/clear`)
+
+```
+tts-player-hook end:  reason == "clear" → tts-player session clear <session_id> <cwd>
+                      иначе             → tts-player session remove <session_id>
+                      у reason clear нет cwd непустой строкой → код 1, строка в stderr
+tts-player session clear UUID CWD
+  запрос:  control/<ns>.json = {"op": "clear", "session": "<uuid>", "cwd": "<path>"}
+           пишется всегда, когда плеер может его не знать (как remove: UUID нет в sessions.json и
+           control/ пуст — «сессия не в списке», код 0)
+  вывод:   как у remove; неверные аргументы — usage в stderr, код 2
+плеер, clear(session, cwd):
+           сессии нет в списке — ничего (строка журнала нет)
+           иначе — то же, что remove (звук стоп, тексты и файлы удалены; строка «session clear <uuid>»);
+           была активной — ожидание замены: pending_cwd = cwd
+плеер, add(session, cwd):
+           pending_cwd == cwd и сессия новая → она активна, текущего нет, статус idle;
+           pending_cwd снят; строка «session replace <uuid>»
+плеер, select(session):  pending_cwd снят
+битый запрос clear (нет строкового session или cwd) — удаляется, WARNING, как у add
+```
+
 ## Открытые вопросы
+
+- Совпадает ли `cwd` входа SessionEnd с `cwd` следующего SessionStart, если в сессии менялся
+  каталог (хук CwdChanged есть): от этого зависит, сработает ли замена; проверить пробой с `cd`.
 
 - Свой текст (удержание, hold) без фокуса: режется ли очередь до `tail`, пока звучит свой текст, —
   по правилу «нет фокуса» да; важно, если свой текст долгий, а ответы сессии идут потоком.
