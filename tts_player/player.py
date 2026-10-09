@@ -40,10 +40,12 @@ class Player:
     playing без звука, пока не придёт предложение. На паузе и после stop автоперехода нет.
 
     Ошибка файла — пропуск. Отказ вывода звука — тот же файл с той же позиции через
-    RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор.
+    RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор. Отказ кончается,
+    когда звук пошёл: позиция ушла дальше точки запуска файла или файл доиграл.
 
     Склейка играющего по предложениям сообщения подменяет их с той же позиции. Пока
-    вывод недоступен, позиции нет — повтор начнёт склейку с начала текущего предложения.
+    вывод недоступен, звука нет — повтор начнёт склейку с позиции, с которой запускался
+    несыгравший файл (начало предложения или точка seek/продолжения в нём).
     На паузе и после stop склейка лишь запоминается: следующий запуск найдёт её locate.
     """
     RETRY_SECONDS = 2
@@ -300,11 +302,19 @@ class Player:
         return sentences[index] if index < len(sentences) else None
 
     def _now(self) -> float:
-        """Позиция в текущем сообщении: начало играющего файла плюс позиция в нём."""
-        if self._file is None or self._output_down:
+        """Позиция в текущем сообщении: начало играющего файла плюс позиция в нём.
+
+        Позиция дальше точки запуска — звук идёт: отказ вывода закончился. До seek
+        Playback отдаёт саму точку запуска, это ещё не звук.
+        """
+        if self._file is None:
             return self._position
         at = self._playback.position()
-        return self._position if at is None else self._file_base + at
+        if at is None:
+            return self._position
+        if at > self._position - self._file_base:
+            self._output_down = False
+        return self._file_base + at
 
     def _changed(self) -> None:
         self.on_change(self.state())

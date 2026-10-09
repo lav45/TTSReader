@@ -61,6 +61,16 @@ class FakePlayback:
         self.playing = None
         self.stops += 1
 
+    def finish(self) -> None:
+        """EOS играющего файла: как настоящий Playback — сначала stop, потом колбэк."""
+        path, self.playing = self.playing, None
+        self.on_finished(path)
+
+    def fail(self, text: str, output_failed: bool) -> None:
+        """Ошибка играющего файла: как настоящий Playback — сначала stop, потом колбэк."""
+        path, self.playing = self.playing, None
+        self.on_error(path, text, output_failed)
+
 
 class PlayerCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -104,7 +114,7 @@ class PlayerCase(unittest.TestCase):
 
     def finish(self) -> None:
         """Играющий файл доиграл."""
-        self.playback.on_finished(self.playback.playing)
+        self.playback.finish()
 
     def retry(self) -> None:
         """Срабатывание таймера повтора, поставленного последним."""
@@ -149,7 +159,7 @@ class PlayerHistoryTest(PlayerCase):
     def test_entry_during_outage_waits_for_retry_of_joined_file(self) -> None:
         self.start_with(A0, A1, N0)
         self.finish()
-        self.playback.on_error(self.path(A1), "no output", True)
+        self.playback.fail("no output", True)
         self.player._on_entry(self.joined())
         self.assertEqual([A0, A1], self.playback.played)
         self.retry()
@@ -221,7 +231,7 @@ class PlayerHistoryTest(PlayerCase):
     def test_file_error_skips_to_next(self) -> None:
         self.start_with(A0, B0)
         with self.assertLogs("tts_player", "INFO") as logs:
-            self.playback.on_error(self.path(A0), "broken", False)
+            self.playback.fail("broken", False)
         self.assertEqual([A0, B0], self.playback.played)
         self.assertIn(f"error {A0}: broken", logs.output[0])
         self.glib.timeout_add_seconds.assert_not_called()
@@ -231,18 +241,18 @@ class PlayerHistoryTest(PlayerCase):
         write_wav(self.inbox_dir / A1, SECONDS)
         self.player.start()
         self.assertEqual([(A0, 0.0)], self.playback.starts)
-        self.playback.on_error(self.path(A0), "broken", False)
+        self.playback.fail("broken", False)
         self.assertEqual([(A0, 0.0), (A1, 0.0)], self.playback.starts)
 
     def test_output_error_retries_same_sentence_and_reports_once(self) -> None:
         self.start_with(A0, B0)
         with self.assertLogs("tts_player", "INFO") as logs:
-            self.playback.on_error(self.path(A0), "no output", True)
+            self.playback.fail("no output", True)
             self.assertTrue(self.state().output_down)
             self.assertEqual([A0], self.playback.played)
             self.retry()
             self.assertEqual([A0, A0], self.playback.played)
-            self.playback.on_error(self.path(A0), "no output", True)
+            self.playback.fail("no output", True)
             self.retry()
             self.assertEqual([A0, A0, A0], self.playback.played)
             self.finish()
@@ -257,16 +267,16 @@ class PlayerHistoryTest(PlayerCase):
     def test_new_outage_is_reported_again(self) -> None:
         self.start_with(A0, B0)
         with self.assertLogs("tts_player", "INFO") as logs:
-            self.playback.on_error(self.path(A0), "no output", True)
+            self.playback.fail("no output", True)
             self.retry()
             self.finish()
-            self.playback.on_error(self.path(B0), "no output", True)
+            self.playback.fail("no output", True)
         errors = [line for line in logs.output if "error " in line]
         self.assertEqual(2, len(errors), logs.output)
 
     def test_new_sentence_during_outage_does_not_jump_in(self) -> None:
         self.start_with(A0)
-        self.playback.on_error(self.path(A0), "no output", True)
+        self.playback.fail("no output", True)
         write_wav(self.inbox_dir / B0, SECONDS)
         deadline = time.monotonic() + 5
         while not self.path(B0).exists() and time.monotonic() < deadline:
@@ -276,10 +286,83 @@ class PlayerHistoryTest(PlayerCase):
 
     def test_stop_cancels_pending_retry_and_returns_sentence(self) -> None:
         self.start_with(A0)
-        self.playback.on_error(self.path(A0), "no output", True)
+        self.playback.fail("no output", True)
         self.player.stop()
         self.glib.source_remove.assert_called_once_with(42)
         self.assertEqual([A0], [p.name for p in self.inbox_dir.iterdir()])
+
+    def test_successful_retry_clears_outage_and_position_moves(self) -> None:
+        self.start_with(A0, A1)
+        self.playback.fail("no output", True)
+        self.retry()
+        self.assertTrue(self.state().output_down)  # повтор ещё не заиграл
+        self.playback.at = 0.3
+        state = self.state()
+        self.assertFalse(state.output_down)
+        self.assertAlmostEqual(0.3, state.position_s)
+        self.player.toggle_pause()
+        self.assertAlmostEqual(0.3, self.state().position_s)
+        self.player.toggle_pause()
+        self.assertEqual(A0, self.playback.starts[-1][0])
+        self.assertAlmostEqual(0.3, self.playback.starts[-1][1])
+
+    def test_retry_from_offset_is_not_progress(self) -> None:
+        self.start_with(A0, A1)
+        self.player.seek(0.2)
+        self.playback.fail("no output", True)
+        self.retry()
+        self.playback.at = 0.2  # Playback до seek отдаёт позицию старта
+        self.assertTrue(self.state().output_down)
+        with self.assertNoLogs("tts_player", "INFO"):  # тот же отказ — без новой строки error
+            self.playback.fail("no output", True)
+        self.assertTrue(self.state().output_down)
+
+    def test_next_during_outage_plays_and_recovers(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.fail("no output", True)
+        self.player.next()
+        self.glib.source_remove.assert_called_once_with(42)
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
+        self.playback.at = 0.1
+        state = self.state()
+        self.assertEqual((False, "bb"), (state.output_down, state.current.token))
+        self.assertAlmostEqual(0.1, state.position_s)
+        self.player.stop()
+        self.assertEqual([B0], [p.name for p in self.inbox_dir.iterdir()])
+
+    def test_pause_during_outage_cancels_retry_and_resume_plays_same_place(self) -> None:
+        self.start_with(A0, A1)
+        self.finish()
+        self.playback.fail("no output", True)
+        self.player.toggle_pause()
+        self.glib.source_remove.assert_called_once_with(42)
+        state = self.state()
+        self.assertEqual("paused", state.status)
+        self.assertAlmostEqual(0.5, state.position_s)
+        self.player.toggle_pause()
+        self.assertEqual((A1, 0.0), self.playback.starts[-1])
+
+    def test_seek_during_outage_plays_target(self) -> None:
+        self.start_with(A0, A1)
+        self.playback.fail("no output", True)
+        self.player.seek(0.7)
+        self.glib.source_remove.assert_called_once_with(42)
+        name, start = self.playback.starts[-1]
+        self.assertEqual(A1, name)
+        self.assertAlmostEqual(0.2, start)
+        self.playback.at = 0.4
+        state = self.state()
+        self.assertFalse(state.output_down)
+        self.assertAlmostEqual(0.9, state.position_s)
+
+    def test_heard_message_reached_by_prev_is_not_returned(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.player.next()
+        self.player.prev()
+        self.player.toggle_play_stop()
+        self.player.stop()
+        self.assertEqual([], list(self.inbox_dir.iterdir()))
+        self.assertEqual([], list(self.store_dir.iterdir()))
 
     def test_without_history_plays(self) -> None:
         player = Player(self.runtime, None, None, None)
@@ -405,7 +488,7 @@ class PlayerButtonsTest(PlayerCase):
 
     def test_play_stop_during_outage_cancels_retry(self) -> None:
         self.start_with(A0)
-        self.playback.on_error(self.path(A0), "no output", True)
+        self.playback.fail("no output", True)
         self.player.toggle_play_stop()
         self.glib.source_remove.assert_called_once_with(42)
 

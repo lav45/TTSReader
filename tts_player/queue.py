@@ -103,18 +103,21 @@ class MessageQueue:
     def release(self, current: Message | None, position_s: float) -> list[Sentence]:
         """Отдаёт непрослушанные предложения по recv_ns и забывает все сообщения.
 
-        current — предложения, кончающиеся после position_s или начинающиеся не раньше
-        неё (предложение нулевой длины на позиции не теряется); остальные непрослушанные
-        сообщения — все предложения. Файлы прослушанных и сыгранных предложений
+        current (если не прослушано) — предложения, кончающиеся после position_s или
+        начинающиеся не раньше неё (предложение нулевой длины на позиции не теряется);
+        остальные непрослушанные сообщения — все предложения. Прослушанное, даже если
+        оно current (вернулись по prev), не отдаётся. Файлы прослушанных и сыгранных предложений
         удаляются, копии склеек удаляются всегда: после перезапуска непрослушанное
         играется по предложениям.
         """
         pending: list[Sentence] = []
         for message in self._messages:
+            if message.heard:
+                continue
             if message is current:
                 pending.extend(s for s in message.sentences
                                if self._unfinished(message, s, position_s))
-            elif not message.heard:
+            else:
                 pending.extend(message.sentences)
         for message in self._messages:
             for sentence in message.sentences:

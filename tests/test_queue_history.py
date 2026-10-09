@@ -266,10 +266,11 @@ class QueueHistoryTest(unittest.TestCase):
             released = self.queue.release(message, 0.75)
         self.assertEqual(sentences[2:], released)
 
-    def test_release_current_takes_priority_over_heard(self):
+    def test_release_heard_current_returns_nothing_and_deletes_files(self):
         message, sentences = self.three_sentences()
         self.queue.mark_heard(message)
-        self.assertEqual(sentences[1:], self.queue.release(message, 0.75))
+        self.assertEqual([], self.queue.release(message, 0.75))
+        self.assertFalse(any(s.path.exists() for s in sentences))
 
     def test_release_mixes_current_and_unheard_by_recv_ns(self):
         message, sentences = self.three_sentences()
