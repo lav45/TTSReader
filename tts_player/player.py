@@ -22,6 +22,7 @@ from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.queue import MessageQueue, QueueSnapshot, TaskOrder  # noqa: E402
 from tts_player.saved_messages import SavedMessages  # noqa: E402
+from tts_player.sentence_counter import SentenceCounter  # noqa: E402
 from tts_player.sessions import Session, Sessions  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 
@@ -85,7 +86,10 @@ class Player:
 
     Сообщение заводит задача хука (контракт (11)) своей сессии: сессия активна и свой текст не
     звучит — задача сразу уходит в очередь демона (12), иначе сообщение отложено (deferred) —
-    только текст; сессии нет в списке — задача удалена. Сообщение с текстом — в конец своей
+    только текст; сессии нет в списке — задача удалена. Число предложений текста
+    (sentence_count, по нему конец сообщения — MessageQueue.is_complete) считает
+    SentenceCounter один раз на сообщение; ответ асинхронный (_on_count), и пришедший после
+    конца полученного завершает ожидающее сообщение. Сообщение с текстом — в конец своей
     очереди, ещё без звука; предложения приходят по id задачи демона (13). Начало
     проигрывания (_start: play/pause, автопереход, next/prev) отложенного сообщения отдаёт
     его текст демону текущим голосом; сообщения, которое демон уже не озвучивает, — сверяет
@@ -124,12 +128,16 @@ class Player:
                  daemon_queue: DaemonQueue,
                  daemon_settings: DaemonSettings,
                  sessions: Sessions,
-                 control_dir: Path | None = None) -> None:
+                 control_dir: Path | None = None,
+                 sentence_counter: SentenceCounter | None = None) -> None:
         """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
         hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
         очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки;
         sessions — список сессий, уже загруженный: его сессиям очереди заводятся здесь, а
-        сообщения прошлого запуска раскладывает по ним start(); control_dir — control/ (контракт (14)), None — без запросов session add/remove."""
+        сообщения прошлого запуска раскладывает по ним start(); control_dir — control/
+        (контракт (14)), None — без запросов session add/remove;
+        sentence_counter — счётчик предложений, плеер его владелец (останавливает в shutdown);
+        None — число предложений неизвестно, конец сообщения по запасным признакам."""
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
@@ -148,6 +156,7 @@ class Player:
                                     self._inbox.store)
         self._daemon_queue = daemon_queue
         self._daemon_settings = daemon_settings
+        self._counter = sentence_counter
         self._control = None
         if control_dir is not None:
             self._control = ControlRequests(control_dir, self.add_session, self.remove_session,
@@ -224,7 +233,7 @@ class Player:
         Поздние предложения восстановленных задач — их, а не чужие; файлы store/, на которые
         сообщения не ссылаются, удаляет Inbox. Сам плеер ничего не начинает: открытая папка
         ждёт (idle, текущего нет), восстановленные очереди режутся до tail; новые ответы
-        играют как обычно."""
+        играют как обычно. Восстановленным без числа предложений оно запрашивается."""
         if self._history is not None:
             try:
                 self._history.start()
@@ -233,6 +242,10 @@ class Player:
                             self._history_dir, error)
         self._restore(self._saved.load())
         self._trim_unfocused()
+        for queue in self._queues.values():
+            for message in queue.messages:
+                if message.sentence_count is None:
+                    self._count(message)
         self._inbox.start(self._store_files())
         if self._control is not None:
             self._control.start()  # раньше задач хука: их сессии уже в списке
@@ -348,7 +361,8 @@ class Player:
         нет в списке — задача удалена (строка «dropped»). Иначе (строка «chars» — её читает e2e)
         сообщение с её текстом — в конец очереди сессии, ещё без звука; сессия активна и
         свой текст не звучит — поля задачи как есть уходят в очередь демона, иначе
-        сообщение отложено (строка «deferred»)."""
+        сообщение отложено (строка «deferred»). Число предложений текста запрашивается сразу,
+        и у отложенного тоже: текст не меняется и при переозвучке."""
         if self._control is not None:
             self._control.drain()
         session_id = task.session_id
@@ -360,6 +374,7 @@ class Player:
                           persona=task.persona, speed=task.speed, received_at=task.timestamp)
         queue = self._queues[session_id]
         queue.append(message)
+        self._count(message)
         if session_id == self._sessions.active and not self._held:
             self._send(queue, message, task.fields, f"задача хука {task.id}")
         else:
@@ -382,12 +397,30 @@ class Player:
         queue.link(message, task_id)
         self._sent_in_run.add(message)
 
+    def _count(self, message: Message) -> None:
+        """Запрос числа предложений текста message; ответ — в _on_count. Без счётчика или
+        текста — ничего: число остаётся неизвестным."""
+        if self._counter is None or message.text is None:
+            return
+        self._counter.count(message.text, lambda count: self._on_count(message, count))
+
+    def _on_count(self, message: Message, count: int) -> None:
+        """Число предложений пришло. Текущее, доигранное до конца полученного и ждущее
+        предложения, могло этим завершиться: тогда — конец сообщения."""
+        message.sentence_count = count
+        if message is self._current:
+            self._end_if_waiting()
+        self._changed()
+
     def shutdown(self) -> None:
-        """Выход процесса: громкость чужих потоков — обратно; сообщения — в messages.json
-        для следующего запуска (файлы непрослушанных остаются в store/, прослушанных —
-        удаляются), вместе с id их задач: предложения, пришедшие после выхода, — их."""
+        """Выход процесса: громкость чужих потоков — обратно; счётчик предложений остановлен;
+        сообщения — в messages.json для следующего запуска (файлы непрослушанных остаются в
+        store/, прослушанных — удаляются), вместе с id их задач: предложения, пришедшие после
+        выхода, — их."""
         self._unduck()
         self._stop_watch()
+        if self._counter is not None:
+            self._counter.stop()
         self._inbox.stop()
         if self._control is not None:
             self._control.stop()
@@ -539,8 +572,7 @@ class Player:
         playing_it = current is not None and sentence.task_id in current.task_ids
         queue.add(sentence, sounded=self._sentence if playing_it else None)
         if queue is not self._queue:
-            if self._waiting() and self._next_sentence() is None:
-                self._message_end()
+            self._end_if_waiting()
         elif self._status == "idle" and self._starts_by_itself():
             message = self._queue.message_of(sentence.task_id)
             if message is not None and not message.heard:
@@ -771,6 +803,13 @@ class Player:
             GLib.source_remove(self._retry_id)
             self._retry_id = 0
         self._file = None
+
+    def _end_if_waiting(self) -> None:
+        """Текущее ждёт предложение, а следующего нет: признак завершённости мог смениться без
+        его предложения (предложение другой задачи, число предложений) — конец, если
+        завершено."""
+        if self._waiting() and self._next_sentence() is None:
+            self._message_end()
 
     def _waiting(self) -> bool:
         """Сообщение доиграно до конца полученного и не завершено: ждём предложение."""

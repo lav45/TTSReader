@@ -87,6 +87,8 @@ class SavedMessages:
             "duration_s": message.duration_s,
             "sentences": [s.path.name for s in message.sentences],
             "audio": None if message.audio is None else message.audio.name,
+            "sentence_count": message.sentence_count,
+            "played_indices": sorted(message.played_indices),
         }
 
     def _from_dict(self, item: dict) -> Message:
@@ -110,6 +112,9 @@ class SavedMessages:
             duration_s=duration_s,
             heard=bool(item["heard"]),
             deferred=bool(item.get("deferred", False)),  # файл до сессий в плеере — без ключа
+            # файл до счётчика предложений — без ключа: число запросит Player.start
+            sentence_count=self._optional_count(item.get("sentence_count")),
+            played_indices={self._count(index) for index in item.get("played_indices", [])},
         )
 
     def _sentences(self, names: list) -> list:
@@ -132,6 +137,17 @@ class SavedMessages:
     @classmethod
     def _optional_text(cls, value) -> str | None:
         return None if value is None else cls._text(value)
+
+    @classmethod
+    def _optional_count(cls, value) -> int | None:
+        return None if value is None else cls._count(value)
+
+    @staticmethod
+    def _count(value) -> int:
+        """Число предложений или индекс: целое ≥ 0."""
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise TypeError(f"ожидалось целое ≥ 0: {value!r}")
+        return value
 
     @staticmethod
     def _optional_number(value) -> float | None:

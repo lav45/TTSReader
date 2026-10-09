@@ -136,6 +136,24 @@ class FakeSettings:
             "voice_sherpa": f"voice-{self.persona}"})
 
 
+class FakeCounter:
+    """Подменяет SentenceCounter: запоминает запросы, отвечает тест (answer); не ответил —
+    как недоступный счётчик."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, Callable[[int], None]]] = []
+        self.stopped = False
+
+    def count(self, text: str, on_count: Callable[[int], None]) -> None:
+        self.requests.append((text, on_count))
+
+    def answer(self, count: int, request: int = 0) -> None:
+        self.requests[request][1](count)
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
 class PlayerCase(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -2424,6 +2442,125 @@ class PlayerSessionsTest(PlayerCase):
         self.player.apply_prefs(Prefs(tail=2))
         self.assertEqual(["text b2", "text b3"], self.texts("B"))
         self.assertEqual(4, len(self.messages("S")))
+
+
+A2 = "1000000000000000006_aa_tts_queue_S_aa_s2.wav"
+
+
+class PlayerSentenceCountTest(PlayerCase):
+    """Конец сообщения по числу предложений (SentenceCounter): сообщение завершено, когда у его
+    задачи пришли все индексы 0…n−1, — без склейки и без предложения следующей задачи."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.counter = FakeCounter()
+        self.ducker = FakeDucker()
+        self.player = self.make_player(Sessions(self.runtime / "sessions.json"))
+        self.player.add_session("S", "/w/proj")
+        self.player.select_session("S")
+        self.player.start()
+
+    def make_player(self, sessions: Sessions) -> Player:
+        player = Player(self.runtime, None, self.history_dir, self.runtime / "handy_analysis.db",
+                        ducker=self.ducker, sessions=sessions, daemon_queue=self.daemon,
+                        daemon_settings=self.settings, sentence_counter=self.counter)
+        self.playback = player._playback
+        player.on_change = self.states.append
+        return player
+
+    def calls(self) -> list[tuple]:
+        return [c for c in self.ducker.calls if c != ("refresh",)]
+
+    def test_hook_task_asks_count_of_its_text_once(self) -> None:
+        self.announce("aa")
+        self.assertEqual(["text aa"], [text for text, _ in self.counter.requests])
+        self.counter.answer(2)
+        self.assertEqual(2, self.state().messages[0].sentence_count)
+
+    def test_single_sentence_ends_when_joined_file_came_before_it(self) -> None:
+        """Случай из журнала: склейка пришла раньше, чем inbox/ отдал предложение, — «для
+        склейки … нет сообщения сессии», и сообщение без счётчика оставалось «растущим» с
+        приглушением. С числом предложений оно кончается сразу после своего предложения."""
+        self.announce("aa")
+        self.counter.answer(1)
+        with self.assertLogs("tts_player.queue", "INFO") as logs:
+            self.player._on_entry(self.joined(seconds=SECONDS))
+        self.assertIn(f"для склейки {JOINED} нет сообщения сессии S", logs.output[0])
+        self.arrive(A0)
+        self.assertEqual([A0], self.playback.played)
+        self.finish()
+        state = self.state()
+        self.assertEqual("idle", state.status)
+        self.assertTrue(state.current.heard)
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+    def test_long_message_ends_at_last_index(self) -> None:
+        self.announce("aa")
+        self.counter.answer(3)
+        for name in (A0, A1, A2):
+            self.arrive(name)
+        for _ in range(3):
+            self.finish()
+        self.assertEqual([A0, A1, A2], self.playback.played)
+        self.assertEqual("idle", self.state().status)
+        self.assertTrue(self.state().current.heard)
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+    def test_count_after_last_sentence_ends_waiting_message(self) -> None:
+        """Ответ счётчика асинхронный: пришёл, когда сообщение уже доиграно и ждёт, — конец."""
+        self.announce("aa")
+        self.arrive(A0)
+        self.finish()
+        self.assertEqual("playing", self.state().status)
+        self.counter.answer(1)
+        self.assertEqual("idle", self.state().status)
+        self.assertTrue(self.state().current.heard)
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+    def test_count_of_unfinished_message_keeps_waiting(self) -> None:
+        self.announce("aa")
+        self.arrive(A0)
+        self.finish()
+        self.counter.answer(2)
+        self.assertEqual("playing", self.state().status)
+        self.arrive(A1)
+        self.finish()
+        self.assertEqual("idle", self.state().status)
+
+    def test_unavailable_counter_keeps_old_signals(self) -> None:
+        """Счётчик не ответил: доигранное сообщение ждёт, конец — по склейке."""
+        self.announce("aa")
+        self.arrive(A0)
+        self.finish()
+        self.assertEqual("playing", self.state().status)
+        self.assertEqual([("duck", 30)], self.calls())
+        self.player._on_entry(self.joined(seconds=SECONDS))
+        self.assertEqual("idle", self.state().status)
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+    def test_shutdown_stops_counter_and_keeps_count(self) -> None:
+        self.announce("aa")
+        self.counter.answer(3)
+        self.player.shutdown()
+        self.assertTrue(self.counter.stopped)
+        self.assertEqual([3], [m["sentence_count"]
+                               for m in json.loads(self.saved_file().read_text())["messages"]])
+
+    def test_restored_message_without_count_asks_counter(self) -> None:
+        """Сообщения прошлого запуска с числом не пересчитываются; без числа (счётчик был
+        недоступен) — спрашиваются при старте."""
+        self.announce("aa")
+        self.announce("bb")
+        self.counter.answer(1)
+        self.player.shutdown()
+        self.counter = FakeCounter()
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()
+        self.player = self.make_player(sessions)
+        self.player.start()
+        self.assertEqual(["text bb"], [text for text, _ in self.counter.requests])
+        self.counter.answer(2)
+        self.assertEqual([1, 2], [m.sentence_count for m in self.state().messages])
 
 
 if __name__ == "__main__":

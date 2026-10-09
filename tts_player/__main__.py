@@ -30,11 +30,13 @@ from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
+from tts_player.sentence_counter import SentenceCounter  # noqa: E402
 from tts_player.sessions import Sessions, control_dir, sessions_path  # noqa: E402
 from tts_player import session_command  # noqa: E402
 from tts_player.text_speaker import TextSpeaker  # noqa: E402
 
 SYNTH_WORKER = Path(__file__).resolve().parent / "synth_worker.py"
+SENTENCE_COUNT_WORKER = Path(__file__).resolve().parent / "sentence_count_worker.py"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,7 +57,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="файл настроек плеера: хвост, приглушение")
     parser.add_argument("--tts-python",
                         default="~/.local/share/uv/tools/claude-code-tts/bin/python",
-                        help="интерпретатор окружения claude-tts: синтез своего текста")
+                        help="интерпретатор окружения claude-tts: синтез своего текста и"
+                             " счёт предложений сообщения")
     parser.add_argument("--no-gui", action="store_true",
                         help="без окна и трея: только плеер в цикле GLib")
     parser.add_argument("--show", action="store_true", help="показать окно сразу при запуске")
@@ -98,21 +101,24 @@ def main(argv: list[str] | None = None) -> int:
     settings = DaemonSettings(tts_config_dir)
     sessions = Sessions(sessions_path(Path(runtime)))
     sessions.load()  # сессии прошлого запуска — до player.start()
+    tts_python = Path(args.tts_python).expanduser()
     try:
         player = Player(Path(runtime), args.audio_sink,
                         Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
                         ducker, hook_tasks_dir=hook_home.queue_dir,
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
                         daemon_settings=settings, sessions=sessions,
-                        control_dir=control_dir(Path(runtime)))
+                        control_dir=control_dir(Path(runtime)),
+                        # процесс — с первым запросом, остановит Player.shutdown
+                        sentence_counter=SentenceCounter(tts_python, SENTENCE_COUNT_WORKER))
         prefs = PlayerSettings(Path(args.settings_file).expanduser())
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:
             loop = GLib.MainLoop()
             run(player, loop.run, loop.quit, hook_home=hook_home)
         else:
-            text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
-                                       SYNTH_WORKER, player, args.audio_sink)
+            text_speaker = TextSpeaker(Path(runtime), tts_python, SYNTH_WORKER, player,
+                                       args.audio_sink)
             run_gui(player, settings, prefs, text_speaker, args.show, hook_home)
     finally:
         hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден

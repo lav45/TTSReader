@@ -192,6 +192,52 @@ class MessageQueueTest(unittest.TestCase):
         self.queue.append(message)
         self.assertTrue(self.queue.is_complete(message))
 
+    def test_is_complete_when_last_task_covers_all_indices(self):
+        """Число предложений известно: сообщение завершено, когда у его последней задачи
+        есть все индексы 0…n−1, — без склейки и без предложения следующей задачи."""
+        message = self.message("t1")
+        message.sentence_count = 3
+        self.queue.add(self.sentence(1, "t1", 0))
+        self.queue.add(self.sentence(2, "t1", 2))
+        self.assertFalse(self.queue.is_complete(message))
+        self.queue.add(self.sentence(3, "t1", 1))
+        self.assertTrue(self.queue.is_complete(message))
+
+    def test_is_complete_by_indices_of_two_passes_with_duplicate(self):
+        """Пауза демона: проход bb начат с оборванного предложения 1 — дубль индекса 1 не
+        мешает, индексы считаются по всем проходам задачи."""
+        message = self.message("t1")
+        message.sentence_count = 3
+        for recv_ns, index, token in ((1, 0, "aa"), (2, 1, "aa"), (4, 1, "bb")):
+            self.queue.add(self.sentence(recv_ns, "t1", index, token=token))
+        self.assertFalse(self.queue.is_complete(message))
+        self.queue.add(self.sentence(5, "t1", 2, token="bb"))
+        self.assertTrue(self.queue.is_complete(message))
+
+    def test_zero_sentences_is_complete_at_once(self):
+        """Пустой текст: демон не синтезирует ничего, ждать нечего."""
+        message = self.message("t1")
+        message.sentence_count = 0
+        self.assertTrue(self.queue.is_complete(message))
+
+    def test_indices_count_only_for_last_task(self):
+        """Переозвучка: предложения прежней задачи новую не завершают."""
+        message = self.message("t1")
+        message.sentence_count = 1
+        self.queue.add(self.sentence(1, "t1", 0))
+        self.queue.link(message, "t2")
+        self.assertFalse(self.queue.is_complete(message))
+        self.queue.add(self.sentence(2, "t2", 0))
+        self.assertTrue(self.queue.is_complete(message))
+
+    def test_unknown_count_keeps_old_signals(self):
+        """Счётчик недоступен (None): все индексы ещё не конец, конец — по прежним признакам."""
+        message = self.message("t1")
+        self.queue.add(self.sentence(1, "t1", 0))
+        self.assertFalse(self.queue.is_complete(message))
+        self.add(2, task="t2")
+        self.assertTrue(self.queue.is_complete(message))
+
     def test_late_sentence_of_started_message_is_added(self):
         a = self.add(1, index=0)
         message = self.queue.messages[0]
@@ -578,6 +624,34 @@ class SnapshotTest(unittest.TestCase):
         self.assertFalse(first.path.exists())
         self.assertFalse(audio.exists())
         self.assertEqual((None, None), (message.audio, message.duration_s))
+
+    def test_release_keeps_completeness_by_count_of_dropped_sentences(self):
+        """Выход посреди сообщения: доигранные предложения удалены, но пришли — после
+        перезапуска сообщение завершено по числу предложений, без склейки."""
+        message = self.message("t1")
+        message.sentence_count = 2
+        self.queue.add(self.sentence(1, "t1", 0))
+        self.queue.add(self.sentence(2, "t1", 1))
+        with mock.patch.object(MessageQueue, "_duration", return_value=1.0):
+            snapshot = self.queue.release(message, 1.5)
+        queue = MessageQueue(tail=5, order=TaskOrder())
+        queue.restore(snapshot)
+        [restored] = queue.messages
+        self.assertEqual([1], [s.index for s in restored.sentences])
+        self.assertTrue(queue.is_complete(restored))
+
+    def test_forget_audio_forgets_played_indices(self):
+        message = self.message("t1")
+        message.sentence_count = 2
+        self.queue.add(self.sentence(1, "t1", 0))
+        self.queue.add(self.sentence(2, "t1", 1))
+        with mock.patch.object(MessageQueue, "_duration", return_value=1.0):
+            self.queue.release(message, 1.5)
+        self.queue.restore(QueueSnapshot([message], [], {"t1": 1}, 1))
+        self.queue.forget_audio(message)
+        self.queue.link(message, "t2")
+        self.queue.add(self.sentence(3, "t2", 1))
+        self.assertFalse(self.queue.is_complete(message))
 
     def test_release_keeps_current_at_sentence_boundary_from_next(self):
         message = self.message("t1")
