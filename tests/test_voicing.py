@@ -19,12 +19,16 @@ class VoicingTest(unittest.TestCase):
         self.flag = self.dir / "claude-tts.on"
         self.hook = self.dir / "tts-toggle.sh"
         self.out = self.dir / "out.txt"
+        self.pid = self.dir / "pid.txt"
+        self.done = self.dir / "done.txt"
 
     def write_hook(self, sleep: str = "0", code: int = 0) -> None:
         self.hook.write_text(
             "#!/bin/bash\n"
+            f"echo $$ > {self.pid}\n"
             f"printf '%s|%s' \"$1\" \"$CLAUDE_CODE_SESSION_ID\" > {self.out}\n"
             f"sleep {sleep}\n"
+            f"touch {self.done}\n"
             f"exit {code}\n"
         )
         self.hook.chmod(0o755)
@@ -35,6 +39,13 @@ class VoicingTest(unittest.TestCase):
         while not until() and time.monotonic() < deadline:
             context.iteration(False)
             time.sleep(0.01)
+
+    def wait_exit(self) -> None:
+        """Крутит цикл, пока заглушка не завершится и GLib не соберёт её (колбэк уже отработал)."""
+        self.spin(lambda: self.pid.exists() and self.pid.read_text().strip() != "")
+        proc = Path("/proc") / self.pid.read_text().strip()
+        self.spin(lambda: not proc.exists())
+        self.assertFalse(proc.exists(), "заглушка не завершилась")
 
     def test_is_on_false_without_flag(self) -> None:
         self.assertFalse(Voicing(self.flag, self.hook).is_on())
@@ -51,8 +62,7 @@ class VoicingTest(unittest.TestCase):
         self.write_hook()
         self.flag.write_text(SESSION + "\n")
         Voicing(self.flag, self.hook).turn_off()
-        self.spin(self.out.exists)
-        self.spin(lambda: self.out.exists() and self.out.read_text() != "")
+        self.wait_exit()
         self.assertEqual(f"off|{SESSION}", self.out.read_text())
 
     def test_turn_off_does_not_wait_for_hook(self) -> None:
@@ -61,8 +71,9 @@ class VoicingTest(unittest.TestCase):
         started = time.monotonic()
         Voicing(self.flag, self.hook).turn_off()
         self.assertLess(time.monotonic() - started, 0.5)
-        # дождаться хука, иначе удаление каталога ломает его и сбой попадает в лог соседнего теста
-        self.spin(lambda: False, timeout=1.3)
+        self.assertFalse(self.done.exists())
+        self.wait_exit()
+        self.assertTrue(self.done.exists())
 
     def test_turn_off_without_flag_skips_hook(self) -> None:
         self.write_hook()
@@ -76,7 +87,7 @@ class VoicingTest(unittest.TestCase):
         self.flag.write_text(SESSION)
         with self.assertLogs("tts_player.voicing", "WARNING") as logs:
             Voicing(self.flag, self.hook).turn_off()
-        self.assertIn(str(self.hook), logs.output[0])
+        self.assertIn("No such file", logs.output[0])
 
     def test_turn_off_not_executable_logs_reason(self) -> None:
         self.write_hook()
@@ -91,8 +102,8 @@ class VoicingTest(unittest.TestCase):
         self.flag.write_text(SESSION)
         with self.assertLogs("tts_player.voicing", "WARNING") as logs:
             Voicing(self.flag, self.hook).turn_off()
-            self.spin(lambda: bool(logs.output))
-        self.assertIn("3", logs.output[0])
+            self.wait_exit()
+        self.assertIn("exited with code 3", logs.output[0])
 
 
 if __name__ == "__main__":
