@@ -78,7 +78,9 @@ class Ducker:
         foreign = self._foreign(inputs)
         for index, entry in foreign.items():
             self._first_seen[self._key(index, entry)] = float("-inf")
-        self._lower_adopting(foreign)
+        matches = self._orphan_matches(foreign)
+        originals = {index: self._orphans[name]["original"] for index, name in matches.items()}
+        self._lower(foreign, originals, set(matches.values()))
 
     def refresh(self) -> None:
         """Приглушить потоки, появившиеся после duck.
@@ -87,8 +89,10 @@ class Ducker:
         (сервер завис — каждый вызов блокировал бы главный цикл на PACTL_TIMEOUT; нет
         программы — предупреждение каждую секунду бессмысленно). Код возврата != 0 —
         повтор остаётся. Если первый duck не получил список потоков — повторяет его.
-        Запомненный поток, которого нет в списке, становится сиротой; новый поток
-        приложения-сироты глушится сразу, от исходной громкости сироты."""
+        Запомненный поток, которого нет в списке, а других запомненных потоков приложения
+        нет, становится сиротой. Поток, появившийся после начала речи, с громкостью ==
+        сниженной ±1 у запомненного потока того же приложения (или у сироты) глушится сразу,
+        от исходной громкости этой пары."""
         if not self.ducked or self._stalled:
             return
         if not self._lowered_once:
@@ -101,15 +105,20 @@ class Ducker:
         foreign = self._foreign(inputs)
         keys = {self._key(index, entry) for index, entry in foreign.items()}
         self._first_seen = {key: seen for key, seen in self._first_seen.items() if key in keys}
-        self._orphan_gone(foreign, set(self._first_seen))
+        before = self._before_speech()
+        self._orphan_gone(foreign, before)
         unsaved = {index: entry for index, entry in foreign.items() if not self._is_saved(index, entry)}
-        matches = self._claim(unsaved)
+        originals = self._live_matches(unsaved, before)
+        rest = {index: entry for index, entry in unsaved.items() if index not in originals}
+        matches = self._orphan_matches(rest)
+        for index, name in matches.items():
+            originals[index] = self._orphans[name]["original"]
         fresh = {}
         for index, entry in unsaved.items():
             first_seen = self._first_seen.setdefault(self._key(index, entry), now)
-            if index in matches or now - first_seen >= self.MIN_AGE_S:
+            if index in originals or now - first_seen >= self.MIN_AGE_S:
                 fresh[index] = entry
-        self._lower(fresh, matches)
+        self._lower(fresh, originals, set(matches.values()))
 
     def watch(self) -> None:
         """Один проход по списку потоков: вне приглушения исправить громкость потоков сирот.
@@ -123,18 +132,20 @@ class Ducker:
         inputs = self._list_inputs()
         if inputs is None:
             return
-        foreign = self._foreign(inputs)
-        matches = self._claim(foreign)
-        for index, orphan in matches.items():
-            self._pactl("set-sink-input-volume", str(index), *map(str, orphan["original"]))
-        self._consume(matches)
+        matches = self._orphan_matches(self._foreign(inputs))
+        failed = set()
+        for index, name in matches.items():
+            original = self._orphans[name]["original"]
+            if self._pactl("set-sink-input-volume", str(index), *map(str, original)) is None:
+                failed.add(name)
+        self._consume(set(matches.values()) - failed)
 
     def restore(self) -> None:
         """Вернуть запомненные громкости потокам, которые ещё есть; удалить state_file.
 
         Нечего возвращать — pactl не зовём. Не удалось получить список потоков —
         set пробуем вслепую для каждого запомненного."""
-        saved, percent, seen = self._saved, self._percent, set(self._first_seen)
+        saved, percent, before = self._saved, self._percent, self._before_speech()
         self._saved = {}
         self._percent = None
         self._lowered_once = False
@@ -144,7 +155,9 @@ class Ducker:
             present = self._present()
             self._apply(saved, present)
             if present is not None and percent is not None:
-                self._add_orphans(saved, present, percent, seen)
+                alive = {entry["name"] for index, entry in saved.items()
+                         if present.get(index) == (entry["name"], entry["pid"])}
+                self._add_orphans(saved, present, percent, before, alive)
         self._remove_state()
 
     def recover(self) -> None:
@@ -174,8 +187,12 @@ class Ducker:
         saved = self._saved.get(index)
         return saved is not None and saved["name"] == entry["name"] and saved["pid"] == entry["pid"]
 
-    def _orphan_gone(self, foreign: dict[int, dict], seen: set) -> None:
-        """Запомненные потоки, которых нет в списке, — сироты; из запомненных они уходят."""
+    def _before_speech(self) -> set:
+        """Ключи потоков, звучавших до начала речи (первый список duck)."""
+        return {key for key, seen in self._first_seen.items() if seen == float("-inf")}
+
+    def _orphan_gone(self, foreign: dict[int, dict], before: set) -> None:
+        """Запомненные потоки, которых нет в списке, уходят из запомненных (и могут стать сиротой)."""
         present = {index: (entry["name"], entry["pid"]) for index, entry in foreign.items()}
         gone = {index: entry for index, entry in self._saved.items()
                 if present.get(index) != (entry["name"], entry["pid"])}
@@ -184,33 +201,51 @@ class Ducker:
         for index in gone:
             del self._saved[index]
         self._write_state()
-        self._add_orphans(gone, present, self._percent, seen)
+        alive = {entry["name"] for entry in self._saved.values()}
+        self._add_orphans(gone, present, self._percent, before, alive)
 
-    def _add_orphans(self, saved: dict[int, dict], present: dict, percent: int, seen: set) -> None:
-        """Сироты из saved — запомненных потоков, которых (с тем же именем и pid) нет среди present.
+    def _add_orphans(self, gone: dict[int, dict], present: dict, percent: int, before: set,
+                     alive: set) -> None:
+        """Сирота — пара (исходная, сниженная) приложения, чей последний приглушённый поток исчез.
 
-        known — потоки приложения, уже виденные в прежних проходах (seen — их ключи
-        index+имя+pid): сирота их не трогает. Появившийся в этом же проходе (перезапущенный
-        трек браузера) — кандидат."""
+        gone — исчезнувшие запомненные потоки, alive — имена приложений, у которых запомненный
+        поток жив (пара ещё действует, сирота не нужна). known — потоки приложения, звучавшие
+        до начала речи (before — их ключи index+имя+pid): сирота их не трогает; всё, что
+        появилось позже (в том числе в этом же проходе), — кандидат."""
         added = False
-        for index, entry in saved.items():
+        for index, entry in gone.items():
             name = entry["name"]
-            if present.get(index) == (name, entry["pid"]) or name is None:
+            if name is None or name in alive:
                 continue
-            known = [[i, pid] for i, (n, pid) in present.items() if n == name and (i, n, pid) in seen]
+            known = [[i, pid] for i, (n, pid) in present.items() if n == name and (i, n, pid) in before]
             ducked = [round(v * percent / 100) for v in entry["volumes"]]
             self._orphans[name] = {"original": entry["volumes"], "ducked": ducked, "known": known}
             added = True
         if added:
             self._write_orphans()
 
-    def _claim(self, streams: dict[int, dict]) -> dict[int, dict]:
-        """Потоки, которым достаётся сирота: {index: сирота}. Сироты не снимаются.
+    def _live_matches(self, unsaved: dict[int, dict], before: set) -> dict[int, list[int]]:
+        """Новые (после начала речи) потоки с громкостью == сниженной ±1 у запомненного потока того
+        же приложения: {index: исходная громкость этого запомненного}."""
+        result = {}
+        for index, entry in unsaved.items():
+            if entry["name"] is None or self._key(index, entry) in before:
+                continue
+            for saved in self._saved.values():
+                if saved["name"] != entry["name"]:
+                    continue
+                ducked = [round(v * self._percent / 100) for v in saved["volumes"]]
+                if self._is_close(entry["volumes"], ducked):
+                    result[index] = saved["volumes"]
+                    break
+        return result
 
-        Поток приложения-сироты «новый», если его нет среди known сироты. Среди новых
-        подходящий — с громкостью == ducked ±1 по каналам; нашёлся — он получает сироту,
-        новые есть, а подходящего нет — сирота снимается (громкость другая — поправил
-        пользователь, либо число каналов другое). Уже звучавшие потоки сироту не трогают."""
+    def _orphan_matches(self, streams: dict[int, dict]) -> dict[int, str]:
+        """Потоки, которым достаётся сирота: {index: имя сироты}. Выданные сироты не снимаются.
+
+        Поток приложения-сироты «новый», если его нет среди known сироты. Новые с громкостью
+        == ducked ±1 получают сироту все; новые есть, но подходящих нет — сирота снимается
+        (громкость другая — поправил пользователь, либо число каналов другое)."""
         matches = {}
         dropped = False
         for name, orphan in list(self._orphans.items()):
@@ -219,29 +254,22 @@ class Ducker:
                    if entry["name"] == name and (index, entry["pid"]) not in known}
             if not new:
                 continue
-            index = next((i for i, e in new.items() if self._is_close(e["volumes"], orphan["ducked"])), None)
-            if index is None:
+            close = [i for i, e in new.items() if self._is_close(e["volumes"], orphan["ducked"])]
+            if not close:
                 log.info("Громкость %s другая (или другое число каналов), сирота снята", name)
                 del self._orphans[name]
                 dropped = True
-            else:
-                matches[index] = orphan
+            for index in close:
+                matches[index] = name
         if dropped:
             self._write_orphans()
         return matches
 
-    def _consume(self, matches: dict[int, dict]) -> None:
-        """Снять сирот, выданных _claim, после того как громкость выставлена."""
-        for orphan in matches.values():
-            for name in [n for n, o in self._orphans.items() if o is orphan]:
-                del self._orphans[name]
-        if matches:
+    def _consume(self, names: set[str]) -> None:
+        """Снять сирот, которым громкость выставлена."""
+        gone = [name for name in names if self._orphans.pop(name, None) is not None]
+        if gone:
             self._write_orphans()
-
-    def _lower_adopting(self, streams: dict[int, dict]) -> None:
-        """Снизить streams; новым потокам приложений-сирот исходная громкость — из сироты."""
-        matches = self._claim(streams)
-        self._lower(streams, matches)
 
     @staticmethod
     def _is_close(current: list[int], ducked: list[int]) -> bool:
@@ -252,14 +280,7 @@ class Ducker:
             return {}
         try:
             data = json.loads(self._orphans_file.read_text(encoding="utf-8"))
-            return {
-                str(name): {
-                    "original": [int(v) for v in entry["original"]],
-                    "ducked": [int(v) for v in entry["ducked"]],
-                    "known": [[int(i), pid] for i, pid in entry["known"]],
-                }
-                for name, entry in data.items()
-            }
+            return {str(name): self._parse_orphan(entry) for name, entry in data.items()}
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             log.warning("Файл сирот %s повреждён, удалён: %s", self._orphans_file, exc)
             try:
@@ -267,6 +288,16 @@ class Ducker:
             except OSError as error:
                 log.warning("Не удалён %s: %s", self._orphans_file, error)
             return {}
+
+    def _parse_orphan(self, entry: dict) -> dict:
+        """Запись сироты из файла; негодные типы — TypeError."""
+        lists = {key: list(entry[key]) for key in ("original", "ducked")}
+        known = [[i, pid] for i, pid in entry["known"]]
+        valid = (all(self._is_int(v) for values in lists.values() for v in values)
+                 and all(self._is_int(i) and (pid is None or isinstance(pid, str)) for i, pid in known))
+        if not valid:
+            raise TypeError("негодные типы в записи сироты")
+        return {**lists, "known": known}
 
     def _write_orphans(self) -> None:
         self._orphans_changed_at = self._clock()
@@ -329,25 +360,30 @@ class Ducker:
         """Идентичность потока для учёта возраста: index + имя + pid."""
         return index, entry["name"], entry["pid"]
 
-    def _lower(self, streams: dict[int, dict], matches: dict[int, dict] | None = None) -> None:
+    def _lower(self, streams: dict[int, dict], originals: dict[int, list[int]] | None = None,
+               consume: set[str] | None = None) -> None:
         """Запомнить потоки в state_file и снизить их на self._percent.
 
-        У потоков из matches (сироты) исходная громкость — original сироты; после записи
-        состояния и снижения сироты снимаются."""
+        originals — исходные громкости потоков, которым их выдала пара приложения
+        (запоминается она, а не текущая); consume — сироты, которых снять, если все
+        громкости выставлены."""
         if not streams:
             return
-        matches = matches or {}
-        streams = {index: ({**entry, "volumes": matches[index]["original"]} if index in matches else entry)
+        originals = originals or {}
+        streams = {index: ({**entry, "volumes": originals[index]} if index in originals else entry)
                    for index, entry in streams.items()}
         saved_before = dict(self._saved)
         self._saved.update(streams)
         if not self._write_state():
             self._saved = saved_before  # без записи recover не вернёт громкость — не снижаем
             return
+        done = True
         for index, entry in streams.items():
             values = [round(v * self._percent / 100) for v in entry["volumes"]]
-            self._pactl("set-sink-input-volume", str(index), *map(str, values))
-        self._consume({index: orphan for index, orphan in matches.items() if index in streams})
+            if self._pactl("set-sink-input-volume", str(index), *map(str, values)) is None:
+                done = False
+        if done and consume:
+            self._consume(consume)
 
     def _apply(self, saved: dict[int, dict], present: dict | None) -> None:
         """Вернуть громкости: только потокам с тем же index, именем и pid (present None — всем)."""

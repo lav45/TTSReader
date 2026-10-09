@@ -25,6 +25,7 @@ STUB = """#!/bin/sh
 echo "$LC_ALL|$*" >> "$PACTL_LOG"
 [ -n "$PACTL_SLEEP" ] && exec sleep "$PACTL_SLEEP"
 [ -n "$PACTL_EXIT" ] && exit "$PACTL_EXIT"
+[ "$1" = "set-sink-input-volume" ] && [ -n "$PACTL_FAIL_SET" ] && exit 1
 [ "$1" = "-f" ] && cat "$PACTL_FIXTURE"
 exit 0
 """
@@ -444,43 +445,115 @@ class DuckerTest(unittest.TestCase):
         item["properties"]["application.name"] = "Firefox"
         return item
 
-    def make_tab_orphan(self):
-        """Вкладки A(1) и B(5, пользователь снизил до 20000) глушатся; A кончается; B жива."""
+    def duck_tabs(self):
+        """Вкладки A(1, 60000) и B(5, пользователь снизил до 20000) глушатся до 30 %."""
         self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [20000, 20000])])
         self.ducker.duck(30)
-        self.set_inputs([self.tab(5, 200, [6000, 6000])])
-        self.ducker.restore()
-        self.set_inputs([self.tab(5, 200, [20000, 20000])])
         self.clear_log()
 
-    def test_preexisting_sibling_does_not_consume_orphan_in_speech(self):
-        self.make_tab_orphan()
-        self.assertEqual(self.orphans_data()["Firefox"]["known"], [[5, "200"]])
-        self.ducker.duck(30)
+    def write_orphan(self, known):
+        self.orphans.write_text(json.dumps({"Firefox": {
+            "original": [60000, 60000], "ducked": [18000, 18000], "known": known}}))
+
+    def test_overlapping_track_change_is_repaired(self):
+        """Новый поток появляется за проход до того, как старый исчез: глушится сразу, исходная — пары."""
+        self.duck_tabs()
+        self.set_inputs([self.tab(1, 200, [18000, 18000]), self.tab(5, 200, [6000, 6000]),
+                         self.tab(8, 200, [18000, 18000])])
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "8", "18000", "18000"]])
+        self.assertEqual(json.loads(self.state.read_text())["inputs"]["8"]["volumes"], [60000, 60000])
+        self.set_inputs([self.tab(5, 200, [6000, 6000]), self.tab(8, 200, [18000, 18000])])
+        self.ducker.refresh()
+        self.assertFalse(self.ducker.has_orphans)
+        self.clear_log()
         self.ducker.restore()
         self.assertEqual(self.set_calls(), [
-            ["set-sink-input-volume", "5", "6000", "6000"],
             ["set-sink-input-volume", "5", "20000", "20000"],
+            ["set-sink-input-volume", "8", "60000", "60000"],
         ])
-        self.assertTrue(self.ducker.has_orphans)
 
-    def test_preexisting_sibling_does_not_consume_orphan_in_watch(self):
-        self.make_tab_orphan()
-        self.set_inputs([self.tab(5, 200, [18000, 18000])])
-        self.ducker.watch()
+    def test_new_tab_during_speech_while_ducked_sibling_lives(self):
+        self.duck_tabs()
+        self.set_inputs([self.tab(1, 200, [18000, 18000]), self.tab(5, 200, [6000, 6000]),
+                         self.tab(9, 200, [18000, 18000])])
+        self.ducker.refresh()
+        self.ducker.restore()
+        self.assertEqual(self.set_calls()[-3:], [
+            ["set-sink-input-volume", "1", "60000", "60000"],
+            ["set-sink-input-volume", "5", "20000", "20000"],
+            ["set-sink-input-volume", "9", "60000", "60000"],
+        ])
+
+    def test_new_tab_with_other_volume_follows_age_rule(self):
+        self.duck_tabs()
+        self.set_inputs([self.tab(1, 200, [18000, 18000]), self.tab(9, 200, [40000, 40000])])
+        self.ducker.refresh()
         self.assertEqual(self.set_calls(), [])
-        self.assertTrue(self.ducker.has_orphans)
+        self.now += Ducker.MIN_AGE_S
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "9", "12000", "12000"]])
 
-    def test_watch_considers_all_candidates(self):
-        self.make_tab_orphan()
-        self.set_inputs([self.tab(5, 200, [18000, 18000]), self.tab(8, 200, [18000, 18000])])
+    def test_recreated_stream_in_same_pass_returned_after_speech(self):
+        """Единственный приглушённый поток исчез, в том же проходе появился новый — сирота, потом original."""
+        self.set_inputs([self.tab(1, 200, [60000, 60000])])
+        self.ducker.duck(30)
+        self.set_inputs([self.tab(8, 200, [18000, 18000])])
+        self.ducker.restore()
+        self.assertEqual(self.orphans_data()["Firefox"]["known"], [])
+        self.clear_log()
         self.ducker.watch()
         self.assertEqual(self.set_calls(), [["set-sink-input-volume", "8", "60000", "60000"]])
         self.assertFalse(self.ducker.has_orphans)
 
+    def test_orphan_not_created_while_ducked_sibling_lives(self):
+        self.duck_tabs()
+        self.set_inputs([self.tab(5, 200, [6000, 6000])])
+        self.ducker.refresh()
+        self.ducker.restore()
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_orphan_applies_to_all_matching_new_streams(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(7, 200, [18000, 15000]), sink_input(8, 200, [18000, 15000]),
+                         sink_input(9, 200, [40000, 40000])])
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [
+            ["set-sink-input-volume", "7", "60000", "50000"],
+            ["set-sink-input-volume", "8", "60000", "50000"],
+        ])
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_orphan_applies_to_all_matching_new_streams_in_speech(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(7, 200, [18000, 15000]), sink_input(8, 200, [18000, 15000])])
+        self.ducker.duck(50)
+        self.assertEqual(self.set_calls(), [
+            ["set-sink-input-volume", "7", "30000", "25000"],
+            ["set-sink-input-volume", "8", "30000", "25000"],
+        ])
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_known_stream_never_touched_by_orphan_in_watch(self):
+        self.write_orphan([[5, "200"]])
+        ducker = Ducker(self.state, OWN_PID, self.orphans, clock=lambda: self.now)
+        self.set_inputs([self.tab(5, 200, [18000, 18000])])
+        ducker.watch()
+        self.assertEqual(self.set_calls(), [])
+        self.assertTrue(ducker.has_orphans)
+
+    def test_known_stream_not_adopted_in_speech(self):
+        self.write_orphan([[5, "200"]])
+        ducker = Ducker(self.state, OWN_PID, self.orphans, clock=lambda: self.now)
+        self.set_inputs([self.tab(5, 200, [20000, 20000])])
+        ducker.duck(30)
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "5", "6000", "6000"]])
+        self.assertEqual(json.loads(self.state.read_text())["inputs"]["5"]["volumes"], [20000, 20000])
+        self.assertTrue(ducker.has_orphans)
+
     def test_new_stream_with_other_volume_drops_orphan_untouched(self):
-        self.make_tab_orphan()
-        self.set_inputs([self.tab(5, 200, [20000, 20000]), self.tab(8, 200, [40000, 40000])])
+        self.make_orphan()
+        self.set_inputs([sink_input(7, 200, [40000, 40000])])
         self.ducker.watch()
         self.assertEqual(self.set_calls(), [])
         self.assertFalse(self.ducker.has_orphans)
@@ -492,31 +565,31 @@ class DuckerTest(unittest.TestCase):
         self.assertEqual(self.set_calls(), [])
         self.assertFalse(self.ducker.has_orphans)
 
-    def test_recreated_stream_in_same_pass_is_repaired(self):
-        self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [20000, 20000])])
-        self.ducker.duck(30)
-        self.set_inputs([self.tab(5, 200, [6000, 6000]), self.tab(8, 200, [18000, 18000])])
-        self.clear_log()
-        self.ducker.refresh()
-        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "8", "18000", "18000"]])
-        self.assertEqual(json.loads(self.state.read_text())["inputs"]["8"]["volumes"], [60000, 60000])
+    def test_watch_keeps_orphan_when_set_fails(self):
+        self.make_orphan()
+        self.set_inputs([sink_input(7, 200, [18000, 15000])])
+        with mock.patch.dict(os.environ, {"PACTL_FAIL_SET": "1"}):
+            with self.assertLogs("tts_player.ducking", "WARNING"):
+                self.ducker.watch()
+        self.assertTrue(self.ducker.has_orphans)
+        self.ducker.watch()
         self.assertFalse(self.ducker.has_orphans)
 
-    def test_recreated_stream_in_same_pass_returned_after_speech(self):
-        self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [20000, 20000])])
-        self.ducker.duck(30)
-        self.set_inputs([self.tab(5, 200, [6000, 6000]), self.tab(8, 200, [18000, 18000])])
-        self.ducker.restore()
-        self.assertEqual(self.orphans_data()["Firefox"]["known"], [[5, "200"]])
-        self.clear_log()
-        self.ducker.watch()
-        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "8", "60000", "60000"]])
+    def test_orphans_file_with_bad_types_removed(self):
+        self.orphans.write_text(json.dumps({"x": {"original": [1], "ducked": [1], "known": [["a", 5]]}}))
+        with self.assertLogs("tts_player.ducking", "WARNING"):
+            ducker = Ducker(self.state, OWN_PID, self.orphans)
+        self.assertFalse(ducker.has_orphans)
+        self.assertFalse(self.orphans.exists())
 
     def test_muted_preexisting_stream_not_raised_with_duck_zero(self):
         self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [0, 0])])
         self.ducker.duck(0)
         self.set_inputs([self.tab(5, 200, [0, 0])])
+        self.clear_log()
         self.ducker.restore()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "5", "0", "0"]])
+        self.assertFalse(self.ducker.has_orphans)
         self.clear_log()
         self.ducker.watch()
         self.assertEqual(self.set_calls(), [])
