@@ -1929,6 +1929,18 @@ class PlayerSessionsTest(PlayerCase):
         self.assertEqual(1, len(self.messages("S")))
         self.assertTrue(self.path(A0).exists())
 
+    def test_all_closed_nothing_plays_by_itself(self) -> None:
+        """Все папки закрыты: новый ответ откладывается, позднее предложение уже отправленной
+        задачи не играет."""
+        self.start_with(A0)
+        self.player.close_session()
+        puts = len(self.daemon.puts)
+        self.hook("s2", "S")
+        self.arrive(A1)
+        self.assertEqual((None, "idle", puts), (self.playback.playing, self.state().status,
+                                                len(self.daemon.puts)))
+        self.assertTrue(self.messages("S")[-1].deferred)
+
     def test_close_session_without_active_changes_nothing(self) -> None:
         self.player.close_session()
         before = self.state()
