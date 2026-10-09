@@ -624,6 +624,95 @@ class SingleInstanceTest(PlayerProcessCase):
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)
 
+    def add_session(self, session: str) -> None:
+        """`session add` через настоящий CLI; ждёт строку плеера, что сессия в списке."""
+        self.assertEqual(0, self.run_bin("session", "add", session, "/w/proj").returncode)
+        self.next_line(f"session add {session}")
+
+    def put_hook_task(self, session: str) -> str:
+        """Задача хука в hook-home без ожидания задачи демона (отложенную и удалённую она не
+        рождает); возвращает id задачи хука."""
+        hook_id = uuid.uuid4().hex[:16]
+        task = {"id": hook_id, "timestamp": time.time(), "session_id": session,
+                "project": "/w/proj", "text": f"text {hook_id}", "persona": "p", "speed": 1.0}
+        deadline = time.monotonic() + WAIT
+        while not self.hook_queue.is_dir():
+            self.assertLess(time.monotonic(), deadline, "нет очереди hook-home")
+            time.sleep(0.02)
+        tmp = self.hook_queue / f"{hook_id}.tmp"
+        tmp.write_text(json.dumps(task))
+        tmp.rename(self.hook_queue / f"{hook_id}.json")
+        return hook_id
+
+    def daemon_tasks(self) -> set[Path]:
+        return set(self.daemon_queue.glob("*.json"))
+
+    def test_deferred_task_of_inactive_session_does_not_reach_daemon(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.add_session("sessa")
+        self.add_session("sessb")
+        self.assertEqual("sessa", self.sessions_file()["active"])
+        before = self.daemon_tasks()
+        hook_id = self.put_hook_task("sessb")
+        self.assertEqual(f"task {hook_id} sessb deferred", self.next_line(f"task {hook_id} sessb d"))
+        self.assertEqual(before, self.daemon_tasks())
+        task = self.hook_task("sessa", "Привет")
+        self.assertEqual("sessa", task["session_id"])
+        self.assertEqual(1, len(self.daemon_tasks() - before))
+
+    def test_task_of_session_not_in_list_is_dropped(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.add_session("sessa")
+        before = self.daemon_tasks()
+        hook_id = self.put_hook_task("ghost")
+        self.assertEqual(f"task {hook_id} ghost dropped: not in list",
+                         self.next_line(f"task {hook_id} ghost"))
+        self.assertEqual(before, self.daemon_tasks())
+        self.assertFalse((self.hook_queue / f"{hook_id}.json").exists())
+
+    def test_restart_keeps_messages_per_session_and_deferred_is_not_sent(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.add_session("sessa")
+        self.add_session("sessb")
+        self.drop(self.sentence("sessa", "aaaaaa", 0, seconds=3.0))
+        self.drop(self.sentence("sessa", "aaaaaa", 1))
+        self.drop(self.sentence("sessa", "cccccc", 0))
+        self.played(1)
+        hook_id = self.put_hook_task("sessb")
+        self.next_line(f"task {hook_id} sessb deferred")
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        saved = json.loads((self.runtime / "tts-player" / "messages.json").read_text())
+        self.assertIn("deferred", json.dumps(saved))
+        sent = self.daemon_tasks()
+        self.lines = queue.Queue()
+        self.start_player()
+        names = self.played(3)  # автовоспроизведение: непрослушанное sessa; sessb молчит
+        self.assertTrue(all("_sessa_" in name for name in names), names)
+        self.assert_quiet()
+        self.assertEqual(sent, self.daemon_tasks())
+
+    def test_session_remove_deletes_its_message_files(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.add_session("sessb")  # первая — активная: её сообщения получают файлы
+        self.add_session("sessa")
+        self.drop(self.sentence("sessb", "bbbbbb", 0, seconds=3.0))
+        self.drop(self.sentence("sessb", "bbbbbb", 1))
+        self.played(1)
+        self.assertTrue(any("_sessb_" in p.name for p in self.store.iterdir()))
+        self.assertEqual(0, self.run_bin("session", "remove", "sessb").returncode)
+        self.next_line("session remove sessb")
+        deadline = time.monotonic() + WAIT
+        while any("_sessb_" in p.name for p in self.store.iterdir()):
+            self.assertLess(time.monotonic(), deadline, "файлы sessb остались в store/")
+            time.sleep(0.05)
+        self.assertEqual({"active": None, "sessions": [{"id": "sessa", "project": "proj"}]},
+                         self.sessions_file())  # убранная активная — активной не остаётся
+
     def test_tray_conflicts(self) -> None:
         for extra in ("--show", "--no-gui"):
             result = subprocess.run(
