@@ -36,7 +36,7 @@ LOGGED_TEXT_CHARS = 80  # столько знаков текста задачи 
 class PlayerState:
     """Снимок для окна. Сообщения и курсор — очереди активной сессии (нет активной —
     сообщений нет). idle — ничего не играет: current доигран либо ещё не начат
-    (при выключенном автовоспроизведении), или None, если сообщений нет."""
+    (пока звучит свой текст), или None — фокуса нет (сообщений нет, папка только открыта)."""
     status: Status
     current: Message | None
     position_s: float  # внутри текущего сообщения
@@ -44,10 +44,9 @@ class PlayerState:
     messages: list[Message]
     output_down: bool
     lengths: list[float]  # queue.length(m) для каждого из messages, в том же порядке
-    completes: list[bool]  # queue.is_complete(m) для каждого из messages, в том же порядке
-    autoplay: bool  # плеер сам начинает следующее и новое сообщение (контракт (6))
     sessions: list[Session]  # порядок списка (Sessions.sessions)
     active: str | None  # активная сессия; None — не выбрана
+    counts: list[int]  # число сообщений каждой из sessions, в том же порядке
 
 
 class Player:
@@ -57,8 +56,9 @@ class Player:
     предложением сообщения. Сообщение кончилось и завершено (queue.is_complete) —
     прослушано, дальше следующее или первое непрослушанное; не завершено — статус
     playing без звука, пока не придёт предложение. На паузе и после stop автоперехода нет.
-    Без автовоспроизведения (apply_prefs) плеер сам ничего не начинает: конец сообщения —
-    stopped на следующем по порядку, новое сообщение в тишине только попадает в список.
+    Открытая (активная) сессия играет подряд — выключателя автовоспроизведения нет; пока
+    звучит свой текст (hold), плеер сам ничего не начинает: конец сообщения — stopped на
+    следующем по порядку, новое сообщение в тишине только попадает в список.
 
     Ошибка файла — пропуск. Отказ вывода звука — тот же файл с той же позиции через
     RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор. Отказ кончается,
@@ -156,7 +156,6 @@ class Player:
         self._sentence: Sentence | None = None
         self._output_down = False
         self._retry_id = 0
-        self._autoplay = defaults.autoplay
         self._held = False  # звучит свой текст: сам ничего не начинаю (hold/release)
         self._ducker = ducker
         self._duck = defaults.duck
@@ -165,13 +164,11 @@ class Player:
         self._watch_id = 0
 
     def apply_prefs(self, prefs: Prefs) -> None:
-        """Настройки плеера: хвост очереди каждой сессии, автовоспроизведение, процент
-        приглушения; играющее не трогается. Новый процент во время игры — restore, затем
+        """Настройки плеера: хвост очереди каждой сессии, процент приглушения; играющее не трогается. Новый процент во время игры — restore, затем
         duck(новый)."""
         self._tail = prefs.tail
         for queue in [*self._queues.values(), self._no_session]:
             queue.tail = prefs.tail
-        self._autoplay = prefs.autoplay
         if prefs.duck != self._duck:
             self._duck = prefs.duck
             self._unduck()  # _changed приглушит заново, если статус playing
@@ -202,8 +199,7 @@ class Player:
         Сообщения прошлого запуска (messages.json) восстанавливаются до inbox/ и задач хука,
         каждое — в очередь своей сессии; сообщения сессий не из списка не восстанавливаются.
         Поздние предложения восстановленных задач — их, а не чужие; файлы store/, на которые
-        сообщения не ссылаются, удаляет Inbox. Непрослушанное активной сессии играет само,
-        если включено автовоспроизведение."""
+        сообщения не ссылаются, удаляет Inbox. Непрослушанное активной сессии играет само."""
         if self._history is not None:
             try:
                 self._history.start()
@@ -274,19 +270,26 @@ class Player:
         self._changed()
 
     def select_session(self, session_id: str) -> None:
-        """Клик по сессии: активная или не из списка — ничего. Иначе звук стоп, она активна,
-        текущее — её первое непрослушанное с позиции 0, не начатое (в хвост входит при
-        play/pause, как после клика по строке): статус stopped, без него — idle."""
+        """Клик по закрытой папке: активная или не из списка — ничего. Иначе звук стоп, она
+        активна, фокуса нет (текущего нет, idle): играть начнёт ▶, клик по строке или её новое
+        сообщение."""
         if session_id == self._sessions.active or not self._sessions.has(session_id):
             return
         self._halt()
         self._sessions.select(session_id)
         log.info("session select %s", session_id)
-        self._current = self._queue.first_unheard()
-        self._sentence = None
-        self._position = 0.0
-        self._status = "idle" if self._current is None else "stopped"
-        self._output_down = False  # повтор снят _halt: отказ вывода больше не показывается
+        self._reset_cursor()
+        self._changed()
+
+    def close_session(self) -> None:
+        """Клик по открытой папке: звук стоп, активной нет, пока пользователь не выберет
+        сессию; её сообщения и файлы остаются. Без активной — ничего."""
+        session_id = self._sessions.active
+        if not self._sessions.deselect():
+            return
+        log.info("session close %s", session_id)
+        self._halt()
+        self._reset_cursor()
         self._changed()
 
     def _on_hook_task(self, task: HookTask) -> None:
@@ -363,10 +366,11 @@ class Player:
         length = 0.0 if current is None else self._queue.length(current)
         messages = self._queue.messages
         lengths = [self._queue.length(m) for m in messages]
-        completes = [self._queue.is_complete(m) for m in messages]
+        sessions = self._sessions.sessions
+        counts = [len(self._queues[s.id].messages) for s in sessions]
         return PlayerState(self._status, current, self._now(), length,
-                           messages, self._output_down, lengths, completes, self._autoplay,
-                           self._sessions.sessions, self._sessions.active)
+                           messages, self._output_down, lengths,
+                           sessions, self._sessions.active, counts)
 
     def toggle_play_pause(self) -> None:
         """Кнопка play/pause: playing — пауза с запомненной позицией; paused — с неё дальше;
@@ -402,7 +406,7 @@ class Player:
 
     def _resume(self) -> None:
         """Текущее с курсора после stop или конца; курсор в конце — с начала. Текущее,
-        ставшее им без звука (конец сообщения без автовоспроизведения), входит в хвост здесь."""
+        ставшее им без звука (конец сообщения, пока звучал свой текст), входит в хвост здесь."""
         position = self._position
         if position >= self._queue.length(self._current):
             position = 0.0
@@ -582,11 +586,11 @@ class Player:
         self._begin(upcoming, requested=False)
 
     def _starts_by_itself(self) -> bool:
-        """Плеер сам начинает следующее и новое: автовоспроизведение включено и нет удержания."""
-        return self._autoplay and not self._held
+        """Плеер сам начинает следующее и новое: свой текст не звучит (нет удержания)."""
+        return not self._held
 
     def _stop_after(self, message: Message) -> None:
-        """Конец сообщения без автовоспроизведения: stopped; текущим становится следующее по
+        """Конец сообщения, пока звучит свой текст: stopped; текущим становится следующее по
         порядку с позиции 0, нет его — сообщение остаётся текущим с позицией в конце."""
         self._status = "stopped"
         following = self._queue.following(message)
@@ -599,7 +603,7 @@ class Player:
     def _leave(self, message: Message) -> None:
         """Сообщение покинуто по next/prev/клику: звук стоп; прослушанным считается только
         начатое и завершённое — у растущего ещё придут предложения, а текущее, ставшее им
-        без звука (конец сообщения без автовоспроизведения), не звучало."""
+        без звука (конец сообщения, пока звучал свой текст), не звучало."""
         self._halt()
         if self._queue.is_started(message) and self._queue.is_complete(message):
             self._queue.mark_heard(message)
@@ -661,7 +665,7 @@ class Player:
         except SettingsError as error:
             if message.deferred:
                 log.warning("голос не прочитан (%s): отложенное сообщение %s не озвучено;"
-                            " автовоспроизведение пропустит его как прослушанное, play"
+                            " автопереход пропустит его как прослушанное, play"
                             " пользователя повторит", error, message.session_id)
             else:
                 log.warning("голос не прочитан (%s), кэш считается актуальным", error)

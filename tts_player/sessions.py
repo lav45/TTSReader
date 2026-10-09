@@ -86,13 +86,10 @@ class Sessions:
             self._active, self._sessions = None, []
 
     def add(self, session_id: str, cwd: str) -> bool:
-        """False — сессия уже в списке, файл не пишется. Первая сессия в пустом списке
-        становится активной; после завершения активной (active None) новая сессия активной
-        не становится — её выбирает пользователь (select)."""
+        """False — сессия уже в списке, файл не пишется. Новая сессия активной не становится,
+        даже первая: активная играет, а её выбирает пользователь (select)."""
         if self.has(session_id):
             return False
-        if not self._sessions:
-            self._active = session_id
         self._sessions.append(Session(session_id, Path(cwd).name))
         self._write()
         return True
@@ -112,6 +109,15 @@ class Sessions:
         if session_id == self._active or not self.has(session_id):
             return False
         self._active = session_id
+        self._write()
+        return True
+
+    def deselect(self) -> bool:
+        """Активной не остаётся (папка сессии закрыта). False — активной и не было, файл не
+        пишется."""
+        if self._active is None:
+            return False
+        self._active = None
         self._write()
         return True
 

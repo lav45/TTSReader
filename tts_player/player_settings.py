@@ -1,8 +1,9 @@
-"""Собственные настройки плеера: сколько последних реплик озвучивать (tail),
-автовоспроизведение и до скольких процентов приглушать чужие звуки во время речи (duck).
+"""Собственные настройки плеера: сколько последних реплик озвучивать (tail) и до скольких
+процентов приглушать чужие звуки во время речи (duck).
 
 Файл $XDG_CONFIG_HOME/tts-player/settings.json (иначе ~/.config/tts-player/settings.json):
-{"tail": <целое 1-20>, "autoplay": <true|false>, "duck": <целое 0-100>}. Чтение не бросает: на любой порче
+{"tail": <целое 1-20>, "duck": <целое 0-100>}; ключ autoplay прежних версий не читается
+(его заменила открытая папка сессии) и пропадает при записи. Чтение не бросает: на любой порче
 возвращаются значения по умолчанию и пишется предупреждение в лог (stderr).
 """
 import json
@@ -23,7 +24,6 @@ FILE_NAME = "settings.json"
 @dataclass(frozen=True)
 class Prefs:
     tail: int = 5
-    autoplay: bool = True
     duck: int = 30  # чужие потоки во время речи — до duck % их громкости; 100 — не трогать
 
 
@@ -56,17 +56,12 @@ class PlayerSettings:
             log.warning("%s: tail %r вне %d-%d или не целое, взято %d",
                         self._path, tail, self.TAIL_MIN, self.TAIL_MAX, defaults.tail)
             tail = defaults.tail
-        autoplay = data.get("autoplay", defaults.autoplay)
-        if not isinstance(autoplay, bool):
-            log.warning("%s: autoplay %r не true/false, взято %s",
-                        self._path, autoplay, defaults.autoplay)
-            autoplay = defaults.autoplay
         duck = data.get("duck", defaults.duck)
         if not self._duck_valid(duck):
             log.warning("%s: duck %r вне %d-%d или не целое, взято %d",
                         self._path, duck, self.DUCK_MIN, self.DUCK_MAX, defaults.duck)
             duck = defaults.duck
-        return Prefs(tail=tail, autoplay=autoplay, duck=duck)
+        return Prefs(tail=tail, duck=duck)
 
     def save(self, prefs: Prefs) -> None:
         if not self._tail_valid(prefs.tail):
@@ -77,7 +72,7 @@ class PlayerSettings:
             raise SettingsError(
                 f"duck {prefs.duck!r} вне диапазона {self.DUCK_MIN}-{self.DUCK_MAX}"
             )
-        data = {"tail": prefs.tail, "autoplay": bool(prefs.autoplay), "duck": prefs.duck}
+        data = {"tail": prefs.tail, "duck": prefs.duck}
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             atomic_json.write_json(self._path, data)

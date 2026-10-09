@@ -6,10 +6,10 @@ from tts_player.model import Message, Sentence
 from tts_player.player import PlayerState
 from tts_player.sessions import Session
 from tts_player.text_speaker import TextState
-from tts_player.view import (next_enabled, play_pause_enabled, play_pause_label, position_label,
-                             prev_enabled, rows, session_buttons_enabled, session_rows,
-                             text_play_enabled, text_play_pause_label,
-                             text_position_label)
+from tts_player.view import (MessageRow, SessionRow, next_enabled, play_pause_enabled,
+                             play_pause_label, position_label, prev_enabled, rows,
+                             session_buttons_enabled, session_rows, text_play_enabled,
+                             text_play_pause_label, text_position_label, tree_rows)
 
 CREATED_AT = 1_700_000_000.0
 
@@ -23,12 +23,12 @@ def message(task="t", sentences=None, **kw) -> Message:
 
 
 def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=(),
-          lengths=None, completes=None, sessions=(), active=None) -> PlayerState:
+          lengths=None, sessions=(), active=None, counts=None) -> PlayerState:
     messages = list(messages)
     lengths = [0.0] * len(messages) if lengths is None else lengths
-    completes = [True] * len(messages) if completes is None else completes
+    counts = [0] * len(sessions) if counts is None else counts
     return PlayerState(status, current, position_s, length_s, messages, False, lengths,
-                       completes, True, list(sessions), active)
+                       list(sessions), active, counts)
 
 
 def sentence(recv_s: float) -> Sentence:
@@ -36,110 +36,109 @@ def sentence(recv_s: float) -> Sentence:
 
 
 class RowsTest(unittest.TestCase):
-    def test_order_current_and_heard(self):
+    def test_order_index_current_and_heard(self):
         a = message("a", created_at=CREATED_AT, duration_s=5, heard=True)
         b = message("b", created_at=CREATED_AT, duration_s=5)
         result = rows(state("playing", b, messages=[a, b]))
+        self.assertEqual([r.index for r in result], [0, 1])
         self.assertEqual([r.current for r in result], [False, True])
         self.assertEqual([r.heard for r in result], [True, False])
 
-    def test_title_with_created_at_and_project(self):
-        m = message(sentences=[sentence(CREATED_AT)], project="/home/u/proj/", duration_s=5)
-        self.assertEqual(rows(state(messages=[m]))[0].title, f"{hms(CREATED_AT)}  proj")
+    def test_time_is_own_column(self):
+        m = message(received_at=CREATED_AT, project="p", text="Готово")
+        row = rows(state(messages=[m]))[0]
+        self.assertEqual(("Готово", hms(CREATED_AT)), (row.title, row.time))
 
-    def test_title_without_project(self):
+    def test_title_without_text_is_project(self):
+        for text in (None, "", "  \n"):
+            m = message(received_at=CREATED_AT, project="/home/u/proj/", text=text)
+            self.assertEqual("proj", rows(state(messages=[m]))[0].title)
+
+    def test_title_without_text_and_project(self):
         for project in (None, "", "/"):
-            m = message(sentences=[sentence(CREATED_AT)], project=project, duration_s=5)
-            self.assertEqual(rows(state(messages=[m]))[0].title, f"{hms(CREATED_AT)}  —")
+            m = message(sentences=[sentence(CREATED_AT)], project=project)
+            self.assertEqual("—", rows(state(messages=[m]))[0].title)
 
     def test_title_is_first_words_of_text(self):
         m = message(received_at=CREATED_AT, project="p", text="Готово:  тесты\nпрошли.")
-        self.assertEqual(f"{hms(CREATED_AT)}  Готово: тесты прошли.", rows(state(messages=[m]))[0].title)
+        self.assertEqual("Готово: тесты прошли.", rows(state(messages=[m]))[0].title)
 
     def test_title_text_cut_to_first_words(self):
         text = "один два три четыре пять шесть семь восемь девять десять"
         m = message(received_at=CREATED_AT, project="p", text=text)
-        self.assertEqual(f"{hms(CREATED_AT)}  один два три четыре пять шесть семь восемь…",
+        self.assertEqual("один два три четыре пять шесть семь восемь…",
                          rows(state(messages=[m]))[0].title)
 
-    def test_title_without_text_is_project(self):
-        for text in (None, "", "  \n"):
-            m = message(received_at=CREATED_AT, project="/home/u/proj", text=text)
-            self.assertEqual(f"{hms(CREATED_AT)}  proj", rows(state(messages=[m]))[0].title)
-
-    def test_title_time_is_first_sentence_even_with_created_at(self):
+    def test_time_is_first_sentence_even_with_created_at(self):
         m = message(sentences=[sentence(CREATED_AT)], created_at=CREATED_AT + 500, project="p")
-        before = rows(state(messages=[m]))[0].title
-        self.assertEqual(before, f"{hms(CREATED_AT)}  p")
+        self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
         m.created_at = CREATED_AT + 900
-        self.assertEqual(rows(state(messages=[m]))[0].title, before)
+        self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
 
-    def test_title_time_is_hook_task_arrival_before_and_after_sentences(self):
+    def test_time_is_hook_task_arrival_before_and_after_sentences(self):
         """Сообщение есть в списке с прихода задачи хука; время не прыгает ни с первым
         предложением, ни с переозвучкой."""
         m = message(received_at=CREATED_AT, project="p")
-        self.assertEqual(f"{hms(CREATED_AT)}  p", rows(state(messages=[m]))[0].title)
+        self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
         m.sentences.append(sentence(CREATED_AT + 700))
-        self.assertEqual(f"{hms(CREATED_AT)}  p", rows(state(messages=[m]))[0].title)
+        self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
 
-    def test_message_without_sentences_is_pending_with_zero_length(self):
-        m = message(received_at=CREATED_AT)
-        row = rows(state(messages=[m], lengths=[0.0], completes=[False]))[0]
-        self.assertEqual("0:00…", row.duration)
+    def test_time_from_created_at_without_sentences(self):
+        m = message(created_at=CREATED_AT, project="p")
+        self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
 
-    def test_ellipsis_by_completeness_not_duration(self):
-        done = message("a", duration_s=None)
-        growing = message("b", duration_s=7)
-        result = rows(state(messages=[done, growing], lengths=[4.0, 7.0],
-                            completes=[True, False]))
-        self.assertEqual([r.duration for r in result], ["0:04", "0:07…"])
+    def test_time_unknown(self):
+        self.assertEqual("--:--:--", rows(state(messages=[message()]))[0].time)
 
-    def test_title_time_from_first_sentence(self):
-        s = Sentence(int(CREATED_AT * 1e9), "unknown", "s", "t", 0, Path("/nonexistent.wav"))
-        m = message(sentences=[s], project="p")
-        self.assertEqual(rows(state(messages=[m]))[0].title, f"{hms(CREATED_AT)}  p")
-
-    def test_duration_known_has_no_ellipsis(self):
-        m = message(created_at=CREATED_AT, duration_s=65)
-        self.assertEqual(rows(state(messages=[m], lengths=[65.0]))[0].duration, "1:05")
+    def test_duration_has_no_pending_mark(self):
+        growing, deferred = message("a"), message("b", deferred=True)
+        result = rows(state(messages=[growing, deferred], lengths=[4.0, 0.0]))
+        self.assertEqual([r.duration for r in result], ["0:04", "0:00"])
 
     def test_duration_hours(self):
         m = message(created_at=CREATED_AT, duration_s=3725)
         self.assertEqual(rows(state(messages=[m], lengths=[3725.0]))[0].duration, "1:02:05")
-
-    def test_duration_before_gluing_has_ellipsis(self):
-        m = message()
-        result = rows(state(messages=[m], lengths=[4.0], completes=[False]))
-        self.assertEqual(result[0].duration, "0:04…")
-
-    def test_duration_uses_length_of_own_message(self):
-        a, b = message("a"), message("b", duration_s=9)
-        result = rows(state(messages=[a, b], lengths=[4.0, 9.0], completes=[False, True]))
-        self.assertEqual([r.duration for r in result], ["0:04…", "0:09"])
 
 
 class SessionRowsTest(unittest.TestCase):
     SESSIONS = [Session("1dd2b064-b8fd-4c1e-9a77-000000000001", "TTSReader"),
                 Session("abcdef12-0000-4000-8000-000000000002", "")]
 
-    def test_titles_and_active(self):
-        result = session_rows(state(sessions=self.SESSIONS, active=self.SESSIONS[0].id))
-        self.assertEqual([(r.title, r.active) for r in result],
-                         [("TTSReader · 1dd2b064", True), ("— · abcdef12", False)])
+    def test_titles_ids_counts_and_open(self):
+        result = session_rows(state(sessions=self.SESSIONS, active=self.SESSIONS[0].id,
+                                    counts=[3, 12]))
+        self.assertEqual(result, [
+            SessionRow("TTSReader · 1dd2b064", "3", True, self.SESSIONS[0].id),
+            SessionRow("— · abcdef12", "12", False, self.SESSIONS[1].id)])
         self.assertTrue(session_buttons_enabled(
             state(sessions=self.SESSIONS, active=self.SESSIONS[0].id)))
 
-    def test_no_active(self):
+    def test_none_open(self):
         current = state(sessions=self.SESSIONS)
-        self.assertEqual([r.active for r in session_rows(current)], [False, False])
+        self.assertEqual([r.open for r in session_rows(current)], [False, False])
         self.assertFalse(session_buttons_enabled(current))
 
     def test_empty(self):
         self.assertEqual(session_rows(state()), [])
 
-    def test_deferred_message_duration_is_pending(self):
-        m = message(created_at=CREATED_AT, deferred=True)
-        self.assertEqual(rows(state(messages=[m]))[0].duration, "0:00…")
+
+class TreeRowsTest(unittest.TestCase):
+    SESSIONS = SessionRowsTest.SESSIONS
+
+    def test_messages_follow_open_session_header(self):
+        a, b = message("a", received_at=CREATED_AT), message("b", received_at=CREATED_AT)
+        current = state("playing", b, messages=[a, b], lengths=[1.0, 2.0],
+                        sessions=self.SESSIONS, active=self.SESSIONS[1].id, counts=[0, 2])
+        result = tree_rows(current)
+        self.assertEqual([type(r) for r in result], [SessionRow, SessionRow, MessageRow, MessageRow])
+        self.assertEqual(result[1:], [session_rows(current)[1], *rows(current)])
+
+    def test_all_closed_shows_only_headers(self):
+        current = state(sessions=self.SESSIONS)
+        self.assertEqual(tree_rows(current), session_rows(current))
+
+    def test_empty(self):
+        self.assertEqual(tree_rows(state()), [])
 
 
 class LabelsTest(unittest.TestCase):

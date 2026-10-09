@@ -8,17 +8,19 @@ from tts_player.player import PlayerState
 from tts_player.text_speaker import SOUNDING_STATUSES, TextState
 
 NO_PROJECT = "—"
-PENDING_MARK = "…"
 TITLE_WORDS = 8
 CUT_MARK = "…"
 
 
 @dataclass(frozen=True)
 class MessageRow:
-    title: str  # "HH:MM:SS  <первые слова текста>"; без текста — "HH:MM:SS  <project>"
-    duration: str  # "M:SS"; пока сообщение растёт (не завершено) "M:SS…"
+    """Дорожка внутри открытой папки сессии."""
+    title: str  # первые слова текста; без текста — проект
+    time: str  # "HH:MM:SS" прихода
+    duration: str  # "M:SS"
     current: bool
     heard: bool
+    index: int  # место сообщения в PlayerState.messages
 
 
 def format_seconds(seconds: float) -> str:
@@ -59,26 +61,27 @@ def _subject(message: Message) -> str:
     return subject + CUT_MARK if len(words) > TITLE_WORDS else subject
 
 
-def _duration(complete: bool, length_s: float) -> str:
-    text = format_seconds(length_s)
-    return text if complete else text + PENDING_MARK
-
-
 @dataclass(frozen=True)
 class SessionRow:
+    """Заголовок папки сессии: открыта — активна."""
     title: str  # "<project> · <id[:8]>"; project пуст — NO_PROJECT
-    active: bool
+    count: str  # число дорожек сессии
+    open: bool
+    id: str
 
 
 def rows(state: PlayerState) -> list[MessageRow]:
+    """Дорожки открытой сессии (сообщения состояния) по порядку."""
     return [
         MessageRow(
-            title=f"{_start_time(m)}  {_subject(m)}",
-            duration=_duration(complete and not m.deferred, length_s),
+            title=_subject(m),
+            time=_start_time(m),
+            duration=format_seconds(length_s),
             current=m is state.current,
             heard=m.heard,
+            index=index,
         )
-        for m, length_s, complete in zip(state.messages, state.lengths, state.completes)
+        for index, (m, length_s) in enumerate(zip(state.messages, state.lengths))
     ]
 
 
@@ -86,10 +89,22 @@ def session_rows(state: PlayerState) -> list[SessionRow]:
     return [
         SessionRow(
             title=f"{session.project or NO_PROJECT} · {session.id[:8]}",
-            active=session.id == state.active,
+            count=str(count),
+            open=session.id == state.active,
+            id=session.id,
         )
-        for session in state.sessions
+        for session, count in zip(state.sessions, state.counts)
     ]
+
+
+def tree_rows(state: PlayerState) -> list[SessionRow | MessageRow]:
+    """Папки сессий по порядку списка; дорожки — сразу за заголовком открытой."""
+    tree: list[SessionRow | MessageRow] = []
+    for folder in session_rows(state):
+        tree.append(folder)
+        if folder.open:
+            tree += rows(state)
+    return tree
 
 
 def session_buttons_enabled(state: PlayerState) -> bool:
