@@ -7,7 +7,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from tts_player import session_command
 from tts_player.instance import Instance
 from tts_player.sessions import Sessions, sessions_path
 
@@ -159,6 +161,15 @@ class SessionRequestTest(unittest.TestCase):
         result = run_cli(self.runtime, "session", "add", "u1", "/p")
         self.assertEqual(1, result.returncode)
         self.assertNotEqual("", result.stderr)
+
+    def test_failed_replace_leaves_no_tmp(self) -> None:
+        self.lock_player()
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(self.runtime)}), \
+                mock.patch("tts_player.atomic_json.os.replace", side_effect=OSError("сбой")), \
+                mock.patch("sys.stderr"):
+            code = session_command.main(["add", "u1", "/p"])
+        self.assertEqual(1, code)
+        self.assertEqual([], list(self.control.iterdir()))
 
     def test_usage_errors(self) -> None:
         for args in (("session", "add", "u1"), ("session", "add"), ("session", "remove"),

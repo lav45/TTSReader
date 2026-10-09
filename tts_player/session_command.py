@@ -2,14 +2,14 @@
 поэтому модуль не импортирует плеер и gi — только instance, sessions и стандартную библиотеку.
 
 add и remove не трогают sessions.json: кладут запрос в $XDG_RUNTIME_DIR/tts-player/control/<ns>.json
-(сначала <ns>.json.tmp, затем rename); список меняет плеер. has только читает sessions.json.
+(atomic_json.write_json: временный *.tmp рядом, затем rename; сбой убирает его); список меняет плеер. has только читает sessions.json.
 """
-import json
 import os
 import sys
 import time
 from pathlib import Path
 
+from tts_player.atomic_json import write_json
 from tts_player.instance import is_locked
 from tts_player.sessions import read_sessions, sessions_path
 
@@ -56,25 +56,25 @@ def is_listed(runtime: Path, session_id: str) -> bool:
 
 def session_add(session_id: str, cwd: str) -> int:
     request = {"op": "add", "session": session_id, "cwd": cwd}
-    return submit(session_id, request, listed_text="сессия уже в списке", sent_text="сессия передана плееру",
-                  offline_text="плеер не запущен — сессия добавится при его запуске", skip_if_listed=True)
+    return submit(session_id, request, noop_text="сессия уже в списке", sent_text="сессия передана плееру",
+                  offline_text="плеер не запущен — сессия добавится при его запуске", noop_when_listed=True)
 
 
 def session_remove(session_id: str) -> int:
     request = {"op": "remove", "session": session_id}
-    return submit(session_id, request, listed_text="сессия не в списке", sent_text="сессия передана плееру на удаление",
-                  offline_text="плеер не запущен — сессия уберётся при его запуске", skip_if_listed=False)
+    return submit(session_id, request, noop_text="сессия не в списке", sent_text="сессия передана плееру на удаление",
+                  offline_text="плеер не запущен — сессия уберётся при его запуске", noop_when_listed=False)
 
 
-def submit(session_id: str, request: dict, listed_text: str, sent_text: str, offline_text: str,
-           skip_if_listed: bool) -> int:
+def submit(session_id: str, request: dict, noop_text: str, sent_text: str, offline_text: str,
+           noop_when_listed: bool) -> int:
     """Запрос не нужен, если список уже в нужном состоянии: add — UUID есть, remove — UUID нет."""
     runtime = runtime_dir()
     if runtime is None:
         print("tts-player: XDG_RUNTIME_DIR не задан", file=sys.stderr)
         return 1
-    if is_listed(runtime, session_id) == skip_if_listed:
-        print(listed_text)
+    if is_listed(runtime, session_id) == noop_when_listed:
+        print(noop_text)
         return 0
     try:
         write_request(runtime, request)
@@ -88,10 +88,7 @@ def submit(session_id: str, request: dict, listed_text: str, sent_text: str, off
 def write_request(runtime: Path, request: dict) -> None:
     control = runtime / "tts-player" / "control"
     control.mkdir(parents=True, exist_ok=True)
-    name = str(time.time_ns())
-    tmp = control / f"{name}.json.tmp"
-    tmp.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, control / f"{name}.json")
+    write_json(control / f"{time.time_ns()}.json", request)
 
 
 if __name__ == "__main__":
