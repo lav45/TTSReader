@@ -46,6 +46,11 @@
   `transcript_path` (`/projects/<проект>/`). Хук пишет в `<каталог>/.claude-tts/`: `debug.log`,
   `active/`, `queue/`; водяной знак «уже сказано» — в `/tmp/claude_tts_spoken_<uuid>.state`
   (не зависит от HOME).
+- Имя файла предложения от демона — `tts_queue_<session_id>_<token>_s<N>.wav`, где `token` —
+  случайный на каждый проход синтеза (`daemon.py:692`, `secrets.token_hex(3)`), а не id
+  сообщения; плеер сейчас группирует предложения по `(session_id, token)`
+  (`tts_player/inbox.py:17`). id задачи (`daemon.py:1014`, 16 hex) в имени файла нет — его
+  приносит (13).
 - Синтез в файл в обход очереди — `daemon_generate_speech` (срез (10), процесс синтеза
   `tts_player/synth_worker.py`).
 
