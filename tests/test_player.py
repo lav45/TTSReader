@@ -782,9 +782,11 @@ class PlayerButtonsTest(PlayerCase):
     def test_play_message_other_during_outage_cancels_retry(self) -> None:
         self.start_with(A0, B0)
         self.playback.fail("no output", True)
+        self.assertTrue(self.state().output_down)
         self.player.play_message(self.player._queue.messages[1])
         self.glib.source_remove.assert_called_once_with(42)
-        self.assertEqual(("stopped", "bb"), (self.state().status, self.task()))
+        self.assertEqual(("stopped", "bb", False),
+                         (self.state().status, self.task(), self.state().output_down))
 
     def test_next_on_last_does_nothing(self) -> None:
         self.start_with(A0, B0)
@@ -1924,6 +1926,48 @@ class PlayerSessionsTest(PlayerCase):
         self.deliver(self.B1)
         self.assertEqual(("idle", True, [A0]),
                          (self.state().status, self.state().current.heard, self.playback.played))
+
+    def test_deferred_with_unreadable_config_warns_not_voiced_and_is_skipped(self) -> None:
+        self.hook("b1", "B")
+        self.player.select_session("B")
+        self.settings.error = SettingsError("config.json не JSON")
+        with self.assertLogs("tts_player.player", "WARNING") as logs:
+            self.player.toggle_play_pause()
+        [line] = [r.getMessage() for r in logs.records]
+        self.assertIn("отложенное сообщение B не озвучено", line)
+        self.assertIn("config.json не JSON", line)
+        self.assertNotIn("кэш считается актуальным", line)
+        [b1] = self.messages("B")
+        self.assertEqual(([], True, True), (self.daemon.puts, b1.heard, b1.deferred))
+
+    def test_entry_of_session_not_in_list_is_not_attached(self) -> None:
+        self.start_with(A0, A1)
+        self.player.remove_session("B")
+        path = self.history_dir / "tts-2000000000.000-B.wav"
+        write_wav(path, 1.0)
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "B", "proj", 1.0))
+        self.assertEqual([f"для склейки {path.name} нет сессии B в списке"],
+                         [r.getMessage() for r in logs.records])
+        self.assertEqual([None], [m.created_at for m in self.messages("S")])
+
+    def test_select_clears_output_failure(self) -> None:
+        self.start_with(A0)
+        self.playback.fail("no output", True)
+        self.assertTrue(self.state().output_down)
+        self.player.select_session("B")
+        self.assertFalse(self.state().output_down)
+        self.glib.source_remove.assert_called_with(42)
+
+    def test_remove_session_before_start_does_not_raise(self) -> None:
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()  # S и B из setUp
+        player = Player(self.runtime, None, None, None, sessions=sessions,
+                        daemon_queue=self.daemon, daemon_settings=self.settings)
+        player.remove_session("B")
+        player._on_hook_task(HookTask("h1", 1.0, "S", "proj", "x", "p", 1.0, {"id": "h1"}))
+        self.assertEqual((["S"], ["x"]), ([s.id for s in player.state().sessions],
+                                          [m.text for m in player.state().messages]))
 
     def test_clear_removes_only_active_session(self) -> None:
         b_file = self.b_playing()

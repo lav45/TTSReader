@@ -685,8 +685,8 @@ class SingleInstanceTest(PlayerProcessCase):
         self.next_line(f"task {hook_id} sessb deferred")
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
-        saved = json.loads((self.runtime / "tts-player" / "messages.json").read_text())
-        self.assertIn("deferred", json.dumps(saved))
+        self.assertEqual([("sessa", False), ("sessa", False), ("sessb", True)],
+                         self.saved_messages())
         sent = self.daemon_tasks()
         self.lines = queue.Queue()
         self.start_player()
@@ -694,6 +694,15 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertTrue(all("_sessa_" in name for name in names), names)
         self.assert_quiet()
         self.assertEqual(sent, self.daemon_tasks())
+        self.proc.send_signal(signal.SIGTERM)  # отложенное sessb восстановлено — снова в снимке
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        self.assertEqual([("sessa", False), ("sessa", False), ("sessb", True)],
+                         self.saved_messages())
+
+    def saved_messages(self) -> list[tuple[str, bool]]:
+        """(сессия, deferred) сообщений messages.json по порядку."""
+        saved = json.loads((self.runtime / "tts-player" / "messages.json").read_text())
+        return [(m["session_id"], m["deferred"]) for m in saved["messages"]]
 
     def test_session_remove_deletes_its_message_files(self) -> None:
         self.start_player()

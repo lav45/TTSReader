@@ -115,15 +115,17 @@ class Player:
         """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
         hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
         очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки;
-        sessions — список сессий (загружен до start(): его сессиям start() заводит очереди),
-        control_dir — control/ (контракт (14)), None — без запросов session add/remove."""
+        sessions — список сессий, уже загруженный: его сессиям очереди заводятся здесь, а
+        сообщения прошлого запуска раскладывает по ним start(); control_dir — control/ (контракт (14)), None — без запросов session add/remove."""
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
         self._tail = defaults.tail
         self._task_order = TaskOrder()  # общий порядок задач демона для очередей сессий
-        self._queues: dict[str, MessageQueue] = {}  # по session_id, сессии из Sessions
-        self._no_session = MessageQueue(self._tail, self._task_order)  # нет активной: пуста
+        self._sessions = sessions
+        # по session_id, сессии из Sessions; нет активной — курсор ходит по пустой
+        self._queues = {session.id: self._new_queue() for session in sessions.sessions}
+        self._no_session = self._new_queue()
         self._playback = Playback(audio_sink)
         self._playback.on_finished = self._on_finished
         self._playback.on_error = self._on_error
@@ -133,7 +135,6 @@ class Player:
                                     self._inbox.store)
         self._daemon_queue = daemon_queue
         self._daemon_settings = daemon_settings
-        self._sessions = sessions
         self._control = None
         if control_dir is not None:
             self._control = ControlRequests(control_dir, self.add_session, self.remove_session)
@@ -209,8 +210,6 @@ class Player:
             except OSError as error:
                 log.warning("история %s недоступна (%s), работаю без склеек",
                             self._history_dir, error)
-        for session in self._sessions.sessions:
-            self._queues.setdefault(session.id, self._new_queue())
         self._restore(self._saved.load())
         self._inbox.start(self._store_files())
         if self._control is not None:
@@ -287,6 +286,7 @@ class Player:
         self._sentence = None
         self._position = 0.0
         self._status = "idle" if self._current is None else "stopped"
+        self._output_down = False  # повтор снят _halt: отказ вывода больше не показывается
         self._changed()
 
     def _on_hook_task(self, task: HookTask) -> None:
@@ -441,6 +441,7 @@ class Player:
         self._sentence = None
         self._position = 0.0
         self._status = "stopped"
+        self._output_down = False  # повтор снят _leave: отказ вывода больше не показывается
         self._changed()
 
     def seek(self, position_s: float) -> None:
@@ -631,7 +632,7 @@ class Player:
         silent = not message.sentences and message.audio is None
         if silent and not requested and not message.deferred:
             return False
-        voice = self._active_voice()
+        voice = self._active_voice(message)
         if voice is None:
             return False
         if not silent and (message.persona, message.speed) == (voice.persona, voice.speed):
@@ -652,11 +653,18 @@ class Player:
         self._send(self._queue, message, fields, origin)
         return True
 
-    def _active_voice(self) -> ActiveVoice | None:
+    def _active_voice(self, message: Message) -> ActiveVoice | None:
+        """Текущий голос для озвучки message; сбой чтения — None и строка в журнал: у
+        озвученного кэш считается актуальным, отложенное остаётся без звука."""
         try:
             return self._daemon_settings.active_voice()
         except SettingsError as error:
-            log.warning("голос не прочитан (%s), кэш считается актуальным", error)
+            if message.deferred:
+                log.warning("голос не прочитан (%s): отложенное сообщение %s не озвучено;"
+                            " автовоспроизведение пропустит его как прослушанное, play"
+                            " пользователя повторит", error, message.session_id)
+            else:
+                log.warning("голос не прочитан (%s), кэш считается актуальным", error)
             return None
 
     def _play_at(self, position: float) -> None:
