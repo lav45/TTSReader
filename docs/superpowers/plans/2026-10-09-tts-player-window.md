@@ -25,7 +25,7 @@ pause / play|stop / next`, ползунок по текущему сообщен
 
 **Assumptions:**
 - `XApp.StatusIcon` доступен (`gir1.2-xapp-1.0` 3.2.3), `XApp.StatusIcon.any_monitors()` → `True` — апплет трея Cinnamon работает. Проверено 2026-10-09. Сигнал `activate(button, time)` — по документации libxapp.
-- Xvfb в системе нет: автотесты не открывают окна. Вид проверяется через чистую модель отображения; тест на настоящем GTK — только при `TTS_PLAYER_GUI_TESTS=1`, руками.
+- Xvfb в системе нет, но есть `broadwayd` (libgtk-3-bin 3.24.41): GTK 3 с `GDK_BACKEND=broadway` строит окна без экрана пользователя — проверено 2026-10-09. GUI-тесты идут в обычном прогоне через свой `broadwayd` (решение после ревью Task 4); без `broadwayd` — пропуск с причиной.
 - Главный цикл GTK 3 (`Gtk.main`) работает на том же `GLib.MainContext`, что `Gio.FileMonitor` и шина GStreamer — источники событий не меняются.
 
 ## Global Constraints
@@ -131,6 +131,8 @@ class PlayerState:
     position_s: float            # внутри текущего сообщения
     length_s: float              # queue.length(current), 0 без текущего
     messages: list[Message]      # queue.messages
+    lengths: list[float]         # queue.length(m) для каждого из messages (добавлено ревью Task 3)
+    completes: list[bool]        # queue.is_complete(m) для каждого (добавлено финальным ревью)
     output_down: bool
 
 class Player:
@@ -138,7 +140,8 @@ class Player:
                  history_dir: Path | None, history_db: Path | None) -> None
     on_change: Callable[[PlayerState], None]      # после каждого изменения состояния
     def start(self) -> None
-    def stop(self) -> None                         # выход процесса: release в inbox
+    def shutdown(self) -> None                     # выход процесса: release в inbox (было stop)
+    def stop_playback(self) -> None                # идемпотентный stop для `tts-player stop` (финальное ревью)
     def state(self) -> PlayerState
     def toggle_pause(self) -> None
     def toggle_play_stop(self) -> None
