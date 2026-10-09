@@ -315,6 +315,25 @@ class PlayerE2ETest(PlayerProcessCase):
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
 
+    def test_sighup_exits_0_and_restores_volumes(self) -> None:
+        self.start_player()
+        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=3.0))
+        self.wait_volume_sets(1)
+        self.proc.send_signal(signal.SIGHUP)
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"], self.volume_sets()[-1])
+        self.assertFalse((self.runtime / "tts-player" / "duck.json").exists())
+
+    def test_leftover_duck_state_is_restored_at_start(self) -> None:
+        state = self.runtime / "tts-player" / "duck.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"inputs": {"7": {
+            "volumes": [60000, 50000], "name": "app", "pid": "4242"}}}))
+        self.start_player()
+        sets = self.wait_volume_sets(1)
+        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"], sets[0])
+        self.assertFalse(state.exists())
+
 
 BIN = ROOT / "bin" / "tts-player"
 

@@ -146,13 +146,14 @@ def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voi
 
 
 def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None]) -> None:
-    """Плеер в главном цикле; SIGTERM/SIGINT — выход, незаконченное — обратно в inbox/."""
+    """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, незаконченное — обратно в inbox/."""
     def on_signal() -> bool:
         quit_loop()
         return GLib.SOURCE_REMOVE
 
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, on_signal)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, on_signal)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGHUP, on_signal)  # закрытие терминала
 
     def on_stop() -> bool:
         log.info("stop requested")
@@ -166,8 +167,8 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
         return GLib.SOURCE_CONTINUE
 
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR2, on_play)
-    player.start()
     try:
+        player.start()
         main_loop()
     finally:
         player.shutdown()

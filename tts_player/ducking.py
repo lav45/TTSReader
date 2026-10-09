@@ -41,7 +41,11 @@ class Ducker:
         return self._percent is not None
 
     def duck(self, percent: int) -> None:
-        """Снизить чужие потоки до percent % (0–99). 100 — ничего; повторный вызов — refresh."""
+        """Снизить чужие потоки до percent % (0–99). 100 — ничего.
+
+        Ветка «уже приглушено → refresh» — защита от повторного вызова: duck() второй раз
+        не перезаписывает запомненные громкости (они уже сниженные), а только дорабатывает
+        новые потоки."""
         if percent >= 100:
             return
         if self.ducked:
@@ -65,8 +69,9 @@ class Ducker:
     def refresh(self) -> None:
         """Приглушить потоки, появившиеся после duck.
 
-        После таймаута pactl — ничего, до следующего duck / restore (звуковой сервер завис,
-        каждый вызов блокировал бы главный цикл на PACTL_TIMEOUT). Если первый duck не
+        После таймаута pactl или при отсутствии pactl — ничего, до следующего duck / restore
+        (сервер завис — каждый вызов блокировал бы главный цикл на PACTL_TIMEOUT; нет программы —
+        предупреждение каждую секунду бессмысленно). Код возврата != 0 — повтор остаётся. Если первый duck не
         получил список потоков — повторяет его."""
         if not self.ducked or self._stalled:
             return
@@ -182,8 +187,11 @@ class Ducker:
         """Запомнить потоки в state_file и снизить их на self._percent."""
         if not streams:
             return
+        saved_before = dict(self._saved)
         self._saved.update(streams)
-        self._write_state()
+        if not self._write_state():
+            self._saved = saved_before  # без записи recover не вернёт громкость — не снижаем
+            return
         for index, entry in streams.items():
             values = [round(v * self._percent / 100) for v in entry["volumes"]]
             self._pactl("set-sink-input-volume", str(index), *map(str, values))
@@ -221,6 +229,10 @@ class Ducker:
             self._stalled = True
             log.warning("pactl %s: %s", " ".join(args), exc)
             return None
+        except FileNotFoundError as exc:
+            self._stalled = True
+            log.warning("pactl %s: %s", " ".join(args), exc)
+            return None
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("pactl %s: %s", " ".join(args), exc)
             return None
@@ -229,12 +241,14 @@ class Ducker:
             return None
         return proc.stdout
 
-    def _write_state(self) -> None:
+    def _write_state(self) -> bool:
         data = {"inputs": {str(index): entry for index, entry in self._saved.items()}}
         try:
             write_json(self._state_file, data)
         except OSError as exc:
             log.warning("Не записан %s: %s", self._state_file, exc)
+            return False
+        return True
 
     def _remove_state(self) -> None:
         try:

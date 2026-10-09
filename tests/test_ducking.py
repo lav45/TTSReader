@@ -276,6 +276,26 @@ class DuckerTest(unittest.TestCase):
         self.ducker.duck(50)
         self.assertTrue(self.calls())
 
+    def test_no_pactl_is_not_retried_until_next_duck(self):
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            with self.assertLogs("tts_player.ducking", "WARNING"):
+                self.ducker.duck(30)
+            with self.assertNoLogs("tts_player.ducking", "WARNING"):
+                self.ducker.refresh()
+                self.ducker.refresh()
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [])
+        self.ducker.restore()
+        self.ducker.duck(30)
+        self.assertEqual(len(self.set_calls()), 2)
+
+    def test_state_write_failure_does_not_lower_volumes(self):
+        with mock.patch("tts_player.ducking.write_json", side_effect=OSError("диск полон")):
+            with self.assertLogs("tts_player.ducking", "WARNING"):
+                self.ducker.duck(30)
+        self.assertEqual(self.set_calls(), [])
+        self.assertEqual(self.ducker._saved, {})
+
     def test_non_numeric_volume_skipped(self):
         bad = sink_input(8, 800, [1, 2])
         bad["volume"]["front-left"]["value"] = "loud"
