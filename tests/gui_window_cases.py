@@ -774,12 +774,12 @@ class TextScreenTest(unittest.TestCase):
         w = self.window
         button = w.text_button
         self.assertFalse(button.get_label())
-        self.assertEqual("document-edit-symbolic", icon_name(button))
+        self.assertEqual("audio-volume-high-symbolic", icon_name(button))
         self.assertEqual("Озвучить свой текст", button.get_tooltip_text())
         row = w.clear_button.get_parent()
         self.assertEqual([w.settings_button, w.clear_button, w.end_session_button, button],
                          row.get_children()[:4])
-        self.assertEqual(Gtk.PackType.START, row.child_get_property(button, "pack-type"))
+        self.assertEqual(Gtk.PackType.END, row.child_get_property(button, "pack-type"))
 
     def test_click_opens_text_screen(self) -> None:
         w = self.window

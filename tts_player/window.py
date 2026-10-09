@@ -95,8 +95,8 @@ class PlayerWindow(Gtk.Window):
     """Три экрана в одном Gtk.Stack.
 
     "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить сообщения
-    активной сессии», «Завершить активную сессию» (оба активны, пока есть активная сессия) и
-    «Озвучить свой текст»; дерево сессий — папки (открыта одна или ни одной: открытая —
+    активной сессии», «Завершить активную сессию» (оба активны, пока есть активная сессия),
+    справа «Озвучить свой текст»; дерево сессий — папки (открыта одна или ни одной: открытая —
     активная), дорожки открытой — под её заголовком с отступом; ползунок позиции; ряд со
     временем слева и prev / play-pause / next справа.
     "settings": хвост очереди и приглушение (PlayerSettings), голос и скорость claude-tts
@@ -144,7 +144,7 @@ class PlayerWindow(Gtk.Window):
         self.end_session_button = self._icon_button(
             "system-shutdown-symbolic", "Завершить активную сессию",
             self._end_active_session)
-        self.text_button = self._icon_button("document-edit-symbolic", "Озвучить свой текст",
+        self.text_button = self._icon_button("audio-volume-high-symbolic", "Озвучить свой текст",
                                              self._open_text)
 
         # время слева, кнопки справа: pack_end выкладывает от правого края, поэтому next первым
@@ -159,11 +159,11 @@ class PlayerWindow(Gtk.Window):
         scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.add(self.tree)
 
-        # ряд служебных значков наверху
+        # ряд служебных значков наверху: «Свой текст» прижат к правому краю
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        for button in (self.settings_button, self.clear_button, self.end_session_button,
-                       self.text_button):
+        for button in (self.settings_button, self.clear_button, self.end_session_button):
             tools.pack_start(button, False, False, 0)
+        tools.pack_end(self.text_button, False, False, 0)
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         main.pack_start(tools, False, False, 0)
