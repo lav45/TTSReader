@@ -33,11 +33,11 @@ def wav_duration(path: Path) -> float:
 
 
 def synthesize(sentence: str, persona: str, path: Path, synthesize_speech) -> float:
-    """Пишет предложение в `<path>.tmp`, переименовывает в path после успеха; возвращает длительность.
+    """Пишет предложение в `<i>.part.wav`, переименовывает в path после успеха; возвращает длительность.
 
-    Недописанный файл (убитый процесс) остаётся под именем .tmp и не выглядит готовым.
+    Недописанный файл (убитый процесс) остаётся под именем .part.wav и не выглядит готовым.
     """
-    partial = path.with_name(path.name + ".tmp")
+    partial = path.with_name(f"{path.stem}.part.wav")
     try:
         if not synthesize_speech(sentence, persona, partial):
             raise RuntimeError("синтез не удался")

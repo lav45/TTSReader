@@ -146,10 +146,10 @@ class SynthWorkerTest(unittest.TestCase):
         self.assertEqual(len(lines), 4)
         self.assertEqual(stderr.count("noise"), 2)
 
-    def test_tmp_name_never_in_stdout_and_failure_leaves_no_wav(self):
+    def test_part_name_never_in_stdout_and_failure_leaves_no_wav(self):
         code, lines = self.run_worker("Раз. Два.", FAKE_FAIL_AT="Два.")
         self.assertEqual(code, 1)
-        self.assertNotIn(".tmp", json.dumps(lines))
+        self.assertNotIn(".part", json.dumps(lines))
         self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["0.wav"])
 
     def test_bad_wav_gives_error_line(self):
