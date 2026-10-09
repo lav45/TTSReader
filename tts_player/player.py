@@ -1,7 +1,7 @@
 """Плеер-контроллер: курсор по очереди, команды кнопок, снимок состояния для окна."""
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -17,7 +17,7 @@ from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.history import History, HistoryEntry  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
 from tts_player.hook_tasks import HookTasks  # noqa: E402
-from tts_player.model import HookTask, Message, Sentence  # noqa: E402
+from tts_player.model import UNKNOWN_TASK, HookTask, Message, Sentence  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.queue import MessageQueue, QueueSnapshot, TaskOrder  # noqa: E402
@@ -530,7 +530,10 @@ class Player:
     def _on_sentence(self, sentence: Sentence) -> None:
         """Предложение — в очередь, которой принадлежит его задача; ничья — играемой, она
         удаляет его как чужое. Предложение другой сессии не играет, но может завершить
-        ожидающее текущее: порядок задач общий."""
+        ожидающее текущее: порядок задач общий. Предложение без id задачи (обёртка не нашла
+        current_message в playback.json демона) относится к задаче своего прохода синтеза, если
+        у какого-то сообщения уже есть предложение с той же меткой прохода."""
+        sentence = self._claim_unknown(sentence)
         queue = next((q for q in self._queues.values() if q.owns(sentence.task_id)), self._queue)
         queue.add(sentence)
         if queue is not self._queue:
@@ -547,6 +550,17 @@ class Player:
             else:
                 self._message_end()
         self._changed()
+
+    def _claim_unknown(self, sentence: Sentence) -> Sentence:
+        if sentence.task_id != UNKNOWN_TASK:
+            return sentence
+        task_id = next((t for q in self._queues.values()
+                        if (t := q.task_of_pass(sentence.session_id, sentence.token))), None)
+        if task_id is None:
+            return sentence
+        log.info("предложение без id задачи отнесено к задаче %s по проходу %s: %s", task_id,
+                 sentence.token, sentence.path.name)
+        return replace(sentence, task_id=task_id)
 
     def _on_entry(self, entry: HistoryEntry) -> None:
         """Склейка — сообщению очереди своей сессии; сессии нет в списке — ничья."""
