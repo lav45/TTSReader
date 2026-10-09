@@ -5,10 +5,11 @@
 """
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from tts_player import atomic_json
+from tts_player.settings_error import SettingsError
 
 log = logging.getLogger("tts_player.daemon_settings")
 
@@ -29,14 +30,6 @@ class VoiceSettings:
     voices: list[Voice]
     active: str
     speed: float
-
-
-class SettingsError(Exception):
-    """Причина, по которой настройки не прочитаны или не сохранены (текст для экрана)."""
-
-
-class _FileGone(Exception):
-    """Файл сессии удалён демоном между чтением и записью."""
 
 
 class DaemonSettings:
@@ -139,39 +132,15 @@ class DaemonSettings:
                 data.pop(key, None)
             try:
                 self._write_json(path, data, create=False)
-            except _FileGone:
+            except atomic_json.FileGone:  # файл сессии удалён демоном между чтением и записью
                 log.debug("Файл сессии %s удалён демоном, пропущен", path)
 
     @staticmethod
     def _write_json(path: Path, data: dict, create: bool = True) -> None:
-        """Временный файл рядом + rename; любой сбой до rename убирает временный файл.
+        """Атомарная запись (tts_player.atomic_json); OSError -> SettingsError.
 
-        create=False: файла уже нет (удалён демоном) — _FileGone, не воскрешаем."""
-        tmp_path = None
+        create=False: файла уже нет (удалён демоном) — atomic_json.FileGone, не воскрешаем."""
         try:
-            try:
-                fd, tmp_name = tempfile.mkstemp(
-                    dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-                tmp_path = Path(tmp_name)
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                    f.write("\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                try:
-                    mode = path.stat().st_mode & 0o777
-                except FileNotFoundError:
-                    if not create:
-                        raise _FileGone(path) from None
-                    mode = 0o644
-                os.chmod(tmp_path, mode)
-                os.replace(tmp_path, path)
-                tmp_path = None
-            except OSError as e:
-                raise SettingsError(f"Не удалось записать {path}: {e.strerror or e}") from e
-        finally:
-            if tmp_path is not None:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    log.debug("Не удалён временный файл %s", tmp_path)
+            atomic_json.write_json(path, data, create=create)
+        except OSError as e:
+            raise SettingsError(f"Не удалось записать {path}: {e.strerror or e}") from e

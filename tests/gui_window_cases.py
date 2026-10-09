@@ -19,10 +19,12 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gtk  # noqa: E402
 
-from tts_player.daemon_settings import SettingsError, Voice, VoiceSettings  # noqa: E402
+from tts_player.daemon_settings import Voice, VoiceSettings  # noqa: E402
+from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
-from tts_player.view import pause_label, play_stop_label, position_label  # noqa: E402
+from tts_player.player_settings import Prefs  # noqa: E402
+from tts_player.view import play_pause_label, position_label  # noqa: E402
 from tts_player.window import PlayerWindow, tray_menu  # noqa: E402
 
 if not Gtk.init_check(None)[0]:
@@ -34,10 +36,10 @@ def message(token: str) -> Message:
 
 
 def state(status: str, current: Message | None, messages: list[Message],
-          position_s: float = 0.0) -> PlayerState:
+          position_s: float = 0.0, autoplay: bool = True) -> PlayerState:
     length = 0.0 if current is None else 10.0
     return PlayerState(status, current, position_s, length, messages, False,
-                       [10.0] * len(messages), [True] * len(messages))
+                       [10.0] * len(messages), [True] * len(messages), autoplay)
 
 
 class FakePlayer:
@@ -55,11 +57,16 @@ class FakePlayer:
         self.snapshot = snapshot
         self.on_change(snapshot)
 
-    def toggle_pause(self) -> None:
-        self.calls.append(("toggle_pause",))
+    def toggle_play_pause(self) -> None:
+        self.calls.append(("toggle_play_pause",))
 
-    def toggle_play_stop(self) -> None:
-        self.calls.append(("toggle_play_stop",))
+    def apply_prefs(self, prefs: Prefs) -> None:
+        """Как Player: настройки применены, окно получает новый снимок с autoplay."""
+        self.calls.append(("apply_prefs", prefs))
+        snapshot = self.snapshot
+        self.change(PlayerState(snapshot.status, snapshot.current, snapshot.position_s,
+                                snapshot.length_s, snapshot.messages, snapshot.output_down,
+                                snapshot.lengths, snapshot.completes, prefs.autoplay))
 
     def next(self) -> None:
         self.calls.append(("next",))
@@ -100,6 +107,27 @@ class FakeSettings:
             raise self.save_error
 
 
+class FakePrefs:
+    """Контракт PlayerSettings для окна: load() и save(); вызовы записываются.
+
+    save_error — SettingsError, которую бросит save(); сохранённое становится загружаемым."""
+
+    def __init__(self, loaded: Prefs) -> None:
+        self.loaded = loaded
+        self.save_error: SettingsError | None = None
+        self.calls: list[tuple] = []
+
+    def load(self) -> Prefs:
+        self.calls.append(("load",))
+        return self.loaded
+
+    def save(self, prefs: Prefs) -> None:
+        self.calls.append(("save", prefs))
+        if self.save_error is not None:
+            raise self.save_error
+        self.loaded = prefs
+
+
 class FakeVoicing:
     """Контракт Voicing для окна: is_on() и turn_off(); on задаёт ответ, вызовы считаются."""
 
@@ -119,6 +147,11 @@ def voice_settings() -> VoiceSettings:
                          active="bob", speed=1.5)
 
 
+def css_classes(widget: Gtk.Widget) -> set[str]:
+    context = widget.get_style_context()
+    return {name for name in ("success", "error") if context.has_class(name)}
+
+
 def icon_name(button: Gtk.Button) -> str:
     name, _size = button.get_image().get_icon_name()
     return name
@@ -134,14 +167,14 @@ class PlayerWindowTest(unittest.TestCase):
         self.a, self.b, self.c = message("a"), message("b"), message("c")
         self.player = FakePlayer(state("playing", self.b, [self.a, self.b, self.c], 3.0))
         self.settings = FakeSettings(voice_settings())
+        self.prefs = FakePrefs(Prefs(tail=7, autoplay=True))
         self.voicing = FakeVoicing(on=False)
-        self.window = PlayerWindow(self.player, self.settings, self.voicing)
+        self.window = PlayerWindow(self.player, self.settings, self.prefs, self.voicing)
         self.addCleanup(self.window.destroy)
 
     def test_buttons_call_player_commands(self) -> None:
         w = self.window
-        for button, call in ((w.prev_button, "prev"), (w.pause_button, "toggle_pause"),
-                             (w.play_stop_button, "toggle_play_stop"),
+        for button, call in ((w.prev_button, "prev"), (w.play_pause_button, "toggle_play_pause"),
                              (w.next_button, "next"), (w.clear_button, "clear")):
             self.player.calls.clear()
             button.clicked()
@@ -187,11 +220,11 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertTrue(button.get_sensitive())
 
     def test_voicing_off_button_sensitive_at_construction_when_on(self) -> None:
-        window = PlayerWindow(self.player, self.settings, FakeVoicing(on=True))
+        window = PlayerWindow(self.player, self.settings, self.prefs, FakeVoicing(on=True))
         self.addCleanup(window.destroy)
         self.assertTrue(window.voicing_off_button.get_sensitive())
 
-    def test_row_activation_plays_that_message(self) -> None:
+    def test_row_activation_selects_that_message(self) -> None:
         w = self.window
         self.assertTrue(w.message_list.get_activate_on_single_click())
         w.message_list.get_row_at_index(1).activate()
@@ -298,16 +331,92 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual([], self.player.calls)
         self.assertEqual(5.0, w.scale.get_value())
         self.assertEqual(position_label(snapshot), w.position_label_widget.get_text())
-        self.assertEqual(pause_label(snapshot), w.pause_button.get_label())
-        self.assertEqual(play_stop_label(snapshot), w.play_stop_button.get_label())
+        self.assertEqual(play_pause_label(snapshot), w.play_pause_button.get_label())
         self.assertTrue(w.prev_button.get_sensitive())
         self.assertFalse(w.next_button.get_sensitive())
         self.assertEqual(3, len(w.message_list.get_children()))
 
-    def test_stopped_disables_pause(self) -> None:
+    def test_transport_row_is_prev_play_pause_next_with_position_right(self) -> None:
+        w = self.window
+        row = w.play_pause_button.get_parent()
+        buttons = [child for child in row.get_children() if isinstance(child, Gtk.Button)]
+        self.assertEqual([w.prev_button, w.play_pause_button, w.next_button], buttons)
+        self.assertIs(row, w.position_label_widget.get_parent())
+        self.assertEqual(Gtk.PackType.END,
+                         row.child_get_property(w.position_label_widget, "pack-type"))
+        for name in ("pause_button", "play_stop_button"):
+            self.assertFalse(hasattr(w, name), name)
+
+    def test_main_screen_order_top_to_bottom(self) -> None:
+        w = self.window
+        main = w.stack.get_child_by_name("main")
+        tools = w.clear_button.get_parent()
+        scrolled = w.message_list.get_parent()
+        while scrolled.get_parent() is not main:  # ListBox в ScrolledWindow через Viewport
+            scrolled = scrolled.get_parent()
+        transport = w.play_pause_button.get_parent()
+        self.assertEqual([tools, scrolled, w.scale, transport], main.get_children())
+        self.assertTrue(main.child_get_property(scrolled, "expand"))
+
+    def test_play_pause_label_and_sensitivity_per_state(self) -> None:
+        w = self.window
+        heard = message("h")
+        heard.heard = True
+        cases = (
+            (state("playing", self.a, [self.a]), "⏸", True),
+            (state("paused", self.a, [self.a]), "⏵", True),
+            (state("stopped", self.a, [self.a]), "⏵", True),
+            (state("idle", None, []), "⏵", False),
+            (state("idle", None, [heard, self.b]), "⏵", True),
+        )
+        for snapshot, label, enabled in cases:
+            self.player.change(snapshot)
+            self.assertEqual(label, w.play_pause_button.get_label(), snapshot.status)
+            self.assertEqual(enabled, w.play_pause_button.get_sensitive(), snapshot.status)
+
+    def test_stopped_first_disables_prev(self) -> None:
         self.player.change(state("stopped", self.a, [self.a, self.b, self.c]))
-        self.assertFalse(self.window.pause_button.get_sensitive())
         self.assertFalse(self.window.prev_button.get_sensitive())
+
+    def test_autoplay_button_icon_tooltip_right_in_tools_row(self) -> None:
+        w = self.window
+        button = w.autoplay_button
+        self.assertIsInstance(button, Gtk.ToggleButton)
+        self.assertFalse(button.get_label())
+        self.assertEqual("media-playlist-consecutive-symbolic", icon_name(button))
+        self.assertEqual("Автовоспроизведение", button.get_tooltip_text())
+        row = w.clear_button.get_parent()
+        self.assertIs(row, button.get_parent())
+        self.assertEqual(Gtk.PackType.END, row.child_get_property(button, "pack-type"))
+        self.assertTrue(button.get_active())
+
+    def test_autoplay_toggle_saves_prefs_and_applies(self) -> None:
+        w = self.window
+        w.autoplay_button.set_active(False)
+        expected = Prefs(tail=7, autoplay=False)
+        self.assertIn(("save", expected), self.prefs.calls)
+        self.assertEqual([("apply_prefs", expected)], self.player.calls)
+        self.assertFalse(w.autoplay_button.get_active())
+
+    def test_autoplay_follows_state_without_save(self) -> None:
+        w = self.window
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], autoplay=False))
+        self.assertFalse(w.autoplay_button.get_active())
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], autoplay=True))
+        self.assertTrue(w.autoplay_button.get_active())
+        self.assertEqual([], [call for call in self.prefs.calls if call[0] == "save"])
+        self.assertEqual([], self.player.calls)
+
+    def test_autoplay_save_error_reverts_button_and_logs(self) -> None:
+        w = self.window
+        self.prefs.save_error = SettingsError("не удалось записать settings.json")
+        with self.assertLogs("tts_player", "WARNING") as logs:
+            w.autoplay_button.set_active(False)
+        self.assertIn("не удалось записать settings.json", logs.output[0])
+        self.assertTrue(w.autoplay_button.get_active())
+        self.assertEqual([], self.player.calls)
+        saves = [call for call in self.prefs.calls if call[0] == "save"]
+        self.assertEqual(1, len(saves), "возврат кнопки не сохраняет повторно")
 
     def test_close_hides_window(self) -> None:
         self.window.show_all()
@@ -322,8 +431,9 @@ class SettingsScreenTest(unittest.TestCase):
     def setUp(self) -> None:
         self.player = FakePlayer(state("stopped", None, []))
         self.settings = FakeSettings(voice_settings())
+        self.prefs = FakePrefs(Prefs(tail=7, autoplay=True))
         self.voicing = FakeVoicing(on=False)
-        self.window = PlayerWindow(self.player, self.settings, self.voicing)
+        self.window = PlayerWindow(self.player, self.settings, self.prefs, self.voicing)
         self.addCleanup(self.window.destroy)
 
     def test_icon_buttons_without_text_first_in_one_row(self) -> None:
@@ -354,8 +464,10 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual(["aria — Тёплый женский", "bob"], [row[0] for row in model])
         self.assertEqual("bob", w.voice_combo.get_active_id())
         self.assertEqual(1.5, w.speed_spin.get_value())
-        for widget in (w.voice_combo, w.speed_spin, w.save_button):
+        for widget in (w.voice_combo, w.speed_spin, w.tail_spin, w.save_button):
             self.assertTrue(widget.get_sensitive())
+        self.assertEqual(7, w.tail_spin.get_value_as_int())
+        self.assertFalse(w.settings_status.get_visible())
         self.assertEqual("Сохранить", w.save_button.get_label())
         self.assertEqual(icon_name(w.back_button), "go-previous-symbolic")
 
@@ -406,16 +518,47 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual(2, len(w.voice_combo.get_model()))
         self.assertEqual([("load",), ("load",)], self.settings.calls)
 
-    def test_load_error_disables_controls_and_shows_reason(self) -> None:
+    def test_tail_spin_range(self) -> None:
+        spin = self.window.tail_spin
+        self.assertEqual((1.0, 20.0), tuple(spin.get_range()))
+        self.assertEqual(1.0, spin.get_increments()[0])
+        self.assertEqual(0, spin.get_digits())
+
+    def test_tail_spin_reloaded_on_each_open(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        w.tail_spin.set_value(3)
+        w.back_button.clicked()
+        self.prefs.loaded = Prefs(tail=12, autoplay=True)
+        w.settings_button.clicked()
+        self.assertEqual(12, w.tail_spin.get_value_as_int())
+
+    def test_load_error_disables_voice_controls_and_shows_reason(self) -> None:
         w = self.window
         self.settings.load_error = SettingsError("config.json не прочитан")
         w.settings_button.clicked()
         self.assertEqual("settings", w.stack.get_visible_child_name())
-        for widget in (w.voice_combo, w.speed_spin, w.save_button):
+        for widget in (w.voice_combo, w.speed_spin):
             self.assertFalse(widget.get_sensitive())
-        self.assertEqual("config.json не прочитан", w.settings_error.get_text())
+        for widget in (w.tail_spin, w.save_button):
+            self.assertTrue(widget.get_sensitive())
+        self.assertTrue(w.settings_status.get_visible())
+        self.assertEqual("config.json не прочитан", w.settings_status.get_text())
+        self.assertEqual({"error"}, css_classes(w.settings_status))
         w.back_button.clicked()
         self.assertEqual("main", w.stack.get_visible_child_name())
+
+    def test_load_error_save_writes_only_tail(self) -> None:
+        w = self.window
+        self.settings.load_error = SettingsError("config.json не прочитан")
+        w.settings_button.clicked()
+        w.tail_spin.set_value(9)
+        w.save_button.clicked()
+        expected = Prefs(tail=9, autoplay=True)
+        self.assertEqual(("save", expected), self.prefs.calls[-1])
+        self.assertEqual([("apply_prefs", expected)], self.player.calls)
+        self.assertEqual([("load",)], self.settings.calls)
+        self.assertEqual({"success"}, css_classes(w.settings_status))
 
     def test_successful_load_after_error_clears_reason(self) -> None:
         w = self.window
@@ -424,17 +567,27 @@ class SettingsScreenTest(unittest.TestCase):
         w.back_button.clicked()
         self.settings.load_error = None
         w.settings_button.clicked()
-        self.assertEqual("", w.settings_error.get_text())
-        self.assertTrue(w.save_button.get_sensitive())
+        self.assertFalse(w.settings_status.get_visible())
+        self.assertEqual("", w.settings_status.get_text())
+        self.assertEqual(set(), css_classes(w.settings_status))
+        self.assertTrue(w.speed_spin.get_sensitive())
 
-    def test_save_sends_chosen_voice_and_speed_and_returns(self) -> None:
+    def test_save_writes_prefs_then_voice_and_stays_with_success(self) -> None:
         w = self.window
+        self.player.change(state("stopped", None, [], autoplay=False))
         w.settings_button.clicked()
         w.voice_combo.set_active_id("aria")
         w.speed_spin.set_value(2.3)
+        w.tail_spin.set_value(4)
         w.save_button.clicked()
+        expected = Prefs(tail=4, autoplay=False)
+        self.assertEqual(("save", expected), self.prefs.calls[-1])
+        self.assertEqual([("apply_prefs", expected)], self.player.calls)
         self.assertEqual(("save", "aria", 2.3), self.settings.calls[-1])
-        self.assertEqual("main", w.stack.get_visible_child_name())
+        self.assertEqual("settings", w.stack.get_visible_child_name())
+        self.assertTrue(w.settings_status.get_visible())
+        self.assertEqual("Настройки сохранены", w.settings_status.get_text())
+        self.assertEqual({"success"}, css_classes(w.settings_status))
 
     def test_save_error_keeps_screen_and_shows_reason(self) -> None:
         w = self.window
@@ -442,7 +595,47 @@ class SettingsScreenTest(unittest.TestCase):
         self.settings.save_error = SettingsError("не удалось записать")
         w.save_button.clicked()
         self.assertEqual("settings", w.stack.get_visible_child_name())
-        self.assertEqual("не удалось записать", w.settings_error.get_text())
+        self.assertEqual("не удалось записать", w.settings_status.get_text())
+        self.assertEqual({"error"}, css_classes(w.settings_status))
+
+    def test_prefs_save_error_shows_reason(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        self.prefs.save_error = SettingsError("settings.json не записан")
+        w.save_button.clicked()
+        self.assertEqual("settings.json не записан", w.settings_status.get_text())
+        self.assertEqual({"error"}, css_classes(w.settings_status))
+        self.assertEqual([], self.player.calls)
+        self.assertEqual([], [call for call in self.settings.calls if call[0] == "save"])
+
+    def test_voice_save_error_after_prefs_saved_keeps_order(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        self.settings.save_error = SettingsError("не удалось записать")
+        w.save_button.clicked()
+        # хвост уже записан и применён к плееру до сбоя записи голоса
+        prefs_saves = [call for call in self.prefs.calls if call[0] == "save"]
+        self.assertEqual(1, len(prefs_saves))
+        self.assertEqual([("apply_prefs", prefs_saves[0][1])], self.player.calls)
+        self.assertEqual(1, len([call for call in self.settings.calls if call[0] == "save"]))
+        self.assertEqual("не удалось записать", w.settings_status.get_text())
+
+    def test_reopen_hides_result(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        w.save_button.clicked()
+        self.assertEqual({"success"}, css_classes(w.settings_status))
+        w.back_button.clicked()
+        w.settings_button.clicked()
+        self.assertFalse(w.settings_status.get_visible())
+        self.assertEqual(set(), css_classes(w.settings_status))
+
+    def test_status_hidden_after_show_all(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        w.show_all()
+        flush()
+        self.assertFalse(w.settings_status.get_visible())
 
     def test_back_returns_without_save(self) -> None:
         w = self.window

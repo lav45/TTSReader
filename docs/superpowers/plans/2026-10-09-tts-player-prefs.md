@@ -125,24 +125,39 @@ save:  tail вне 1–20 или не int → SettingsError, файл не тр�
 **Contract:** контракт (6), сторона плеера
 
 ```
-Queue.tail: int                       # был TAIL = 5; задаётся снаружи, по умолчанию 5
-  Queue.start(message): начатое входит в хвост; если начатых больше tail —
-                        удаляется одно самое старое (не больше одного за start)
+MessageQueue(tail: int)               # без значения по умолчанию: Player передаёт Prefs().tail
+Queue.tail: int                       # был TAIL = 5; меняется снаружи (apply_prefs)
+  Queue.start(message): начатое входит в хвост; если начатых больше tail — их число
+                        за один start уменьшается не больше чем на одно (сокращение
+                        хвоста идёт по одному); вытесняются самые старые
+  Queue.is_started(message) -> bool: начато и ещё в хвосте (не вытеснено, не забыто)
 PlayerState.autoplay: bool
 Player.apply_prefs(prefs: Prefs) -> None     # queue.tail = prefs.tail; autoplay = prefs.autoplay; on_change
 Player.toggle_play_pause() -> None
   playing           → paused, позиция запомнена
   paused            → playing с запомненной позиции
   stopped / idle, есть текущее → playing с курсора; курсор ≥ длины → с 0
+  stopped / idle, текущее доиграно (прослушано, курсор ≥ длины) и есть следующее
+                    по порядку → следующее с 0; нет следующего → текущее с 0
   нет текущего      → первое непрослушанное с 0; нет его → ничего
+конец сообщения (завершённого) → прослушано, курсор = длина (по склейке, если она привязана
+                    позже предложений)
+покинутое по next / prev / клику → прослушано, только если начато (is_started) и завершено
 autoplay = False:
-  конец сообщения   → текущее прослушано, статус stopped; следующее по порядку → текущее, позиция 0
+  конец сообщения   → текущее прослушано, статус stopped; следующее по порядку → текущее, позиция 0,
+                      но не начатое (в хвост входит при первом play)
                       (нет следующего — текущее остаётся, позиция = длина)
   новое в idle      → только в списке, статус и текущее не меняются
 play_if_stopped    → как toggle_play_pause из stopped / idle (контракт (4) без изменений)
 __main__: --settings-file FILE (по умолчанию PlayerSettings.default_path(os.environ));
           PlayerSettings(...).load() → player.apply_prefs(...) до player.start()
 ```
+
+**Follow-up: click selects.** Контракт (8) изменён: `Player.play_message(message)` только выбирает
+сообщение. Сообщение не в очереди или уже текущее - без изменений; иначе звук стоп (таймер
+повтора снят), покинутое помечается прослушанным только если начато и завершено, выбранное
+становится текущим с позицией 0, статусом `stopped`, не начатым (в хвост входит при первом
+play/pause, как после `_stop_after`). Играть начинает play/pause. Окно не меняется.
 
 **Acceptance Criteria:**
 - [ ] `tail` 5 → 2 при пяти начатых: следующий `start` удаляет одно сообщение, а не три; через три новых начатых их 2
@@ -153,7 +168,7 @@ __main__: --settings-file FILE (по умолчанию PlayerSettings.default_p
 - [ ] autoplay включён — прежнее поведение (существующие тесты автоперехода проходят)
 - [ ] e2e: процесс плеера с `--settings-file` во временном каталоге, где `autoplay: false`, — после первого сообщения нет строки `playing`; e2e-подпроцессы получают временный `XDG_CONFIG_HOME`
 
-**Verify:** `python3 -m unittest tests.test_queue tests.test_player tests.test_player_e2e -v` → `OK`
+**Verify:** `python3 -m unittest discover -s tests` → `OK`
 
 **Steps:**
 

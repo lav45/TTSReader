@@ -1,4 +1,5 @@
 """Приёмка плеера через стык: daemon-bin/paplay -> inbox -> процесс tts_player -> строки stderr."""
+import json
 import os
 import queue
 import signal
@@ -34,7 +35,8 @@ def make_wav(path: Path, seconds: float = SECONDS) -> Path:
 
 
 class PlayerProcessCase(unittest.TestCase):
-    """Процесс плеера во временном окружении: свой XDG_RUNTIME_DIR, своя история демона."""
+    """Процесс плеера во временном окружении: свой XDG_RUNTIME_DIR, свой XDG_CONFIG_HOME
+    (настройки плеера пользователя не читаются), своя история демона."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -42,6 +44,7 @@ class PlayerProcessCase(unittest.TestCase):
         self.tmp = Path(tmp.name)
         self.runtime = self.tmp / "run"
         self.runtime.mkdir()
+        self.config = self.tmp / "config"
         self.inbox = self.runtime / "tts-player" / "inbox"
         self.store = self.runtime / "tts-player" / "store"
         self.wavs = self.tmp / "wavs"
@@ -59,6 +62,7 @@ class PlayerProcessCase(unittest.TestCase):
     def env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
         env["XDG_RUNTIME_DIR"] = str(self.runtime)
+        env["XDG_CONFIG_HOME"] = str(self.config)
         return env
 
     @staticmethod
@@ -66,11 +70,12 @@ class PlayerProcessCase(unittest.TestCase):
         """Процесс плеера без окна и трея: e2e не открывают ничего на экране пользователя."""
         return [sys.executable, "-m", "tts_player", "--no-gui", *args]
 
-    def start_player(self, sink: str = "fakesink", history: Path | None = None) -> None:
+    def start_player(self, sink: str = "fakesink", history: Path | None = None,
+                     *extra: str) -> None:
         history = self.history if history is None else history
         self.proc = subprocess.Popen(
             self.command("--audio-sink", sink,
-                         "--history-dir", str(history), "--history-db", str(self.db)),
+                         "--history-dir", str(history), "--history-db", str(self.db), *extra),
             cwd=ROOT, env=self.env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
@@ -201,7 +206,7 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertEqual(2, len(list(self.store.iterdir())))
 
     def test_without_runtime_dir_exits_1_with_message(self) -> None:
-        env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
+        env = {k: v for k, v in self.env().items() if k != "XDG_RUNTIME_DIR"}
         result = subprocess.run(
             self.command("--audio-sink", "fakesink"),
             cwd=ROOT, env=env, capture_output=True, text=True, timeout=WAIT)
@@ -218,6 +223,29 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("графическ", result.stderr)
         self.assertFalse(self.inbox.exists())
+
+    def test_autoplay_off_in_settings_file_keeps_new_message_silent(self) -> None:
+        """--settings-file с autoplay: false — первое сообщение не играет само; play — играет."""
+        settings = self.tmp / "prefs" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({"tail": 5, "autoplay": False}))
+        self.start_player("fakesink", None, "--settings-file", str(settings))
+        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0))
+        self.assert_quiet()
+        self.assertEqual(1, len(list(self.store.iterdir())))
+        self.assertEqual(0, subprocess.run([str(BIN), "play"], env=self.env(),
+                                           timeout=WAIT).returncode)
+        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
+
+    def test_settings_default_to_xdg_config_home(self) -> None:
+        """Без --settings-file файл берётся из XDG_CONFIG_HOME подпроцесса."""
+        settings = self.config / "tts-player" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"tail": 5, "autoplay": False}))
+        self.start_player()
+        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0))
+        self.assert_quiet()
+        self.assertIsNone(self.proc.poll())
 
     def test_sigterm_exits_0(self) -> None:
         self.start_player()
@@ -333,7 +361,7 @@ class SingleInstanceTest(PlayerProcessCase):
         self.next_line("stop requested")
 
     def test_stop_without_runtime_dir_exits_0(self) -> None:
-        env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
+        env = {k: v for k, v in self.env().items() if k != "XDG_RUNTIME_DIR"}
         result = subprocess.run([str(BIN), "stop"], cwd=ROOT, env=env,
                                 capture_output=True, text=True, timeout=WAIT)
         self.assertEqual(0, result.returncode)
