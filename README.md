@@ -125,14 +125,11 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
 `tts-player-hook end`. Команды `/tts-on` и `/tts-off` убраны. Файлы вне репозитория правятся так:
 
 1. Слить обновление в `~/Programs/TTSReader`. Старого `tts-player-hook on` после слияния нет.
-2. Снять копии (`settings.json` - первым, пока в нём ничего не тронуто):
+2. Снять копию `settings.json`, пока в нём ничего не тронуто:
    ```bash
    cd ~/.claude
    cp -p settings.json settings.json.bak-2026-10-09-auto
    ```
-   `hooks/tts-command.sh`, `hooks/tts-toggle.sh`, `commands/tts-on.md` и `commands/tts-off.md`
-   переименовать в `*.bak-2026-10-09-auto` (`mv tts-toggle.sh tts-toggle.sh.bak-2026-10-09-auto`
-   и так далее).
 3. В `~/.claude/settings.json` добавить в `hooks`:
    ```json
    "SessionStart": [{"hooks": [{"type": "command", "command": "/home/lav45/.local/bin/tts-player-hook start", "timeout": 5}]}],
@@ -140,18 +137,27 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
    ```
    и убрать из `UserPromptSubmit` запись `/home/lav45/.claude/hooks/tts-command.sh`; запись
    `tts-gate.sh voice-context.sh` остаётся.
-4. Перезапустить сессии, которые нужно озвучивать. Сессии, запущенные до перехода, в списке
+4. Только теперь, когда `settings.json` больше не зовёт `tts-command.sh`, переименовать четыре файла
+   в `*.bak-2026-10-09-auto`: `hooks/tts-command.sh`, `hooks/tts-toggle.sh`, `commands/tts-on.md`,
+   `commands/tts-off.md` (`mv tts-toggle.sh tts-toggle.sh.bak-2026-10-09-auto` и так далее). Раньше
+   нельзя: пока запись жива, каждый запрос запускает отсутствующий файл (код 127).
+5. Перезапустить сессии, которые нужно озвучивать. Сессии, запущенные до перехода, в списке
    плеера не появятся и молчат до перезапуска.
 
 Что делает `SessionEnd`: он срабатывает и на `/clear`, и на интерактивном `/resume`; сессию снимает
 любую, активную тоже (звук останавливается, её тексты и файлы удаляются) - как «Завершить» в окне.
 Возобновлённая сессия возвращается в список своим `SessionStart`.
 
-Откат: закрыть плеер, убрать из `settings.json` две записи `SessionStart` и `SessionEnd`, вернуть
-`settings.json` и остальные файлы из копий `*.bak-2026-10-09-auto`. Прежний `tts-player-hook on`
-после слияния в master не существует, поэтому откат требует и прежнего коммита репозитория:
-`git checkout` коммита master до слияния в `~/Programs/TTSReader`. Затем запустить плеер:
-`tts-player --tray`.
+Откат: закрыть плеер; в `~/Programs/TTSReader` на master вернуть коммит до слияния
+(`git reset --hard <коммит до слияния>` или `git revert -m 1 <коммит слияния>`): прежнего
+`tts-player-hook on` после слияния в master нет. Четыре переименованных файла вернуть так:
+`mv X.bak-2026-10-09-auto X`; `settings.json` - `cp -p settings.json.bak-2026-10-09-auto settings.json`
+(записи `SessionStart` и `SessionEnd` уходят вместе с ним). Затем запустить плеер: `tts-player --tray`.
+
+Гейт режима: `start` работает, только когда в `~/.claude-tts/config.json` `mode` равен `queue` (нет
+файла или поля - считается `direct`, как у прежнего `tts-toggle.sh`). Иначе в `hook.log` одна строка
+«режим claude-tts не queue - плеер не участвует, сессия не добавлена», код 0, ничего не запускается.
+У `end` гейта нет.
 
 Команды остановки и продолжения звука из CLI удалены: у них не осталось вызывающих. Звук ставит
 на паузу кнопка окна.
@@ -396,7 +402,8 @@ command -v tts-player tts-player-hook
 ```
 
 - Первый `SessionStart` перезапускает демон, если он работал без обёртки: ответ, пришедший во время
-  перезапуска, может прозвучать мимо плеера - начните сессию заново через несколько секунд.
+  перезапуска (до 15 с), может прозвучать мимо плеера; следующие ответы идут через плеер, повторять
+  ничего не нужно. Начинать сессию заново нельзя: `SessionEnd` удалит её тексты.
 - Перезапуск занимает до 15 с и нужен только занятому демону; демон с обёрткой первым в `PATH` не трогается.
 - `tts-player session has "$CLAUDE_CODE_SESSION_ID"; echo $?` - 0 после `SessionStart`, 1 после `SessionEnd`.
 - Плеер стартует в трее с закрытым окном; чтобы открыть окно, щёлкните по значку в трее

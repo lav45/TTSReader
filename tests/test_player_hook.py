@@ -34,6 +34,7 @@ class PlayerHookTest(unittest.TestCase):
         self.stubs.mkdir()
         self.records = self.root / "records"
         self.records.mkdir()
+        self.config_mode("queue")
         self.stub("claude-tts", starts_daemon=True)
         self.stub("tts-player")
         self.addCleanup(self.wait_stubs_finished)  # после tmp.cleanup в обратном порядке: до удаления каталога
@@ -64,6 +65,11 @@ class PlayerHookTest(unittest.TestCase):
                 "fi\n")
         path.write_text(body)
         path.chmod(0o755)
+
+    def config_mode(self, mode):
+        """config.json claude-tts в подменённом HOME: поле mode (None - без поля)."""
+        data = {} if mode is None else {"mode": mode}
+        (self.home / ".claude-tts" / "config.json").write_text(json.dumps(data))
 
     def daemon(self, path_value, alive=True, cmdline=b"/usr/bin/python3\0-m\0claude_code_tts\0"):
         """PID-файл демона и (если жив) фальшивый /proc/<pid>/environ и cmdline."""
@@ -134,7 +140,7 @@ class PlayerHookTest(unittest.TestCase):
 
     def test_cmdline_with_claude_tts_is_a_daemon(self):
         self.daemon(f"{DAEMON_BIN}:/usr/bin", cmdline=b"claude-tts\0daemon\0run\0")
-        result = self.start()
+        self.start()
         time.sleep(0.5)
         self.assertFalse((self.records / "claude-tts.args").exists())
         self.assertIn("демон уже с обёрткой", self.hook_log())
@@ -168,7 +174,7 @@ class PlayerHookTest(unittest.TestCase):
         self.assertIn("демон уже с обёрткой", self.hook_log())
 
     def test_player_started_with_tray(self):
-        result = self.start()
+        self.start()
         self.assertEqual(sorted(self.calls("tts-player", 2)),
                          ["--tray", "session add u1 /p/X"])
         self.assertIn("запуск плеера отдан", self.hook_log())
@@ -177,12 +183,12 @@ class PlayerHookTest(unittest.TestCase):
 
     def test_restart_warns_that_first_answer_may_miss_player(self):
         self.daemon("/usr/bin:/bin")
-        result = self.start()
+        self.start()
         self.assertIn("может прозвучать мимо плеера", self.hook_log())
 
     def test_no_restart_has_no_warning(self):
         self.daemon(f"{DAEMON_BIN}:/usr/bin")
-        result = self.start()
+        self.start()
         self.assertNotIn("мимо плеера", self.hook_log())
 
     def test_hook_does_not_wait_for_player(self):
@@ -191,6 +197,46 @@ class PlayerHookTest(unittest.TestCase):
         result = self.start()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(time.monotonic() - started, 3)
+
+    def test_daemon_restart_is_detached(self):
+        self.daemon("/usr/bin:/bin")
+        (self.stubs / "claude-tts").write_text(
+            "#!/bin/bash\n[ \"$*\" = \"daemon restart\" ] && sleep 5\nexit 0\n")
+        started = time.monotonic()
+        result = self.start()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertIn("перезапуск демона с обёрткой запущен", self.hook_log())
+
+    def test_mode_not_queue_starts_nothing(self):
+        for mode in ("direct", None, "other"):
+            with self.subTest(mode=mode):
+                self.config_mode(mode)
+                result = self.start()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                time.sleep(0.1)
+                self.assertFalse((self.records / "tts-player.calls").exists())
+                self.assertFalse((self.records / "claude-tts.args").exists())
+                self.assertIn("режим claude-tts не queue", self.hook_log())
+
+    def test_missing_or_broken_config_counts_as_direct(self):
+        config = self.home / ".claude-tts" / "config.json"
+        for content in (None, "не json"):
+            with self.subTest(content=content):
+                config.unlink(missing_ok=True)
+                if content is not None:
+                    config.write_text(content)
+                result = self.start()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                time.sleep(0.1)
+                self.assertFalse((self.records / "tts-player.calls").exists())
+
+    def test_end_ignores_mode(self):
+        self.config_mode("direct")
+        result = self.end()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls("tts-player", 1), ["session remove u1"])
 
     def test_player_already_running_registers_session_without_play(self):
         lock_dir = self.runtime / "tts-player"
@@ -208,6 +254,7 @@ class PlayerHookTest(unittest.TestCase):
 
     def test_session_add_output_goes_to_log_when_player_starts(self):
         result = self.start()
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("вывод заглушки session", self.hook_log())
 
     def test_restart_warning_has_no_tts_on_phrase(self):
@@ -237,8 +284,10 @@ class PlayerHookTest(unittest.TestCase):
 
     def test_bad_input_exits_1_and_runs_no_stubs(self):
         inputs = ("не json", "[1]", "{}", '{"session_id": ""}', '{"session_id": 5}', "")
+        two_objects = '{"session_id":"u1","cwd":"/p"}{"session_id":"u2","cwd":"/p"}'
+        start_only = ('{"session_id":"u1"}', '{"session_id":"u1","cwd":""}')
         for mode in ("start", "end"):
-            for stdin in inputs + (('{"session_id":"u1"}', '{"session_id":"u1","cwd":""}') if mode == "start" else ()):
+            for stdin in inputs + (two_objects,) + (start_only if mode == "start" else ()):
                 with self.subTest(mode=mode, stdin=stdin):
                     result = self.run_hook(mode, stdin=stdin)
                     self.assertEqual(result.returncode, 1)
@@ -270,6 +319,7 @@ class PlayerHookTest(unittest.TestCase):
         result = self.end()
         self.assertEqual(result.returncode, 1)
         self.assertNotEqual(result.stderr.strip(), "")
+        self.assertIn("boom", self.hook_log())
 
     def test_missing_claude_tts_exits_1(self):
         (self.stubs / "claude-tts").unlink()

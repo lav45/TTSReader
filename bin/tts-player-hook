@@ -12,7 +12,10 @@
 #   tts-player-hook start   - хук SessionStart: {"session_id": ..., "cwd": ..., ...}
 #   tts-player-hook end     - хук SessionEnd:   {"session_id": ..., ...}
 #
-# start. Демона нет (нет живого PID в ~/.claude-tts/daemon.pid) -> claude-tts daemon start;
+# start. Гейт режима: в ~/.claude-tts/config.json поле mode не queue (нет файла, нечитаемый
+# файл или нет поля - считается direct, как у прежней обёртки tts-toggle.sh) -> одна строка в
+# hook.log, код 0, ничего не запускается и сессия не добавляется. У end гейта нет.
+# Демона нет (нет живого PID в ~/.claude-tts/daemon.pid) -> claude-tts daemon start;
 # демон жив, а первый элемент PATH в /proc/<pid>/environ не daemon-bin ->
 # claude-tts daemon restart (до ~15 с, а у хука 5 с, поэтому отвязан через setsid,
 # вывод в $XDG_RUNTIME_DIR/tts-player/daemon-restart.log);
@@ -30,7 +33,7 @@
 # предупреждение о перезапуске демона) дописываются в $XDG_RUNTIME_DIR/tts-player/hook.log,
 # ошибки идут в stderr.
 #
-# Код 0; 1 - stdin не JSON-объект, нет session_id (у start и cwd) непустой строкой, нет
+# Код 0; 1 - stdin не один JSON-объект, нет session_id (у start и cwd) непустой строкой, нет
 # claude-tts (start) или tts-player в PATH, нет XDG_RUNTIME_DIR, неверные аргументы
 # (сообщение в stderr), session add|remove вернул не 0.
 # Только для тестов: TTS_HOOK_PROC (вместо /proc), TTS_HOOK_HOME (вместо $HOME).
@@ -102,12 +105,22 @@ log() {
 
 # Поле строкой из JSON-объекта на stdin или пусто.
 json_field() {
-    jq -r --arg key "$1" '(.[$key] // empty) | select(type == "string")' <<< "$INPUT"
+    jq -r --arg key "$1" '.[$key] | select(type == "string")' <<< "$INPUT"
+}
+
+# Режим claude-tts из config.json; нет файла, нечитаемый файл или нет поля - direct.
+claude_tts_mode() {
+    jq -r '.mode // "direct"' "$HOME_DIR/.claude-tts/config.json" 2> /dev/null || echo direct
 }
 
 start() {
     # $1 - session_id, $2 - cwd
     command -v claude-tts > /dev/null || fail "claude-tts не найден в PATH"
+
+    if [ "$(claude_tts_mode)" != "queue" ]; then
+        log "режим claude-tts не queue — плеер не участвует, сессия не добавлена"
+        return 0
+    fi
 
     local pid first restarted=0
     pid="$(daemon_pid)"
@@ -151,7 +164,7 @@ mkdir -p "$STATE" || fail "не удалось создать $STATE"
 command -v jq > /dev/null || fail "jq не найден в PATH"
 
 INPUT="$(cat)"
-jq -e 'type == "object"' <<< "$INPUT" > /dev/null 2>&1 || fail "stdin не JSON-объект"
+jq -s -e 'length == 1 and (.[0] | type == "object")' <<< "$INPUT" > /dev/null 2>&1 || fail "stdin не один JSON-объект"
 SESSION_ID="$(json_field session_id)"
 [ -n "$SESSION_ID" ] || fail "в JSON нет session_id"
 
