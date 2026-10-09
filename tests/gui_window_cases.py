@@ -274,6 +274,47 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual([("select_session", SESSIONS[1].id), ("select_session", SESSIONS[0].id)],
                          self.player.calls)
 
+    def focused_session(self) -> int | None:
+        row = self.window.session_list.get_focus_child()
+        return None if row is None else row.get_index()
+
+    def test_session_rebuild_keeps_focus_on_active_row(self) -> None:
+        w = self.window
+        w.show_all()
+        flush()
+        w.session_list.get_row_at_index(0).grab_focus()
+        flush()
+        self.assertEqual(0, self.focused_session())
+        # Enter по второй строке: активной стала она, строки перестроились
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
+                                 sessions=SESSIONS, active=SESSIONS[1].id))
+        flush()
+        self.assertEqual(1, self.focused_session())
+
+    def test_session_rebuild_without_active_keeps_same_index(self) -> None:
+        w = self.window
+        w.show_all()
+        flush()
+        w.session_list.get_row_at_index(1).grab_focus()
+        flush()
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
+                                 sessions=SESSIONS[:1]))
+        flush()
+        self.assertEqual(0, self.focused_session())
+
+    def test_no_sessions_hides_list_and_disables_buttons(self) -> None:
+        w = self.window
+        container = w.session_list.get_parent()
+        self.assertTrue(container.get_visible())
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0))
+        self.assertEqual([], w.session_list.get_children())
+        self.assertFalse(container.get_visible())
+        self.assertFalse(w.clear_button.get_sensitive())
+        self.assertFalse(w.end_session_button.get_sensitive())
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
+                                 sessions=SESSIONS, active=SESSIONS[0].id))
+        self.assertTrue(container.get_visible())
+
     def test_session_list_rebuilds_only_on_change(self) -> None:
         w = self.window
         row = w.session_list.get_row_at_index(0)
@@ -508,8 +549,9 @@ class SettingsScreenTest(unittest.TestCase):
 
     def test_icon_buttons_without_text_first_in_one_row(self) -> None:
         w = self.window
+        clear_tooltip = "Очистить сообщения активной сессии"
         for button, icon, tooltip in ((w.settings_button, "emblem-system-symbolic", "Настройки"),
-                                      (w.clear_button, "user-trash-symbolic", "Очистить сообщения активной сессии")):
+                                      (w.clear_button, "user-trash-symbolic", clear_tooltip)):
             self.assertFalse(button.get_label(), tooltip)
             self.assertEqual(icon, icon_name(button))
             self.assertEqual(tooltip, button.get_tooltip_text())

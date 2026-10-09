@@ -95,7 +95,8 @@ class PlayerWindow(Gtk.Window):
     "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить сообщения
     активной сессии», «Завершить активную сессию» (оба активны, пока есть активная сессия) и
     «Озвучить свой текст», справа выключатель автовоспроизведения; список сессий (клик выбирает
-    сессию, активная жирная); список сообщений; ползунок позиции; ряд со временем слева и prev / play-pause / next справа.
+    сессию, активная жирная); список сообщений; ползунок позиции; ряд со временем слева и
+    prev / play-pause / next справа.
     "settings": хвост очереди и приглушение (PlayerSettings), голос и скорость claude-tts
     (DaemonSettings); «Сохранить» пишет их и остаётся на экране, итог — в блоке внизу; стрелка
     назад возвращает без записи. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
@@ -136,8 +137,8 @@ class PlayerWindow(Gtk.Window):
         self.prev_button = self._button(PREV_LABEL, player.prev)
         self.play_pause_button = self._button("", self._toggle_main)
         self.next_button = self._button(NEXT_LABEL, player.next)
-        self.clear_button = self._icon_button("user-trash-symbolic", "Очистить сообщения активной сессии",
-                                              player.clear)
+        self.clear_button = self._icon_button(
+            "user-trash-symbolic", "Очистить сообщения активной сессии", player.clear)
         self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
                                                  self._open_settings)
         self.end_session_button = self._icon_button(
@@ -455,19 +456,27 @@ class PlayerWindow(Gtk.Window):
         self._player.select_session(self._shown_sessions[row.get_index()].id)
 
     def _end_active_session(self) -> None:
-        if self._active_session is not None:
-            self._player.remove_session(self._active_session)
+        # без активной сессии кнопка неактивна; состояние и клик идут в одном потоке Gtk
+        self._player.remove_session(self._active_session)
 
     def _show_session_rows(self, items: list[SessionRow]) -> None:
-        """Как _show_rows: перестройка только при изменении строк."""
+        """Как _show_rows: перестройка только при изменении строк, фокус клавиатуры сохраняется;
+        без сессий контейнер скрыт, чтобы не оставлять зазор."""
         if items == self._shown_session_rows:
             return
         self._shown_session_rows = items
+        focused = self.session_list.get_focus_child()
+        focused_index = None if focused is None else focused.get_index()
         for child in self.session_list.get_children():
             self.session_list.remove(child)
         for item in items:
             self.session_list.add(self._session_row(item))
         self.session_list.show_all()
+        self.session_list.get_parent().set_visible(bool(items))
+        if focused_index is not None and items:
+            active = [index for index, item in enumerate(items) if item.active]
+            index = active[0] if active else min(focused_index, len(items) - 1)
+            self.session_list.get_row_at_index(index).grab_focus()
 
     @staticmethod
     def _session_row(item: SessionRow) -> Gtk.Box:
