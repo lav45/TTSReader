@@ -562,17 +562,36 @@ class PlayerButtonsTest(PlayerCase):
         self.assertFalse(bb.heard)
         self.assertTrue(all(s.path.exists() for s in bb.sentences))
 
-    def test_play_message_from_each_status_plays_it_from_start(self) -> None:
-        for prepare in (lambda: None, self.player.toggle_pause, self.player.toggle_play_stop):
-            with self.subTest(prepare=getattr(prepare, "__name__", "playing")):
-                self.setUp()
-                self.start_with(A0, A1, B0)
-                prepare()
-                self.player.play_message(self.player._queue.messages[1])
-                self.assertEqual(("playing", "bb", 0.0), (self.state().status, self.token(),
-                                                          self.player._position))
-                self.assertEqual((B0, 0.0), self.playback.starts[-1])
-                self.assertTrue(self.states)
+    def click_second_message(self, before: str) -> None:
+        """Клик по второму сообщению из статуса before (playing / paused / stopped)."""
+        self.assertEqual(before, self.state().status)
+        self.player.play_message(self.player._queue.messages[1])
+        self.assertEqual(("playing", "bb", 0.0), (self.state().status, self.token(),
+                                                  self.player._position))
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
+
+    def test_play_message_while_playing_plays_it_from_start(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.click_second_message("playing")
+
+    def test_play_message_while_paused_plays_it_from_start(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.player.toggle_pause()
+        self.click_second_message("paused")
+
+    def test_play_message_while_stopped_plays_it_from_start(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.player.toggle_play_stop()
+        self.click_second_message("stopped")
+
+    def test_play_message_heard_plays_it_from_start(self) -> None:
+        self.start_with(A0, B0)
+        self.player.next()
+        self.assertTrue(self.state().messages[0].heard)
+        self.playback.at = 0.3
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
 
     def test_play_message_marks_left_complete_heard_and_growing_not(self) -> None:
         self.start_with(A0, A1, B0)
@@ -607,8 +626,11 @@ class PlayerButtonsTest(PlayerCase):
         self.arrive(B0)
         self.player._status = "idle"
         self.player._current = None
+        started = len(self.playback.starts)
         self.player.play_message(self.player._queue.messages[0])
         self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual(started + 1, len(self.playback.starts))
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_next_on_last_does_nothing(self) -> None:
         self.start_with(A0, B0)
