@@ -8,6 +8,7 @@
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from gi.repository import GLib
@@ -37,7 +38,9 @@ class Voicing:
         env = {**os.environ, "CLAUDE_CODE_SESSION_ID": session}
         try:
             process = subprocess.Popen(
-                [str(self._hook), "off"], env=env, start_new_session=True
+                [str(self._hook), "off"], env=env, start_new_session=True,
+                # спека (7): stdout и stderr хука — в stderr плеера
+                stdin=subprocess.DEVNULL, stdout=sys.stderr,
             )
         except OSError as error:
             log.warning("не удалось запустить хук %s: %s", self._hook, error)

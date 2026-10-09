@@ -12,6 +12,7 @@ from gi.repository import Gdk, GLib, Gtk, Pango, XApp  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings, SettingsError, Voice  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
+from tts_player.voicing import Voicing  # noqa: E402
 from tts_player.view import (MessageRow, current_title, next_enabled, pause_enabled,  # noqa: E402
                              pause_label, play_stop_label, position_label, prev_enabled, rows)
 
@@ -24,9 +25,9 @@ class PlayerWindow(Gtk.Window):
 
     "main": кнопки prev / pause / play|stop / next, ползунок позиции, список сообщений,
     внизу слева значки «Очистить буфер», «Настройки» и «Выключить озвучку» (активен, пока
-    озвучка включена; состояние читается при показе окна и на тике таймера). "settings": голос и скорость
-    claude-tts через DaemonSettings; «Сохранить» пишет их и возвращает на главный экран,
-    стрелка назад возвращает без записи.
+    озвучка включена; состояние читается при показе окна и на тике таймера). "settings":
+    голос и скорость claude-tts через DaemonSettings; «Сохранить» пишет их и возвращает
+    на главный экран, стрелка назад возвращает без записи.
 
     Обновляется по player.on_change и, пока окно видно, таймером REFRESH_MS — позиция
     играющего файла сама on_change не вызывает. Закрытие прячет окно в трей.
@@ -35,7 +36,7 @@ class PlayerWindow(Gtk.Window):
     SPEED_STEP = 0.1
     SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
 
-    def __init__(self, player, settings: DaemonSettings, voicing) -> None:
+    def __init__(self, player, settings: DaemonSettings, voicing: Voicing) -> None:
         super().__init__(title="TTS Player")
         self._player = player
         self._settings = settings
@@ -67,7 +68,7 @@ class PlayerWindow(Gtk.Window):
         self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
                                                  self._open_settings)
         self.voicing_off_button = self._icon_button(
-            "system-shutdown-symbolic", "Выключить озвучку (/tts-off)", voicing.turn_off)
+            "system-shutdown-symbolic", "Выключить озвучку (/tts-off)", self._turn_voicing_off)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         for button in (self.prev_button, self.pause_button, self.play_stop_button,
@@ -313,6 +314,11 @@ class PlayerWindow(Gtk.Window):
         self._show_state(self._player.state())
         self._show_voicing()
         return GLib.SOURCE_CONTINUE
+
+    def _turn_voicing_off(self) -> None:
+        self._voicing.turn_off()
+        # гасим сразу: двойной клик не запускает второй хук; если флаг остался, тик вернёт кнопку
+        self.voicing_off_button.set_sensitive(False)
 
     def _show_voicing(self) -> None:
         """Флаг озвучки читается с диска, поэтому не на каждое событие плеера, а на показ и тик."""

@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         run(player, loop.run, loop.quit)
     else:
         settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
-        voicing = Voicing(Path(args.tts_flag), Path(args.tts_off_hook).expanduser())
+        voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
         run_gui(player, settings, voicing, args.show)
     return 0
 

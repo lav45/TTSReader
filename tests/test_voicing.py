@@ -1,4 +1,5 @@
 """Voicing (tts_player.voicing): флаг озвучки и запуск хука /tts-off на временных файлах."""
+import os
 import tempfile
 import time
 import unittest
@@ -22,10 +23,11 @@ class VoicingTest(unittest.TestCase):
         self.pid = self.dir / "pid.txt"
         self.done = self.dir / "done.txt"
 
-    def write_hook(self, sleep: str = "0", code: int = 0) -> None:
+    def write_hook(self, sleep: str = "0", code: int = 0, body: str = "") -> None:
         self.hook.write_text(
             "#!/bin/bash\n"
             f"echo $$ > {self.pid}\n"
+            f"{body}"
             f"printf '%s|%s' \"$1\" \"$CLAUDE_CODE_SESSION_ID\" > {self.out}\n"
             f"sleep {sleep}\n"
             f"touch {self.done}\n"
@@ -74,6 +76,24 @@ class VoicingTest(unittest.TestCase):
         self.assertFalse(self.done.exists())
         self.wait_exit()
         self.assertTrue(self.done.exists())
+
+    def test_turn_off_sends_hook_stdout_to_player_stderr(self) -> None:
+        """Спека (7): stdout и stderr хука идут в stderr плеера; stdin закрыт (DEVNULL)."""
+        stdin_dump = self.dir / "stdin.txt"
+        self.write_hook(body=f"echo to-stdout\ncat > {stdin_dump}\n")
+        self.flag.write_text(SESSION)
+        captured = self.dir / "stderr.txt"
+        saved = os.dup(2)
+        with captured.open("wb") as sink:
+            os.dup2(sink.fileno(), 2)
+            try:
+                Voicing(self.flag, self.hook).turn_off()
+                self.wait_exit()
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+        self.assertIn("to-stdout", captured.read_text())
+        self.assertEqual("", stdin_dump.read_text())
 
     def test_turn_off_without_flag_skips_hook(self) -> None:
         self.write_hook()

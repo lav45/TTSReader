@@ -176,6 +176,21 @@ class PlayerWindowTest(unittest.TestCase):
         self.window.voicing_off_button.clicked()
         self.assertEqual(1, self.voicing.turn_off_calls)
 
+    def test_voicing_off_button_insensitive_right_after_click(self) -> None:
+        """Двойной клик не запускает второй хук: кнопка гаснет сразу, не дожидаясь тика."""
+        self.voicing.on = True
+        self.window._refresh()
+        button = self.window.voicing_off_button
+        button.clicked()
+        self.assertFalse(button.get_sensitive())
+        self.window._refresh()  # флаг остался: следующий тик возвращает кнопку
+        self.assertTrue(button.get_sensitive())
+
+    def test_voicing_off_button_sensitive_at_construction_when_on(self) -> None:
+        window = PlayerWindow(self.player, self.settings, FakeVoicing(on=True))
+        self.addCleanup(window.destroy)
+        self.assertTrue(window.voicing_off_button.get_sensitive())
+
     def test_row_activation_plays_that_message(self) -> None:
         w = self.window
         self.assertTrue(w.message_list.get_activate_on_single_click())
