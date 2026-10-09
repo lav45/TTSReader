@@ -20,7 +20,7 @@ from tts_player.hook_tasks import HookTasks  # noqa: E402
 from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
-from tts_player.queue import MessageQueue  # noqa: E402
+from tts_player.queue import MessageQueue, TaskOrder  # noqa: E402
 from tts_player.saved_messages import SavedMessages  # noqa: E402
 from tts_player.sessions import Sessions  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
@@ -108,7 +108,8 @@ class Player:
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
-        self._queue = MessageQueue(defaults.tail)
+        self._task_order = TaskOrder()  # общий порядок задач демона для очередей
+        self._queue = MessageQueue(defaults.tail, self._task_order)
         self._playback = Playback(audio_sink)
         self._playback.on_finished = self._on_finished
         self._playback.on_error = self._on_error
