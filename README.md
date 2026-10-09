@@ -146,7 +146,8 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
 
 Что делает `SessionEnd`: он срабатывает и на `/clear`, и на интерактивном `/resume`; сессию снимает
 любую, активную тоже (звук останавливается, её тексты и файлы удаляются) - как «Завершить» в окне.
-Возобновлённая сессия возвращается в список своим `SessionStart`.
+Возобновлённая сессия возвращается в список своим `SessionStart`. На `/clear` хук зовёт
+`session clear`: открытая сессия передаётся новой из того же каталога.
 
 Откат: закрыть плеер; в `~/Programs/TTSReader` на master вернуть коммит до слияния
 (`git reset --hard <коммит до слияния>` или `git revert -m 1 <коммит слияния>`): прежнего
@@ -170,11 +171,14 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
   поэтому играет только сессия, оставшаяся открытой с прошлого запуска с окном;
 - `tts-player session add UUID CWD`, `session remove UUID` - добавить сессию в список плеера и убрать
   из него (см. «Список сессий»);
+- `tts-player session clear UUID CWD` - убрать сессию после `/clear`; если она была открытой, открытой станет
+  новая сессия из того же каталога (см. «Список сессий»);
 - `tts-player session has UUID` - спросить, в списке ли сессия запущенного плеера (см.
   «Список сессий»): выход 0 - да, 1 - нет; вывода нет; неверные аргументы - usage в stderr, выход 2;
 - `tts-player-hook start | end` - вход хука `SessionStart` | `SessionEnd`: JSON хука приходит на stdin.
   `start` поднимает демон и плеер, если их нет, и зовёт `tts-player session add UUID CWD`; `end` зовёт
-  `tts-player session remove UUID`. Вывода в stdout нет, статус - в `$XDG_RUNTIME_DIR/tts-player/hook.log`,
+  `tts-player session remove UUID`; при `reason` = `clear` (`/clear`) `end` зовёт
+  `tts-player session clear UUID CWD` (без `cwd` - ошибка, выход 1). Вывода в stdout нет, статус - в `$XDG_RUNTIME_DIR/tts-player/hook.log`,
   ошибка - в stderr с выходом 1;
 - меню трея «Выход» - закрыть плеер.
 
@@ -198,7 +202,14 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
 в `$XDG_RUNTIME_DIR/tts-player/control/` (файл `<ns>.json`, пишется атомарно), плеер забирает его, меняет
 список и пишет в журнал `session add UUID` / `session remove UUID` (только при настоящем изменении).
 Проект в списке - последний компонент `CWD`; новая сессия добавляется закрытой (`active` не меняется,
-открывает её пользователь в окне). Сообщение в stdout, выход 0:
+открывает её пользователь в окне).
+
+`tts-player session clear UUID CWD` - запрос хука `SessionEnd` с `reason` = `clear`: сессия `UUID` убирается
+как у `remove`, а если она была открытой (активной), открытой станет следующая новая сессия из того же
+каталога `CWD` (её `SessionStart` приходит сразу за `SessionEnd`). Выход, `/resume` и «Завершить» открытую
+сессию новой не передают. Если каталог за время сессии менялся (`cwd` в `SessionEnd` отличается от
+каталога, с которым сессия добавлена), замены нет - новую сессию открывает щелчок в окне. Сообщения и
+выходы те же, что у `remove`. Сообщение в stdout, выход 0:
 
 - «сессия передана плееру» (`add`) / «сессия передана плееру на удаление» (`remove`) - запрос записан,
   плеер запущен;

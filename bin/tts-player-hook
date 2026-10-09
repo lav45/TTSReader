@@ -10,7 +10,7 @@
 # Вызов (JSON хука приходит на stdin; любые другие аргументы - usage, код 1, ничего не
 # запускается и stdin не читается):
 #   tts-player-hook start   - хук SessionStart: {"session_id": ..., "cwd": ..., ...}
-#   tts-player-hook end     - хук SessionEnd:   {"session_id": ..., ...}
+#   tts-player-hook end     - хук SessionEnd:   {"session_id": ..., "reason": ..., "cwd": ..., ...}
 #
 # start. Гейт режима: в ~/.claude-tts/config.json поле mode не queue (нет файла, нечитаемый
 # файл или нет поля - считается direct, как у прежней обёртки tts-toggle.sh) -> одна строка в
@@ -26,7 +26,10 @@
 # player.log); уже запущен (проба player.lock без записи) -> не трогать. Хук не ждёт плеер.
 # Затем tts-player session add <session_id> <cwd>: сессия попадает в список плеера.
 #
-# end. Только tts-player session remove <session_id>: claude-tts не нужен, демон и плеер
+# end. reason == "clear" (/clear: SessionEnd старой сессии идёт раньше SessionStart новой) ->
+# tts-player session clear <session_id> <cwd>: если сессия активна, активной станет новая
+# сессия из того же каталога; иначе (любой другой reason или его нет: выход, /resume,
+# logout) -> tts-player session remove <session_id>. claude-tts не нужен, демон и плеер
 # не запускаются.
 #
 # stdout хука пуст всегда: строки состояния (демон, плеер, вывод session add|remove,
@@ -35,7 +38,8 @@
 #
 # Код 0; 1 - stdin не один JSON-объект, нет session_id (у start и cwd) непустой строкой, нет
 # claude-tts (start) или tts-player в PATH, нет XDG_RUNTIME_DIR, неверные аргументы
-# (сообщение в stderr), session add|remove вернул не 0.
+# (сообщение в stderr), session add|remove|clear вернул не 0;
+# у end с reason clear нет cwd непустой строкой.
 # Только для тестов: TTS_HOOK_PROC (вместо /proc), TTS_HOOK_HOME (вместо $HOME).
 
 set -u
@@ -156,7 +160,12 @@ start() {
 }
 
 end() {
-    # $1 - session_id
+    # $1 - session_id, $2 - reason, $3 - cwd
+    if [ "$2" = "clear" ]; then
+        [ -n "$3" ] || fail "в JSON нет cwd (reason clear)"
+        tts-player session clear "$1" "$3" < /dev/null >> "$LOG" 2>&1 || fail "session clear не выполнен, см. $LOG"
+        return 0
+    fi
     tts-player session remove "$1" < /dev/null >> "$LOG" 2>&1 || fail "session remove не выполнен, см. $LOG"
 }
 
@@ -173,5 +182,5 @@ if [ "$MODE" = "start" ]; then
     [ -n "$CWD" ] || fail "в JSON нет cwd"
     start "$SESSION_ID" "$CWD"
 else
-    end "$SESSION_ID"
+    end "$SESSION_ID" "$(json_field reason)" "$(json_field cwd)"
 fi
