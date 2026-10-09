@@ -535,7 +535,9 @@ class Player:
         у какого-то сообщения уже есть предложение с той же меткой прохода."""
         sentence = self._claim_unknown(sentence)
         queue = next((q for q in self._queues.values() if q.owns(sentence.task_id)), self._queue)
-        queue.add(sentence)
+        current = self._current
+        playing_it = current is not None and sentence.task_id in current.task_ids
+        queue.add(sentence, sounded=self._sentence if playing_it else None)
         if queue is not self._queue:
             if self._waiting() and self._next_sentence() is None:
                 self._message_end()
