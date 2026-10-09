@@ -124,14 +124,17 @@ save:  tail вне 1–20 или не int → SettingsError, файл не тр�
 
 ```
 Queue.tail: int                       # был TAIL = 5; задаётся снаружи, по умолчанию 5
-  Queue.start(message): начатое входит в хвост; если начатых больше tail —
-                        удаляется одно самое старое (не больше одного за start)
+  Queue.start(message): начатое входит в хвост; если начатых больше tail — их число
+                        за один start уменьшается не больше чем на одно (сокращение
+                        хвоста идёт по одному); вытесняются самые старые
 PlayerState.autoplay: bool
 Player.apply_prefs(prefs: Prefs) -> None     # queue.tail = prefs.tail; autoplay = prefs.autoplay; on_change
 Player.toggle_play_pause() -> None
   playing           → paused, позиция запомнена
   paused            → playing с запомненной позиции
   stopped / idle, есть текущее → playing с курсора; курсор ≥ длины → с 0
+  stopped / idle, текущее доиграно (прослушано, курсор ≥ длины) и есть следующее
+                    по порядку → следующее с 0; нет следующего → текущее с 0
   нет текущего      → первое непрослушанное с 0; нет его → ничего
 autoplay = False:
   конец сообщения   → текущее прослушано, статус stopped; следующее по порядку → текущее, позиция 0
@@ -151,7 +154,7 @@ __main__: --settings-file FILE (по умолчанию PlayerSettings.default_p
 - [ ] autoplay включён — прежнее поведение (существующие тесты автоперехода проходят)
 - [ ] e2e: процесс плеера с `--settings-file` во временном каталоге, где `autoplay: false`, — после первого сообщения нет строки `playing`; e2e-подпроцессы получают временный `XDG_CONFIG_HOME`
 
-**Verify:** `python3 -m unittest tests.test_queue tests.test_player tests.test_player_e2e -v` → `OK`
+**Verify:** `python3 -m unittest discover -s tests` → `OK`
 
 **Steps:**
 

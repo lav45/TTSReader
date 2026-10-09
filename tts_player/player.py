@@ -122,8 +122,10 @@ class Player:
 
     def toggle_play_pause(self) -> None:
         """Кнопка play/pause: playing — пауза с запомненной позицией; paused — с неё дальше;
-        stopped и idle — текущее с курсора (курсор в конце — с начала); без текущего —
-        первое непрослушанное с начала, нет его — ничего."""
+        stopped и idle — текущее с курсора (курсор в конце — с начала), но доигранное
+        текущее (прослушано, курсор в конце) уступает следующему по порядку, пришедшему
+        после конца, — оно с начала; без текущего — первое непрослушанное с начала, нет
+        его — ничего."""
         if self._status == "playing":
             self._position = self._now()
             self._halt()
@@ -132,12 +134,23 @@ class Player:
             self._status = "playing"
             self._play_at(self._position)
         elif self._current is not None:
-            self._resume()
+            following = self._following_finished()
+            if following is None:
+                self._resume()
+            else:
+                self._begin(following)
         else:
             message = self._queue.first_unheard()
             if message is not None:
                 self._begin(message)
         self._changed()
+
+    def _following_finished(self) -> Message | None:
+        """Следующее по порядку за доигранным текущим (прослушано, курсор в конце); иначе None."""
+        current = self._current
+        if not current.heard or self._position < self._queue.length(current):
+            return None
+        return self._queue.following(current)
 
     def _resume(self) -> None:
         """Текущее с курсора после stop или конца; курсор в конце — с начала. Текущее,

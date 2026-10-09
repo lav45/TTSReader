@@ -919,6 +919,43 @@ class PlayerPrefsTest(PlayerCase):
         self.assertTrue(state.current.heard)
         self.assertEqual([A0, A1], self.playback.played)
 
+    def end_last_manually(self) -> None:
+        """Без автовоспроизведения доиграно последнее сообщение aa: stopped в его конце."""
+        self.manual()
+        self.start_with(A0, A1)
+        self.player.toggle_play_pause()
+        self.finish()
+        self.finish()
+        self.player._on_entry(self.joined())
+
+    def test_play_pause_after_last_ended_plays_message_arrived_since(self) -> None:
+        self.end_last_manually()
+        self.arrive(B0)
+        self.assertEqual(("stopped", "aa"), (self.state().status, self.token()))
+        self.player.toggle_play_pause()
+        state = self.state()
+        self.assertEqual(("playing", "bb", 0.0), (state.status, self.token(), state.position_s))
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
+
+    def test_play_pause_after_last_ended_without_new_replays_it(self) -> None:
+        self.end_last_manually()
+        self.player.toggle_play_pause()
+        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+
+    def test_play_pause_in_idle_after_end_plays_message_arrived_since(self) -> None:
+        """autoplay выключили после конца (idle): новое не играет само, play/pause — играет."""
+        self.start_with(A0, A1)
+        self.finish()
+        self.finish()
+        self.player._on_entry(self.joined())
+        self.manual()
+        self.arrive(B0)
+        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        self.player.toggle_play_pause()
+        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
+
     def test_manual_new_message_in_idle_only_appears_in_list(self) -> None:
         self.manual()
         self.player.start()
