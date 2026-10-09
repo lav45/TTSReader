@@ -119,13 +119,13 @@ class MessageQueue:
 
     def owns(self, task_id: str) -> bool:
         """Задача — одного из живых сообщений очереди."""
-        return self._find(task_id) is not None
+        return self.message_of(task_id) is not None
 
     def add(self, sentence: Sentence) -> None:
         """Добавляет предложение в сообщение его задачи. Задача чужая (нет сообщения:
         unknown, прошлый запуск, вытесненное или очищенное) — файл удалён, WARNING; сообщение
         прослушано — файл удалён."""
-        message = self._find(sentence.task_id)
+        message = self.message_of(sentence.task_id)
         if message is None:
             log.warning("чужое предложение %s (задача %s), удаляю", sentence.path.name,
                         sentence.task_id)
@@ -260,7 +260,7 @@ class MessageQueue:
         while len(self._started) > self.tail:
             self._drop(self._started.pop(0))
 
-    def _find(self, task_id: str) -> Message | None:
+    def message_of(self, task_id: str) -> Message | None:
         return next((m for m in self._messages if task_id in m.task_ids), None)
 
     def _drop(self, message: Message) -> None:
