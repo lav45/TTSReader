@@ -1,6 +1,6 @@
 # TTS Player — текст сообщений и кэш озвучки
 
-**Статус:** в работе (обсуждение), карта не собрана.
+**Статус:** карта согласована 2026-10-09, следующий шаг — план.
 
 ## Задача
 
@@ -51,18 +51,77 @@
 
 ## Цепочка
 
-Не согласована.
+Согласована 2026-10-09.
+
+```
+Stop/PostToolUse-хук Claude Code → tts-gate.sh
+  └─ claude-tts speak --from-hook  с HOME=$XDG_RUNTIME_DIR/tts-player/hook-home
+       │ (11) задача хука в hook-home/.claude-tts/queue/
+       ▼
+TTS Player: хранит текст сообщения; решает — новое сообщение или переозвучка устаревшего кэша
+       │ (12) задача демону в ~/.claude-tts/queue/ — пишет только плеер
+       ▼
+демон claude-tts → paplay = обёртка daemon-bin/paplay
+       │ (13) файл в inbox/ с id задачи из ~/.claude-tts/playback.json
+       ▼
+плеер: id задачи → сообщение → кэш → игра
+```
+
+Кэш сообщения невалиден, если его `persona` или `speed` не совпадают с текущими (активная
+персона и её `speed` в `~/.claude-tts/config.json`).
 
 ## Контракты
 
-Не согласованы.
+Нумерация продолжает спеки плеера и экрана настроек ((1)–(10)).
+
+### (11) Хук → плеер: задача хука
+
+Пишущая сторона — `claude-tts speak --from-hook` (не меняется), запущенный гейтом с подменённым
+HOME; читающая — плеер.
+
+```
+hook-home = $XDG_RUNTIME_DIR/tts-player/hook-home        создаёт и чистит плеер при старте
+  .claude-tts/config.json   → символьная ссылка на ~/.claude-tts/config.json
+  .claude-tts/sessions.d    → символьная ссылка на ~/.claude-tts/sessions.d
+  .claude-tts/daemon.heartbeat   пишет плеер: unix-время, раз в 10 с, пока жив настоящий демон
+                                 (свежий ~/.claude-tts/daemon.heartbeat ≤ 30 с или живой PID
+                                 из ~/.claude-tts/daemon.pid); демон не жив → файл удаляется
+  .claude-tts/queue/<ts>_<id>.json   пишет хук (сначала .tmp, затем rename)
+гейт tts-gate.sh: при совпадении сессии — HOME=<hook-home> exec <скрипт хука>
+                  (speak-response.sh, speak-intermediate.sh; voice-context.sh — без подмены)
+задача (формат claude-tts 9.20.1, audio.py:670):
+  {"id","timestamp","session_id","project","text","persona","speed","speed_method",
+   "voice_kokoro","voice_kokoro_blend","voice_sherpa","speaker_sherpa","voice_mlx",
+   "speaker_mlx","lang_mlx","pitch_filter"}
+плеер: забирает *.json (не *.tmp) по порядку имени, сохраняет сообщение (текст и поля задачи),
+       удаляет файл; не JSON / нет text → файл удалён, строка в stderr
+```
+
+### (12) Плеер → демон: задача демону
+
+```
+~/.claude-tts/queue/<time:.6f>_<id>.json     пишет только плеер; .tmp + rename
+поля — как в (11); id — новый id плеера (16 hex); timestamp — время записи
+новое сообщение: поля задачи хука как есть, id заменён
+переозвучка: text сообщения; persona = active_persona; speed, speed_method и voice_*/speaker_*
+             — из этой персоны в config.json; session_id и project — сообщения
+одна задача на сообщение за раз; ответ демона — файлы по (13)
+```
+
+### (13) Обёртка paplay → плеер: файл с id задачи
+
+```
+daemon-bin/paplay <опции> <wav>
+  id = current_message.id из ~/.claude-tts/playback.json; нет файла / поля / не JSON → "unknown"
+  inbox/<recv_ns>_<id>_<basename(wav)>       атомарно: .<имя>.part, затем mv (как сейчас)
+  сбой → stderr и logger -t tts-player-paplay (как сейчас)
+плеер: id → сообщение, для которого задача поставлена; "unknown" или чужой id →
+       файл удалён, строка в stderr
+```
 
 ## Открытые вопросы
 
-- Как текст ответа Claude попадает в плеер, если в очередь пишет только плеер. Хук
-  `claude-tts speak --from-hook` сам пишет в `~/.claude-tts/queue/` и делает это только при
-  живом демоне (`audio.py:731`, `daemon_healthy()`). Пути: свой Stop-хук (повторить фильтр и
-  выбор персоны `speak --from-hook`), перехват записи хука (каталог очереди хука ≠ каталогу
-  демона) или иное — решить.
-- Как плеер отличает переозвучку от нового сообщения, когда звук возвращается через обёртку
-  `paplay` (метка в задаче очереди, например в `session_id` или `project`).
+- Склейка: демон по-прежнему пишет цельный файл сообщения и строку в `speech_history`; связь
+  строки с id задачи не проверена — нужна ли склейка, если плеер знает границы сообщения по id.
+- Срез «сессии» (черновик `2026-10-09-tts-player-sessions-design.md`) строится на том же входе:
+  сессия задачи хука известна плееру (11).
