@@ -64,7 +64,7 @@ daemon_first_path() {
                 return 0
                 ;;
         esac
-    done < "$PROC/$1/environ"
+    done < "$PROC/$1/environ" 2> /dev/null
 }
 
 on() {
@@ -75,7 +75,11 @@ on() {
     pid="$(daemon_pid)"
     if [ -z "$pid" ]; then
         PATH="$DAEMON_BIN:$PATH" claude-tts daemon start < /dev/null > /dev/null 2>&1
-        echo "демон запущен"
+        if [ -n "$(daemon_pid)" ]; then
+            echo "демон запущен"
+        else
+            echo "демон не запустился, см. ~/.claude-tts/daemon.log"
+        fi
     else
         first="$(daemon_first_path "$pid")"
         if [ "$first" = "$DAEMON_BIN" ]; then

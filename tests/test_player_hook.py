@@ -32,15 +32,23 @@ class PlayerHookTest(unittest.TestCase):
         self.stubs.mkdir()
         self.records = self.root / "records"
         self.records.mkdir()
-        self.stub("claude-tts")
+        self.stub("claude-tts", starts_daemon=True)
         self.stub("tts-player")
 
-    def stub(self, name):
+    def stub(self, name, starts_daemon=False):
+        """Заглушка; starts_daemon: «daemon start» оставляет PID-файл и фальшивый /proc."""
         path = self.stubs / name
-        path.write_text(
+        body = (
             "#!/bin/bash\n"
             f'echo "$*" > "{self.records}/{name}.args"\n'
             f'echo "$PATH" > "{self.records}/{name}.path"\n')
+        if starts_daemon:
+            body += (
+                f'if [ "$*" = "daemon start" ]; then\n'
+                f'  echo {PID} > "{self.home}/.claude-tts/daemon.pid"\n'
+                f'  mkdir -p "{self.proc}/{PID}"\n'
+                "fi\n")
+        path.write_text(body)
         path.chmod(0o755)
 
     def daemon(self, path_value, alive=True):
@@ -76,6 +84,13 @@ class PlayerHookTest(unittest.TestCase):
         self.assertEqual(self.record("claude-tts", "args"), "daemon start")
         self.assertTrue(self.record("claude-tts", "path").startswith(DAEMON_BIN + ":"))
         self.assertIn("демон запущен", result.stdout)
+
+    def test_failed_start_reports_it(self):
+        self.stub("claude-tts")
+        result = self.run_hook("on")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("демон не запустился", result.stdout)
+        self.assertNotIn("демон запущен", result.stdout)
 
     def test_dead_pid_counts_as_absent(self):
         self.daemon("/x", alive=False)
