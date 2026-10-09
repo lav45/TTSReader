@@ -142,7 +142,7 @@ class PlayerWindow(Gtk.Window):
         self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
                                                  self._open_settings)
         self.end_session_button = self._icon_button(
-            "system-shutdown-symbolic", "Завершить активную сессию (/tts-off)",
+            "system-shutdown-symbolic", "Завершить активную сессию",
             self._end_active_session)
         self.text_button = self._icon_button("document-edit-symbolic", "Озвучить свой текст",
                                              self._open_text)
