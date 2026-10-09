@@ -1673,15 +1673,16 @@ class PlayerRevoiceTest(PlayerCase):
         self.assertEqual(("playing", "ff"), (self.state().status, self.task()))
 
     def test_silent_message_is_skipped_by_autoplay_and_voiced_on_user_play(self) -> None:
-        """Задача A не дала звука, первое предложение B пришло в idle: автозапуск не ставит
-        A в демон заново — A прослушано, играет B; play пользователя на A переозвучивает."""
+        """Задача A не дала звука, первое предложение B пришло в idle: играет само B, автозапуск
+        через A не идёт и в демон её заново не ставит (A не прослушано); play пользователя на A
+        переозвучивает."""
         self.player.start()
         self.announce("aa")
         self.announce("bb")
         self.daemon.ids.append("ee")
         self.arrive(B0)
         a, b = self.state().messages
-        self.assertEqual((["text aa", "text bb"], b, [B0], True),
+        self.assertEqual((["text aa", "text bb"], b, [B0], False),
                          ([p["text"] for p in self.daemon.puts], self.state().current,
                           self.playback.played, a.heard))
         self.player.prev()
@@ -1849,6 +1850,42 @@ class PlayerSessionsTest(PlayerCase):
                          (b1.task_ids, b1.deferred, b1.sent, self.state().status))
         self.deliver(self.B1)
         self.assertEqual([A0, self.B1], self.playback.played)
+
+    def play_last_deferred_to_end(self) -> tuple[Message, Message]:
+        """B копила ответы закрытой (b1, b2 отложены); папка открыта, клик по последнему b2,
+        b2 озвучено и доиграло до конца (склейка другой длины — конец без неё)."""
+        self.player.start()
+        self.hook("b1", "B")
+        self.hook("b2", "B")
+        self.player.select_session("B")
+        b1, b2 = self.messages("B")
+        self.player.play_message(b2)
+        self.daemon.ids.append("b2")
+        self.player.toggle_play_pause()
+        self.deliver(self.B2)
+        self.finish()
+        path = self.history_dir / "tts-2000000000.000-B.wav"
+        write_wav(path, 3.0)
+        self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "B", "proj", 3.0))
+        return b1, b2
+
+    def test_end_of_last_waits_and_does_not_go_back_to_earlier_unheard(self) -> None:
+        b1, b2 = self.play_last_deferred_to_end()
+        state = self.state()
+        self.assertEqual(("idle", b2), (state.status, state.current))
+        self.assertEqual([self.B2], self.playback.played)
+        self.assertEqual([self.voiced("b2", "B")], self.daemon.puts)
+        self.assertEqual((False, True), (b1.heard, b1.deferred))
+
+    def test_new_message_after_end_plays_itself_not_earlier_unheard(self) -> None:
+        b1, _ = self.play_last_deferred_to_end()
+        self.daemon.ids.append("b3")
+        self.hook("b3", "B")
+        b3 = self.messages("B")[2]
+        self.deliver("1000000000000000013_b3_tts_queue_B_b3_s0.wav")
+        self.assertEqual(("playing", b3), (self.state().status, self.state().current))
+        self.assertEqual("1000000000000000013_b3_tts_queue_B_b3_s0.wav", self.playback.played[-1])
+        self.assertEqual((False, True), (b1.heard, b1.deferred))
 
     def test_autoplay_transition_to_deferred_sends_it_and_waits(self) -> None:
         self.player.start()

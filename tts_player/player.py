@@ -54,7 +54,9 @@ class Player:
 
     Играется файл queue.locate(current, позиция); доигравший файл сменяется следующим
     предложением сообщения. Сообщение кончилось и завершено (queue.is_complete) —
-    прослушано, дальше следующее или первое непрослушанное; не завершено — статус
+    прослушано, дальше следующее по порядку; за последним — idle, и первое предложение нового
+    сообщения начинает само это сообщение, а не более ранние непрослушанные (накопленные в
+    закрытой папке, отложенные): автопереход идёт только вперёд; не завершено — статус
     playing без звука, пока не придёт предложение. На паузе и после stop автоперехода нет.
     Открытая (активная) сессия играет подряд — выключателя автовоспроизведения нет; пока
     звучит свой текст (hold), плеер сам ничего не начинает: конец сообщения — stopped на
@@ -486,8 +488,8 @@ class Player:
             if self._waiting() and self._next_sentence() is None:
                 self._message_end()
         elif self._status == "idle" and self._starts_by_itself():
-            message = self._queue.first_unheard()
-            if message is not None:
+            message = self._queue.message_of(sentence.task_id)
+            if message is not None and not message.heard:
                 self._begin(message, requested=False)
         elif self._waiting():
             following = self._next_sentence()
@@ -579,7 +581,7 @@ class Player:
         if not self._starts_by_itself():
             self._stop_after(current)
             return
-        upcoming = self._queue.following(current) or self._queue.first_unheard()
+        upcoming = self._queue.following(current)
         if upcoming is None:
             self._status = "idle"
             return
