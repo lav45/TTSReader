@@ -123,21 +123,40 @@ class PlayerWindow(Gtk.Window):
                 label.get_style_context().add_class(Gtk.STYLE_CLASS_DIM_LABEL)
         return line
 
+    @property
+    def refreshing(self) -> bool:
+        """Таймер обновления позиции запущен (окно видно)."""
+        return self._refresh_id != 0
+
     def _on_scale_press(self, _scale, _event) -> bool:
         self._dragging = True
+        self._drag_value = None
         return False
 
-    def _on_scale_release(self, scale, _event) -> bool:
-        self._dragging = False
-        self._drag_value: float | None = None  # change-value за перетаскивание; None — не двигали
-        self._player.seek(scale.get_value())
+    def _on_scale_release(self, _scale, _event) -> bool:
+        """seek — только если ползунок двигали: щелчок на месте не перематывает."""
+        value = self._drag_value
+        self._end_drag()
+        if value is not None:
+            self._player.seek(value)
         return False
 
     def _on_scale_change(self, _scale, _scroll, value: float) -> bool:
         """Пользователь сдвинул ползунок; при перетаскивании seek — по отпусканию."""
-        if not self._dragging:
+        if self._dragging:
+            self._drag_value = value
+        else:
             self._player.seek(value)
         return False
+
+    def _on_scale_grab_broken(self, _scale, _event) -> bool:
+        """Отпускание кнопки не придёт: перетаскивание отменено, ползунок снова за состоянием."""
+        self._end_drag()
+        return False
+
+    def _end_drag(self) -> None:
+        self._dragging = False
+        self._drag_value = None
 
     def _on_delete(self, _window, _event) -> bool:
         self.hide()
