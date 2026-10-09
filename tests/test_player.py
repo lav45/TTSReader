@@ -620,9 +620,14 @@ class PlayerCursorTest(PlayerCase):
         self.assertEqual([A0, B0], self.playback.played)
 
     def test_tail_keeps_five_started_messages(self) -> None:
+        """Сообщения приходят, пока играет первое (фокус): копятся; next по ним вытесняет
+        самое старое начатое сверх хвоста."""
         names = [f"100000000000000000{i}_{t}_tts_queue_S_{t}_s0.wav"
                  for i, t in enumerate(["a1", "a2", "a3", "a4", "a5", "a6"], start=1)]
-        self.start_with(*names)
+        self.start_with(names[0])
+        for name in names[1:]:
+            self.arrive(name)
+        self.assertEqual(6, len(self.state().messages))
         for _ in range(5):
             self.player.next()
         self.assertEqual(["a2", "a3", "a4", "a5", "a6"], [self.task_of(m) for m in self.state().messages])
@@ -890,10 +895,9 @@ class PlayerPrefsTest(PlayerCase):
     def tasks(self) -> list[str]:
         return [self.task_of(m) for m in self.state().messages]
 
-    def manual(self, tail: int = 5) -> None:
+    def manual(self) -> None:
         """Плеер сам ничего не начинает — так он ведёт себя, пока звучит свой текст (hold);
         задачи хука при этом уходят в демон, как без удержания."""
-        self.player.apply_prefs(Prefs(tail=tail))
         self.player._starts_by_itself = lambda: False
 
     def test_tail_is_5_by_default(self) -> None:
@@ -945,12 +949,21 @@ class PlayerPrefsTest(PlayerCase):
         self.assertEqual("playing", self.state().status)
         self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
 
-    def test_play_pause_without_current_plays_first_unheard(self) -> None:
+    def test_play_pause_without_current_plays_last_message(self) -> None:
         self.manual()
         self.start_with(A0, B0)
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
-        self.assertEqual([(A0, 0.0)], self.playback.starts)
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
+        self.assertEqual([(B0, 0.0)], self.playback.starts)
+
+    def test_play_pause_without_current_plays_last_even_if_heard(self) -> None:
+        """Последнее прослушано, раньше есть непрослушанное: играет всё равно последнее."""
+        self.manual()
+        self.start_with(A0, B0)
+        self.player._queue.mark_heard(self.state().messages[-1])
+        self.player.toggle_play_pause()
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
+        self.assertEqual([(B0, 0.0)], self.playback.starts)
 
     def test_play_pause_without_messages_does_nothing(self) -> None:
         self.player.start()
@@ -958,10 +971,18 @@ class PlayerPrefsTest(PlayerCase):
         self.assertEqual(("idle", None), (self.state().status, self.state().current))
         self.assertEqual([], self.playback.starts)
 
+    def play_first(self, tail: int | None = None) -> None:
+        """Клик по первому сообщению и play/pause (без текущего play/pause играл бы последнее).
+        tail — после клика: с фокусом очередь не режется, по нему — только хвост начатых."""
+        self.player.play_message(self.state().messages[0])
+        if tail is not None:
+            self.player.apply_prefs(Prefs(tail=tail))
+        self.player.toggle_play_pause()
+
     def test_manual_end_of_message_stops_on_following_at_start(self) -> None:
         self.manual()
         self.start_with(A0, B0)
-        self.player.toggle_play_pause()
+        self.play_first()
         self.finish()
         state = self.state()
         self.assertEqual(("stopped", "bb", 0.0), (state.status, self.task(), state.position_s))
@@ -1061,9 +1082,9 @@ class PlayerPrefsTest(PlayerCase):
 
     def stop_on_bb_manually(self, tail: int = 5) -> None:
         """Без автовоспроизведения доиграно aa: текущее — bb, не начатое (stopped на 0)."""
-        self.manual(tail)
+        self.manual()
         self.start_with(A0, B0, C0)
-        self.player.toggle_play_pause()
+        self.play_first(tail)
         self.finish()
         self.assertEqual(("stopped", "bb"), (self.state().status, self.task()))
 
@@ -1120,20 +1141,20 @@ class PlayerPrefsTest(PlayerCase):
         self.assertEqual([], self.playback.played)
 
     def test_manual_play_of_following_enters_tail(self) -> None:
-        self.manual(tail=1)
+        self.manual()
         self.start_with(A0, B0)
-        self.player.toggle_play_pause()
+        self.play_first(tail=1)
         self.finish()
         self.assertEqual(["aa", "bb"], self.tasks())
         self.player.toggle_play_pause()
         self.assertEqual(["bb"], self.tasks())
 
-    def test_play_pause_in_silence_plays_first_unheard(self) -> None:
+    def test_play_pause_in_silence_plays_last_message(self) -> None:
         self.manual()
-        self.start_with(A0, B0)
+        self.start_with(A0, B0, C0)
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
-        self.assertEqual([(A0, 0.0)], self.playback.starts)
+        self.assertEqual(("playing", "cc"), (self.state().status, self.task()))
+        self.assertEqual([(C0, 0.0)], self.playback.starts)
 
     def test_on_change_after_play_pause(self) -> None:
         self.start_with(A0, B0)
@@ -1826,7 +1847,7 @@ class PlayerSessionsTest(PlayerCase):
         self.assertEqual(["text c1"], [m.text for m in player._queues["C"].messages])
         self.assertEqual([], list(control_dir.iterdir()))
 
-    def test_select_stops_without_focus_then_play_voices_first_unheard_deferred(self) -> None:
+    def test_select_stops_without_focus_then_play_voices_last_deferred(self) -> None:
         self.player.start()
         self.arrive(A0)
         self.hook("b1", "B")
@@ -1841,15 +1862,15 @@ class PlayerSessionsTest(PlayerCase):
                           state.position_s, state.messages))
         self.assertFalse(self.player._queue.is_started(b1))
         self.assertEqual("B", json.loads((self.runtime / "sessions.json").read_text())["active"])
-        self.daemon.ids.append("b1")
+        self.daemon.ids.append("b2")
         with self.assertLogs("tts_player.player", "INFO") as logs:
             self.player.toggle_play_pause()
         self.assertIn("voice deferred B: p 1.0", [r.getMessage() for r in logs.records])
-        self.assertEqual(self.voiced("b1", "B"), self.daemon.puts[-1])
-        self.assertEqual(({"b1"}, False, True, "playing"),
-                         (b1.task_ids, b1.deferred, b1.sent, self.state().status))
-        self.deliver(self.B1)
-        self.assertEqual([A0, self.B1], self.playback.played)
+        self.assertEqual(self.voiced("b2", "B"), self.daemon.puts[-1])
+        self.assertEqual(({"b2"}, False, True, "playing", True),
+                         (b2.task_ids, b2.deferred, b2.sent, self.state().status, b1.deferred))
+        self.deliver(self.B2)
+        self.assertEqual([A0, self.B2], self.playback.played)
 
     def play_last_deferred_to_end(self) -> tuple[Message, Message]:
         """B копила ответы закрытой (b1, b2 отложены); папка открыта, клик по последнему b2,
@@ -2152,6 +2173,102 @@ class PlayerSessionsTest(PlayerCase):
         self.assertFalse(c_file.exists())
         self.assertTrue(self.path(A0).exists())
         self.assertEqual([A0], self.playback.played)
+
+
+    @staticmethod
+    def s_name(index: int, task: str) -> str:
+        """Предложение задачи task сессии S, пришедшее после A0…C0."""
+        return f"10000000000000001{index:02d}_{task}_tts_queue_S_{task}_s0.wav"
+
+    def paused_with(self, *tasks: str) -> list[Path]:
+        """S открыта, aa на паузе (фокус); пока стоит, приходят ответы tasks со звуком."""
+        self.start_with(A0)
+        self.player.toggle_play_pause()
+        names = [self.s_name(i, task) for i, task in enumerate(tasks, start=1)]
+        for name in names:
+            self.arrive(name)
+        return [self.path(name) for name in names]
+
+    def texts(self, session: str) -> list[str]:
+        return [m.text for m in self.messages(session)]
+
+    def test_closed_session_keeps_last_tail_answers(self) -> None:
+        """Закрытая B, tail 2, 4 ответа: остаются 2 последних; у озвученного старого удалены
+        файл и текст, у отложенного — текст."""
+        self.player.apply_prefs(Prefs(tail=2))
+        self.player.start()
+        b_file = self.b_playing()
+        self.player.close_session()
+        self.hook("b2", "B")
+        self.assertEqual(["text b1", "text b2"], self.texts("B"))
+        self.hook("b3", "B")
+        self.hook("b4", "B")
+        self.assertEqual(["text b3", "text b4"], self.texts("B"))
+        self.assertFalse(b_file.exists())
+        self.assertEqual([0, 2], self.state().counts)
+
+    def test_open_session_accumulates_with_focus_and_idle_trims_to_tail(self) -> None:
+        """На паузе ответы сверх tail копятся; доиграли последний — idle, очередь режется до
+        tail, доигранное текущее остаётся; новый ответ в idle режет дальше."""
+        self.player.apply_prefs(Prefs(tail=2))
+        s1, s2, s3 = self.paused_with("e1", "e2", "e3")
+        self.assertEqual(["text aa", "text e1", "text e2", "text e3"], self.texts("S"))
+        self.assertTrue(all(p.exists() for p in (self.path(A0), s1, s2, s3)))
+        last = self.messages("S")[-1]
+        self.player.play_message(last)
+        self.player.toggle_play_pause()
+        self.finish()
+        self.assertEqual(("playing", 4), (self.state().status, len(self.messages("S"))))
+        path = self.history_dir / JOINED
+        write_wav(path, 3.0)  # другая длина: конец без склейки
+        self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "S", "proj", 3.0))
+        self.assertEqual(("idle", last), (self.state().status, self.state().current))
+        self.assertEqual(["text e2", "text e3"], self.texts("S"))
+        self.assertEqual([False, False, True, True],
+                         [p.exists() for p in (self.path(A0), s1, s2, s3)])
+        self.announce("e4")
+        self.assertEqual(["text e3", "text e4"], self.texts("S"))
+        self.assertIs(last, self.state().current)
+
+    def test_switching_folders_trims_left_and_opened_queues(self) -> None:
+        """Ушли из S на паузе — она закрыта, без фокуса: режется. Открытая B (накопленное
+        сверх tail) режется при открытии."""
+        self.player.apply_prefs(Prefs(tail=2))
+        files = self.paused_with("e1", "e2")
+        queue_b = self.player._queues["B"]
+        for task in ("b1", "b2", "b3"):
+            queue_b.append(Message("B", text=f"text {task}", sent=False, deferred=True))
+        self.player.select_session("B")
+        self.assertEqual(["text e1", "text e2"], self.texts("S"))
+        self.assertFalse(self.path(A0).exists())
+        self.assertTrue(all(p.exists() for p in files))
+        self.assertEqual(["text b2", "text b3"], self.texts("B"))
+
+    def test_closing_paused_folder_trims_its_queue(self) -> None:
+        self.player.apply_prefs(Prefs(tail=2))
+        s1, s2, s3 = self.paused_with("e1", "e2", "e3")
+        self.player.close_session()
+        self.assertEqual(["text e2", "text e3"], self.texts("S"))
+        self.assertEqual([False, False, True, True],
+                         [p.exists() for p in (self.path(A0), s1, s2, s3)])
+
+    def test_start_trims_restored_queues_to_tail(self) -> None:
+        """messages.json: у S 7 сообщений при tail 5 — после старта 5 последних."""
+        tasks = [f"e{i}" for i in range(1, 7)]
+        self.paused_with(*tasks)
+        self.assertEqual(7, len(self.messages("S")))
+        self.player.shutdown()
+        self.restart()
+        self.assertEqual([f"text {task}" for task in tasks[1:]], self.texts("S"))
+
+    def test_smaller_tail_trims_unfocused_queues_at_once(self) -> None:
+        """tail 5 → 2: закрытая B режется сразу, S на паузе (фокус) — нет."""
+        self.paused_with("e1", "e2", "e3")
+        for task in ("b1", "b2", "b3"):
+            self.hook(task, "B")
+        self.player.apply_prefs(Prefs(tail=2))
+        self.assertEqual(["text b2", "text b3"], self.texts("B"))
+        self.assertEqual(4, len(self.messages("S")))
 
 
 if __name__ == "__main__":

@@ -165,10 +165,11 @@ class ControlsTest(unittest.TestCase):
     def test_play_pause_enabled_idle_without_messages(self):
         self.assertFalse(play_pause_enabled(state("idle")))
 
-    def test_play_pause_enabled_idle_with_unheard_only(self):
+    def test_play_pause_enabled_idle_with_any_message(self):
+        """Без текущего play/pause играет последнее — прослушанное тоже."""
         heard, unheard = message("a", heard=True), message("b")
         self.assertTrue(play_pause_enabled(state("idle", messages=[heard, unheard])))
-        self.assertFalse(play_pause_enabled(state("idle", messages=[heard])))
+        self.assertTrue(play_pause_enabled(state("idle", messages=[heard])))
 
     def test_prev_next_at_edges(self):
         a, b, c = message("a"), message("b"), message("c")
