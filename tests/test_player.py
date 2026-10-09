@@ -16,7 +16,7 @@ from gi.repository import GLib  # noqa: E402
 
 from tts_player.history import HistoryEntry  # noqa: E402
 from tts_player.inbox import NAME_PATTERN  # noqa: E402
-from tts_player.model import Sentence  # noqa: E402
+from tts_player.model import HookTask, Sentence  # noqa: E402
 from tts_player.player import Player, PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 
@@ -1395,3 +1395,50 @@ class PlayerHoldTest(PlayerCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlayerHookTasksCase(unittest.TestCase):
+    """Задачи хука в Player: хранение хвоста, журнал, забор при start()."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.runtime = Path(tmp.name)
+        self.queue_dir = self.runtime / "hook-queue"
+        self.queue_dir.mkdir()
+        patcher = mock.patch("tts_player.player.Playback", FakePlayback)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        glib = mock.patch("tts_player.player.GLib")
+        glib.start()
+        self.addCleanup(glib.stop)
+
+    def make_task(self, task_id: str, text: str = "abc") -> HookTask:
+        return HookTask(task_id, 1.0, "S", "proj", text, "p", 1.0, {"id": task_id})
+
+    def test_without_dir_has_no_tasks(self) -> None:
+        player = Player(self.runtime, None, None, None)
+        player.start()
+        self.addCleanup(player.shutdown)
+        self.assertEqual([], player.tasks)
+
+    def test_keeps_last_50_in_order(self) -> None:
+        player = Player(self.runtime, None, None, None, hook_tasks_dir=self.queue_dir)
+        for number in range(55):
+            player._on_hook_task(self.make_task(str(number)))
+        self.assertEqual([str(n) for n in range(5, 55)], [t.id for t in player.tasks])
+
+    def test_logs_task_line(self) -> None:
+        player = Player(self.runtime, None, None, None, hook_tasks_dir=self.queue_dir)
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            player._on_hook_task(self.make_task("t1", "четыре"))
+        self.assertEqual(["task t1 S 6 chars"], [r.getMessage() for r in logs.records])
+
+    def test_start_takes_existing_tasks_and_stop_releases(self) -> None:
+        (self.queue_dir / "1.json").write_text(
+            '{"id": "z", "session_id": "S", "text": "xy"}')
+        player = Player(self.runtime, None, None, None, hook_tasks_dir=self.queue_dir)
+        player.start()
+        player.shutdown()
+        self.assertEqual(["z"], [t.id for t in player.tasks])
+        self.assertEqual([], list(self.queue_dir.iterdir()))

@@ -13,7 +13,8 @@ from gi.repository import GLib  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.history import History, HistoryEntry  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
-from tts_player.model import Message, Sentence  # noqa: E402
+from tts_player.hook_tasks import HookTasks  # noqa: E402
+from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.queue import MessageQueue  # noqa: E402
@@ -21,6 +22,9 @@ from tts_player.queue import MessageQueue  # noqa: E402
 log = logging.getLogger("tts_player.player")
 
 Status = Literal["playing", "paused", "stopped", "idle"]
+
+
+HOOK_TASKS_KEPT = 50
 
 
 @dataclass(frozen=True)
@@ -77,8 +81,10 @@ class Player:
     def __init__(self, runtime_dir: Path, audio_sink: str | None,
                  history_dir: Path | None, history_db: Path | None,
                  ducker: Ducker | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at."""
+                 clock: Callable[[], float] = time.monotonic,
+                 hook_tasks_dir: Path | None = None) -> None:
+        """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
+        hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука."""
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
@@ -88,6 +94,10 @@ class Player:
         self._playback.on_error = self._on_error
         self._playback.on_started = self._on_started
         self._inbox = Inbox(runtime_dir, self._on_sentence)
+        self.tasks: list[HookTask] = []  # хвост HOOK_TASKS_KEPT последних, по порядку прихода
+        self._hook_tasks = None
+        if hook_tasks_dir is not None:
+            self._hook_tasks = HookTasks(hook_tasks_dir, self._on_hook_task)
         self._history = None
         if history_dir is not None and history_db is not None:
             self._history = History(history_dir, history_db, self._on_entry)
@@ -149,7 +159,15 @@ class Player:
                 log.warning("история %s недоступна (%s), работаю без склеек",
                             self._history_dir, error)
         self._inbox.start()
+        if self._hook_tasks is not None:
+            self._hook_tasks.start()
         self._changed()
+
+    def _on_hook_task(self, task: HookTask) -> None:
+        """Задача хука забрана: в хвост tasks и строка журнала (её читает e2e)."""
+        self.tasks.append(task)
+        del self.tasks[:-HOOK_TASKS_KEPT]
+        log.info("task %s %s %d chars", task.id, task.session_id, len(task.text))
 
     def shutdown(self) -> None:
         """Выход процесса: громкость чужих потоков — обратно; незаконченное — обратно в
@@ -157,6 +175,8 @@ class Player:
         self._unduck()
         self._stop_watch()
         self._inbox.stop()
+        if self._hook_tasks is not None:
+            self._hook_tasks.stop()
         if self._history is not None:
             self._history.stop()
         position = self._now()

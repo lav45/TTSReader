@@ -42,3 +42,18 @@ class Message:
     project: str | None = None
     duration_s: float | None = None
     heard: bool = False
+
+
+@dataclass(frozen=True)
+class HookTask:
+    """Задача хука claude-tts из hook-home/.claude-tts/queue/ (контракт (11)).
+
+    fields — вся задача как есть: из неё берут остальное (голос, метод скорости и т.д.)."""
+    id: str
+    timestamp: float
+    session_id: str
+    project: str
+    text: str
+    persona: str
+    speed: float
+    fields: dict
