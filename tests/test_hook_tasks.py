@@ -121,6 +121,36 @@ class HookTasksCase(unittest.TestCase):
         for name in broken:
             self.assertIn(name, stderr)
 
+    def test_bad_timestamp_or_speed_gets_default_with_warning(self):
+        for index, bad in enumerate(("abc", None, [1], {"a": 1})):
+            fields = {"id": f"x{index}", "text": "t", "timestamp": bad, "speed": bad}
+            self.write(f"{index}.json", fields)
+        stderr = self.start_quiet()
+        self.assertEqual(4, len(self.got))
+        for task in self.got:
+            self.assertEqual((0.0, 1.0), (task.timestamp, task.speed))
+        self.assertEqual([], list(self.queue_dir.iterdir()))
+        self.assertIn("timestamp", stderr)
+        self.assertIn("speed", stderr)
+
+    def test_start_mkdir_error_is_logged_not_raised(self):
+        blocker = self.queue_dir / "file"
+        blocker.write_text("x")
+        tasks = HookTasks(blocker / "queue", self.got.append)
+        self.addCleanup(tasks.stop)
+        records: list[str] = []
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = Collect()
+        logger = logging.getLogger("tts_player.hook_tasks")
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        tasks.start()
+        self.assertTrue(records)
+
     def test_optional_fields_default(self):
         self.write("1.json", {"id": "x", "text": "t"})
         self.start_quiet()

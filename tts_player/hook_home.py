@@ -40,15 +40,33 @@ class HookHome:
         self.queue_dir = self._base / "queue"
 
     def prepare(self) -> None:
-        """Создаёт каталоги, ссылки на config.json и sessions.d, чистит остатки queue/."""
+        """Создаёт каталоги и ссылки, чистит остатки; каждый шаг в своём try.
+
+        Сбой одного шага (например, настоящий каталог на месте ссылки) не пропускает остальные."""
+        self._step("каталог queue", lambda: self.queue_dir.mkdir(parents=True, exist_ok=True))
+        # sessions.d хук создаёт командой mkdir; на висячей ссылке она не сработает
+        self._step("sessions.d", lambda: (self._tts_root / "sessions.d").mkdir(
+            parents=True, exist_ok=True))
+        for name in LINKED:
+            self._step(f"ссылка {name}", lambda name=name: self._link(
+                self._base / name, self._tts_root / name))
+        self._step("очистка queue", self._clean_queue)
+        self._step("очистка heartbeat", self._clean_heartbeat_tmp)
+
+    def _step(self, what: str, action: Callable[[], object]) -> None:
         try:
-            self.queue_dir.mkdir(parents=True, exist_ok=True)
-            for name in LINKED:
-                self._link(self._base / name, self._tts_root / name)
-            for stale in (*self.queue_dir.glob("*.json"), *self.queue_dir.glob("*.tmp")):
-                stale.unlink(missing_ok=True)
+            action()
         except OSError as e:
-            log.warning("hook-home: не подготовлен %s: %s", self.home, e)
+            log.warning("hook-home: %s (%s): %s", what, self.home, e)
+
+    def _clean_queue(self) -> None:
+        for stale in (*self.queue_dir.glob("*.json"), *self.queue_dir.glob("*.tmp")):
+            stale.unlink(missing_ok=True)
+
+    def _clean_heartbeat_tmp(self) -> None:
+        """Остатки _write_text после падения процесса между mkstemp и replace."""
+        for stale in self._base.glob(HEARTBEAT + ".*.tmp"):
+            stale.unlink(missing_ok=True)
 
     def beat(self) -> bool:
         """Один шаг: True — heartbeat записан, False — удалён (или не записан из-за ошибки)."""
@@ -95,9 +113,7 @@ class HookHome:
         try:
             pid = int((self._tts_root / PID_FILE).read_text().strip())
             os.kill(pid, 0)
-        except PermissionError:
-            return True
-        except (OSError, ValueError, OverflowError):
+        except (OSError, ValueError, OverflowError):  # как daemon_healthy: PermissionError — тоже мёртв
             return False
         return True
 

@@ -3,6 +3,7 @@ import os
 import stat
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from tts_player.hook_home import HookHome
@@ -42,6 +43,35 @@ class HookHomeCase(unittest.TestCase):
         self.hook.prepare()
         self.assertEqual(list(self.hook.queue_dir.iterdir()), [])
         self.assertTrue((self.hook.home / ".claude-tts" / "config.json").is_symlink())
+
+    def test_prepare_real_directory_at_link_name_does_not_stop_the_rest(self):
+        base = self.hook.home / ".claude-tts"
+        (base / "config.json").mkdir(parents=True)
+        self.hook.queue_dir.mkdir(parents=True)
+        (self.hook.queue_dir / "a.json").write_text("{}")
+        with self.assertLogs("tts_player.hook_home", level="WARNING"):
+            self.hook.prepare()
+        self.assertTrue((base / "config.json").is_dir())
+        self.assertFalse((base / "config.json").is_symlink())
+        self.assertEqual(os.readlink(base / "sessions.d"), str(self.root / "sessions.d"))
+        self.assertEqual([], list(self.hook.queue_dir.iterdir()))
+
+    def test_prepare_creates_missing_sessions_dir(self):
+        self.hook.prepare()
+        self.assertTrue((self.root / "sessions.d").is_dir())
+
+    def test_prepare_removes_leftover_heartbeat_tmp(self):
+        base = self.hook.home / ".claude-tts"
+        base.mkdir(parents=True)
+        (base / "daemon.heartbeat.abc.tmp").write_text("1")
+        self.hook.prepare()
+        self.assertEqual([], list(base.glob("daemon.heartbeat.*.tmp")))
+
+    def test_pid_permission_error_is_dead(self):
+        self.hook.prepare()
+        (self.root / "daemon.pid").write_text("1")
+        with unittest.mock.patch("os.kill", side_effect=PermissionError):
+            self.assertFalse(self.hook.beat())
 
     def test_beat_fresh_real_heartbeat(self):
         self.hook.prepare()

@@ -2,8 +2,8 @@
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import gi
 
@@ -23,7 +23,7 @@ class HookTasks:
     Берутся *.json без точки в начале; *.tmp хук ещё пишет, а его rename в .json приходит
     как RENAMED. Разобранный файл удаляется после on_task (упавший on_task не оставляет
     файл: иначе его подобрал бы следующий запуск повторно); битый (не JSON, не объект,
-    нет строковых id и text) удаляется со строкой в журнал (stderr).
+    нет строковых id и text; негодные timestamp и speed — значения по умолчанию) удаляется со строкой в журнал (stderr).
     """
 
     def __init__(self, queue_dir: Path, on_task: Callable[[HookTask], None]) -> None:
@@ -32,7 +32,11 @@ class HookTasks:
         self._monitor: Gio.FileMonitor | None = None
 
     def start(self) -> None:
-        self._queue_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._queue_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            log.warning("hook-tasks: каталог %s не создан: %s", self._queue_dir, error)
+            return
         # Сначала монитор, потом скан: файл между ними не потеряется,
         # а повторный забор того же имени пропускается.
         monitor = Gio.File.new_for_path(str(self._queue_dir)).monitor_directory(
@@ -102,15 +106,22 @@ class HookTasks:
         if not isinstance(task_id, str) or not isinstance(text, str):
             log.warning("hook-tasks: в %s нет строковых id и text, удаляю", name)
             return None
-        try:
-            timestamp = float(fields.get("timestamp", 0.0))
-            speed = float(fields.get("speed", 1.0))
-        except (TypeError, ValueError):
-            log.warning("hook-tasks: в %s timestamp или speed не число, удаляю", name)
-            return None
+        timestamp = HookTasks._number(name, fields, "timestamp", 0.0)
+        speed = HookTasks._number(name, fields, "speed", 1.0)
         return HookTask(task_id, timestamp, str(fields.get("session_id", "")),
                         str(fields.get("project", "")), text,
                         str(fields.get("persona", "")), speed, fields)
+
+    @staticmethod
+    def _number(name: str, fields: dict, key: str, default: float) -> float:
+        """Число из поля; отсутствует — default молча, не число — default с предупреждением."""
+        if key not in fields:
+            return default
+        try:
+            return float(fields[key])
+        except (TypeError, ValueError):
+            log.warning("hook-tasks: в %s %s не число, беру %s", name, key, default)
+            return default
 
     @staticmethod
     def _remove(path: Path) -> None:

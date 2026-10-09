@@ -500,7 +500,7 @@ class SingleInstanceTest(PlayerProcessCase):
         claude_tts.mkdir()
         (claude_tts / "daemon.heartbeat").write_text(str(time.time()))
         self.start_player()
-        hook_base = self.runtime / "hook-home" / ".claude-tts"
+        hook_base = self.runtime / "tts-player" / "hook-home" / ".claude-tts"
         queue_dir = hook_base / "queue"
         deadline = time.monotonic() + WAIT
         while not queue_dir.is_dir():
@@ -511,6 +511,7 @@ class SingleInstanceTest(PlayerProcessCase):
         tmp.rename(queue_dir / "1.json")
         self.assertEqual("task abc sess 6 chars", self.next_line("task "))
         self.assertFalse((queue_dir / "1.json").exists())
+        self.assertFalse((self.runtime / "hook-home").exists())
         while not (hook_base / "daemon.heartbeat").exists():
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)

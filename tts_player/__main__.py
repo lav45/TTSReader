@@ -99,22 +99,25 @@ def main(argv: list[str] | None = None) -> int:
                     Path(runtime) / "tts-player" / "duck-orphans.json")
     ducker.recover()  # остаток после падения — до первого duck в player.start()
     # подменённый HOME хука: его queue/ плеер забирает, heartbeat держит HookHome
-    hook_home = HookHome(Path(runtime), Path("~/.claude-tts").expanduser())
+    hook_home = HookHome(Path(runtime) / "tts-player", Path("~/.claude-tts").expanduser())
     hook_home.start()  # до player.start(): к первой задаче хука hook-home уже готов
-    player = Player(Path(runtime), args.audio_sink,
-                    Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
-                    ducker, hook_tasks_dir=hook_home.queue_dir)
-    prefs = PlayerSettings(Path(args.settings_file).expanduser())
-    player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
-    if args.no_gui:
-        loop = GLib.MainLoop()
-        run(player, loop.run, loop.quit, hook_home=hook_home)
-    else:
-        settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
-        voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
-        text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
-                                   SYNTH_WORKER, player, args.audio_sink)
-        run_gui(player, settings, prefs, voicing, text_speaker, args.show, hook_home)
+    try:
+        player = Player(Path(runtime), args.audio_sink,
+                        Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
+                        ducker, hook_tasks_dir=hook_home.queue_dir)
+        prefs = PlayerSettings(Path(args.settings_file).expanduser())
+        player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
+        if args.no_gui:
+            loop = GLib.MainLoop()
+            run(player, loop.run, loop.quit, hook_home=hook_home)
+        else:
+            settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
+            voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
+            text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
+                                       SYNTH_WORKER, player, args.audio_sink)
+            run_gui(player, settings, prefs, voicing, text_speaker, args.show, hook_home)
+    finally:
+        hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
     return 0
 
 
