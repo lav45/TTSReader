@@ -254,7 +254,7 @@ class DaemonSettingsTest(unittest.TestCase):
                 path.unlink()  # демон удалил сессию между нашим чтением и записью
             return real_mkstemp(*args, **kwargs)
 
-        with mock.patch("tts_player.daemon_settings.tempfile.mkstemp", delete_then_mkstemp):
+        with mock.patch("tts_player.atomic_json.tempfile.mkstemp", delete_then_mkstemp):
             self.settings.save("ru-denis", 1.3)
         self.assertEqual([], list(self.sessions.iterdir()))
         self.assertEqual(self.read_config()["active_persona"], "ru-denis")

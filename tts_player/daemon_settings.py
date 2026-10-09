@@ -5,7 +5,6 @@
 """
 import json
 import logging
-import tempfile  # noqa: F401  тесты патчат tts_player.daemon_settings.tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
