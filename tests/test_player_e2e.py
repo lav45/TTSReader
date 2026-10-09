@@ -46,7 +46,10 @@ class PlayerProcessCase(unittest.TestCase):
 
     drop() кладёт предложение, как демон: первое предложение нового token — сначала задача
     хука в hook-home (hook_task), id задачи демона — из файла, который плеер записал в
-    .claude-tts/queue; его ставит task() перед обёрткой."""
+    .claude-tts/queue; его ставит task() перед обёрткой. Сессию задачи hook_task до первой
+    её задачи регистрирует запросом add в control/ (register), как `/tts-on`: задачи сессии
+    не из списка плеер удаляет. Первая зарегистрированная сессия активна — в демон уходят
+    только её задачи, поэтому тесты с задачами в демон держат одну сессию."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -82,6 +85,7 @@ class PlayerProcessCase(unittest.TestCase):
         self.daemon_queue.mkdir(parents=True)
         self.hook_queue = self.runtime / "tts-player" / "hook-home" / ".claude-tts" / "queue"
         self.task_ids: dict[str, str] = {}  # token предложений → id задачи демона
+        self.registered: set[str] = set()  # сессии, для которых положен запрос add
         self.hook_id = ""  # id последней задачи хука из hook_task()
 
     def env(self) -> dict[str, str]:
@@ -158,10 +162,24 @@ class PlayerProcessCase(unittest.TestCase):
         (claude_tts / "playback.json").write_text(json.dumps({"current_message": {
             "id": task_id, "source": "tts-player", "session_id": "s", "project": "p"}}))
 
+    def register(self, session: str) -> None:
+        """Запрос `session add` в control/, как его пишет CLI (.tmp, затем rename): плеер
+        забирает его до задачи хука, запущен он или ещё нет."""
+        control = self.runtime / "tts-player" / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        name = f"{time.time_ns()}"
+        tmp = control / f"{name}.tmp"
+        tmp.write_text(json.dumps({"op": "add", "session": session, "cwd": "/w/proj"}))
+        tmp.rename(control / f"{name}.json")
+        self.registered.add(session)
+
     def hook_task(self, session: str, text: str) -> dict:
         """Задача хука в hook-home (как claude-tts: .tmp, затем rename); возвращает задачу,
-        которую плеер записал в очередь демона. Стартующий плеер чистит queue/ (HookHome
-        prepare) — задача, пропавшая без задачи демона, пишется заново."""
+        которую плеер записал в очередь демона. Сессия не зарегистрирована — сначала register.
+        Стартующий плеер чистит queue/ (HookHome prepare) — задача, пропавшая без задачи
+        демона, пишется заново."""
+        if session not in self.registered:
+            self.register(session)
         hook_id = self.hook_id = uuid.uuid4().hex[:16]
         task = {"id": hook_id, "timestamp": time.time(), "session_id": session,
                 "project": "/w/proj", "text": text, "persona": "p", "speed": 1.0}
@@ -471,13 +489,14 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(kept, sorted(p.name for p in self.store.iterdir()))
 
     def test_lock_is_free_after_exit_and_new_start_passes(self) -> None:
+        session = uuid.uuid4().hex
         self.start_player()
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=3.0))
+        self.drop(self.sentence(session, "aaaaaa", 0, seconds=3.0))
         self.played(1)
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
         self.start_player()
-        self.drop(self.sentence(uuid.uuid4().hex, "bbbbbb", 0))
+        self.drop(self.sentence(session, "bbbbbb", 0))
         names = self.played(2)  # недоигранное aaaaaa сохранено при выходе и играет снова
         self.assertTrue(names[0].endswith("aaaaaa_s0.wav") and names[1].endswith("bbbbbb_s0.wav"))
 
@@ -592,6 +611,7 @@ class SingleInstanceTest(PlayerProcessCase):
         while not queue_dir.is_dir():
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)
+        self.register("sess")
         tmp = queue_dir / "1.tmp"
         tmp.write_text(json.dumps({"id": "abc", "session_id": "sess", "text": "Привет"}))
         tmp.rename(queue_dir / "1.json")
@@ -603,6 +623,104 @@ class SingleInstanceTest(PlayerProcessCase):
         while not (hook_base / "daemon.heartbeat").exists():
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)
+
+    def add_session(self, session: str) -> None:
+        """`session add` через настоящий CLI; ждёт строку плеера, что сессия в списке."""
+        self.assertEqual(0, self.run_bin("session", "add", session, "/w/proj").returncode)
+        self.next_line(f"session add {session}")
+
+    def put_hook_task(self, session: str) -> str:
+        """Задача хука в hook-home без ожидания задачи демона (отложенную и удалённую она не
+        рождает); возвращает id задачи хука."""
+        hook_id = uuid.uuid4().hex[:16]
+        task = {"id": hook_id, "timestamp": time.time(), "session_id": session,
+                "project": "/w/proj", "text": f"text {hook_id}", "persona": "p", "speed": 1.0}
+        deadline = time.monotonic() + WAIT
+        while not self.hook_queue.is_dir():
+            self.assertLess(time.monotonic(), deadline, "нет очереди hook-home")
+            time.sleep(0.02)
+        tmp = self.hook_queue / f"{hook_id}.tmp"
+        tmp.write_text(json.dumps(task))
+        tmp.rename(self.hook_queue / f"{hook_id}.json")
+        return hook_id
+
+    def daemon_tasks(self) -> set[Path]:
+        return set(self.daemon_queue.glob("*.json"))
+
+    def test_deferred_task_of_inactive_session_does_not_reach_daemon(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.add_session("sessa")
+        self.add_session("sessb")
+        self.assertEqual("sessa", self.sessions_file()["active"])
+        before = self.daemon_tasks()
+        hook_id = self.put_hook_task("sessb")
+        self.assertEqual(f"task {hook_id} sessb deferred", self.next_line(f"task {hook_id} sessb d"))
+        self.assertEqual(before, self.daemon_tasks())
+        task = self.hook_task("sessa", "Привет")
+        self.assertEqual("sessa", task["session_id"])
+        self.assertEqual(1, len(self.daemon_tasks() - before))
+
+    def test_task_of_session_not_in_list_is_dropped(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.add_session("sessa")
+        before = self.daemon_tasks()
+        hook_id = self.put_hook_task("ghost")
+        self.assertEqual(f"task {hook_id} ghost dropped: not in list",
+                         self.next_line(f"task {hook_id} ghost"))
+        self.assertEqual(before, self.daemon_tasks())
+        self.assertFalse((self.hook_queue / f"{hook_id}.json").exists())
+
+    def test_restart_keeps_messages_per_session_and_deferred_is_not_sent(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.add_session("sessa")
+        self.add_session("sessb")
+        self.drop(self.sentence("sessa", "aaaaaa", 0, seconds=3.0))
+        self.drop(self.sentence("sessa", "aaaaaa", 1))
+        self.drop(self.sentence("sessa", "cccccc", 0))
+        self.played(1)
+        hook_id = self.put_hook_task("sessb")
+        self.next_line(f"task {hook_id} sessb deferred")
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        self.assertEqual([("sessa", False), ("sessa", False), ("sessb", True)],
+                         self.saved_messages())
+        sent = self.daemon_tasks()
+        self.lines = queue.Queue()
+        self.start_player()
+        names = self.played(3)  # автовоспроизведение: непрослушанное sessa; sessb молчит
+        self.assertTrue(all("_sessa_" in name for name in names), names)
+        self.assert_quiet()
+        self.assertEqual(sent, self.daemon_tasks())
+        self.proc.send_signal(signal.SIGTERM)  # отложенное sessb восстановлено — снова в снимке
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        self.assertEqual([("sessa", False), ("sessa", False), ("sessb", True)],
+                         self.saved_messages())
+
+    def saved_messages(self) -> list[tuple[str, bool]]:
+        """(сессия, deferred) сообщений messages.json по порядку."""
+        saved = json.loads((self.runtime / "tts-player" / "messages.json").read_text())
+        return [(m["session_id"], m["deferred"]) for m in saved["messages"]]
+
+    def test_session_remove_deletes_its_message_files(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.add_session("sessb")  # первая — активная: её сообщения получают файлы
+        self.add_session("sessa")
+        self.drop(self.sentence("sessb", "bbbbbb", 0, seconds=3.0))
+        self.drop(self.sentence("sessb", "bbbbbb", 1))
+        self.played(1)
+        self.assertTrue(any("_sessb_" in p.name for p in self.store.iterdir()))
+        self.assertEqual(0, self.run_bin("session", "remove", "sessb").returncode)
+        self.next_line("session remove sessb")
+        deadline = time.monotonic() + WAIT
+        while any("_sessb_" in p.name for p in self.store.iterdir()):
+            self.assertLess(time.monotonic(), deadline, "файлы sessb остались в store/")
+            time.sleep(0.05)
+        self.assertEqual({"active": None, "sessions": [{"id": "sessa", "project": "proj"}]},
+                         self.sessions_file())  # убранная активная — активной не остаётся
 
     def test_tray_conflicts(self) -> None:
         for extra in ("--show", "--no-gui"):

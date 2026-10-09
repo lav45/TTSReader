@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from tts_player.model import Message, Sentence
-from tts_player.queue import MessageQueue, QueueSnapshot
+from tts_player.queue import MessageQueue, QueueSnapshot, TaskOrder
 
 
 class MessageQueueTest(unittest.TestCase):
@@ -13,7 +13,7 @@ class MessageQueueTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
-        self.queue = MessageQueue(tail=5)
+        self.queue = MessageQueue(tail=5, order=TaskOrder())
 
     def message(self, task="t1", session="s1"):
         """Сообщение задачи хука, отправленное демону с id task."""
@@ -422,7 +422,7 @@ class SnapshotTest(unittest.TestCase):
         self.message("t2")
         self.add(2, task="t3")
         snapshot = self.queue.release()
-        queue = MessageQueue(tail=5)
+        queue = MessageQueue(tail=5, order=TaskOrder())
         queue.restore(snapshot)
         first, second, third = queue.messages
         self.assertEqual([True, True, False], [queue.is_complete(m) for m in queue.messages])
@@ -440,7 +440,7 @@ class SnapshotTest(unittest.TestCase):
     def test_restore_goes_before_messages_already_queued(self):
         self.add(1, task="t1")
         snapshot = self.queue.release()
-        queue = MessageQueue(tail=5)
+        queue = MessageQueue(tail=5, order=TaskOrder())
         newer = Message("s1")
         queue.append(newer)
         queue.link(newer, "t9")
@@ -452,7 +452,7 @@ class SnapshotTest(unittest.TestCase):
         for message in self.queue.messages:
             self.queue.start(message)
         snapshot = self.queue.release()
-        queue = MessageQueue(tail=2)
+        queue = MessageQueue(tail=2, order=TaskOrder())
         queue.restore(snapshot)
         self.assertEqual(["t2", "t3"], [queue.task_of(m) for m in queue.messages])
         self.assertFalse(sentences[0].path.exists())
@@ -465,7 +465,7 @@ class SnapshotTest(unittest.TestCase):
         self.queue.clear()
         snapshot = self.queue.release()
         self.assertEqual(({}, 2), (snapshot.task_order, snapshot.delivered))
-        queue = MessageQueue(tail=5)
+        queue = MessageQueue(tail=5, order=TaskOrder())
         queue.restore(snapshot)
         fresh = Message("s1")
         queue.append(fresh)
@@ -511,6 +511,71 @@ class SnapshotTest(unittest.TestCase):
     def test_empty_snapshot_restores_nothing(self):
         self.queue.restore(QueueSnapshot([], [], {}, 0))
         self.assertEqual([], self.queue.messages)
+
+
+class SharedTaskOrderTest(unittest.TestCase):
+    """Очереди сессий делят один порядок задач демона: он синтезирует их по одной."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.order = TaskOrder()
+        self.queue_a = MessageQueue(tail=5, order=self.order)
+        self.queue_b = MessageQueue(tail=5, order=self.order)
+
+    def message(self, queue, task, session):
+        message = Message(session)
+        queue.append(message)
+        queue.link(message, task)
+        return message
+
+    def offer(self, queue, task, session):
+        path = self.dir / f"{task}.wav"
+        path.write_bytes(b"wav")
+        queue.add(Sentence(1, task, session, "aa", 0, path))
+
+    def test_offer_of_later_task_in_other_queue_completes_earlier_message(self):
+        a = self.message(self.queue_a, "a", "sa")
+        b = self.message(self.queue_b, "b", "sb")
+        self.offer(self.queue_a, "a", "sa")
+        self.assertFalse(self.queue_a.is_complete(a))
+        self.offer(self.queue_b, "b", "sb")
+        self.assertTrue(self.queue_a.is_complete(a))
+        self.assertFalse(self.queue_b.is_complete(b))
+
+    def test_offer_of_earlier_task_does_not_complete_later_message(self):
+        self.message(self.queue_a, "a", "sa")
+        b = self.message(self.queue_b, "b", "sb")
+        self.offer(self.queue_a, "a", "sa")
+        self.assertFalse(self.queue_b.is_complete(b))
+
+    def test_owns_answers_for_tasks_of_live_messages(self):
+        self.message(self.queue_a, "a", "sa")
+        self.message(self.queue_b, "b", "sb")
+        self.assertTrue(self.queue_a.owns("a"))
+        self.assertFalse(self.queue_a.owns("b"))
+        self.queue_a.clear()
+        self.assertFalse(self.queue_a.owns("a"))
+
+    def test_restore_of_two_snapshots_puts_new_task_after_all(self):
+        self.message(self.queue_a, "a", "sa")
+        self.message(self.queue_b, "b", "sb")
+        self.offer(self.queue_a, "a", "sa")
+        self.offer(self.queue_b, "b", "sb")
+        snapshots = [self.queue_a.release(), self.queue_b.release()]
+        order = TaskOrder()
+        queue_a = MessageQueue(tail=5, order=order)
+        queue_b = MessageQueue(tail=5, order=order)
+        queue_a.restore(snapshots[0])
+        queue_b.restore(snapshots[1])
+        fresh = self.message(queue_a, "c", "sa")
+        self.offer(queue_a, "c", "sa")
+        self.assertFalse(queue_a.is_complete(fresh))
+        self.assertTrue(queue_a.is_complete(queue_a.messages[0]))
+        self.assertGreater(order.order("c"), order.order("a"))
+        self.assertGreater(order.order("c"), order.order("b"))
+        self.assertTrue(queue_b.is_complete(queue_b.messages[0]))
 
 
 if __name__ == "__main__":

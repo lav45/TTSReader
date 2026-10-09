@@ -23,13 +23,13 @@ from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.player import Player, PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
-from tts_player.sessions import Sessions  # noqa: E402
+from tts_player.sessions import Session, Sessions  # noqa: E402
 
 # <recv_ns>_<id задачи демона>_<имя WAV демона>; id задачи = token, кроме N0
 A0 = "1000000000000000001_aa_tts_queue_S_aa_s0.wav"
 A1 = "1000000000000000002_aa_tts_queue_S_aa_s1.wav"
 B0 = "1000000000000000003_bb_tts_queue_S_bb_s0.wav"
-N0 = "1000000000000000004_dd_tts_queue_N_cc_s0.wav"  # другая сессия: склейка S её не берёт
+N0 = "2000000000000000004_dd_tts_queue_S_dd_s0.wav"  # пришло после склейки: склейка S его не берёт
 C0 = "1000000000000000005_cc_tts_queue_S_cc_s0.wav"
 JOINED = "tts-2000000000.000-S.wav"
 RATE = 1000
@@ -159,6 +159,7 @@ class PlayerCase(unittest.TestCase):
         self.player = Player(self.runtime, None, history_dir, self.runtime / "handy_analysis.db",
                              sessions=Sessions(self.runtime / "sessions.json"),
                              daemon_queue=self.daemon, daemon_settings=self.settings)
+        self.player.add_session("S", "/w/proj")  # сессия задач хука тестов, активная
         self.playback: FakePlayback = self.player._playback
         self.states: list[PlayerState] = []
         self.player.on_change = self.states.append
@@ -221,10 +222,12 @@ class PlayerCase(unittest.TestCase):
         return self.runtime / "tts-player" / "messages.json"
 
     def restart(self) -> None:
-        """Новый процесс плеера в том же $XDG_RUNTIME_DIR (после shutdown прежнего)."""
+        """Новый процесс плеера в том же $XDG_RUNTIME_DIR (после shutdown прежнего); сессии
+        прошлого запуска — из sessions.json, как в __main__."""
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()
         self.player = Player(self.runtime, None, self.history_dir,
-                             self.runtime / "handy_analysis.db",
-                             sessions=Sessions(self.runtime / "sessions.json"),
+                             self.runtime / "handy_analysis.db", sessions=sessions,
                              daemon_queue=self.daemon, daemon_settings=self.settings)
         self.playback = self.player._playback
         self.player.on_change = self.states.append
@@ -551,6 +554,7 @@ class PlayerHistoryTest(PlayerCase):
         player = Player(self.runtime, None, None, None,
                         sessions=Sessions(self.runtime / "sessions.json"),
                         daemon_queue=self.daemon, daemon_settings=self.settings)
+        player.add_session("S", "/w/proj")
         self.announce("aa", player=player)
         write_wav(self.inbox_dir / A0, SECONDS)
         player.start()
@@ -778,9 +782,11 @@ class PlayerButtonsTest(PlayerCase):
     def test_play_message_other_during_outage_cancels_retry(self) -> None:
         self.start_with(A0, B0)
         self.playback.fail("no output", True)
+        self.assertTrue(self.state().output_down)
         self.player.play_message(self.player._queue.messages[1])
         self.glib.source_remove.assert_called_once_with(42)
-        self.assertEqual(("stopped", "bb"), (self.state().status, self.task()))
+        self.assertEqual(("stopped", "bb", False),
+                         (self.state().status, self.task(), self.state().output_down))
 
     def test_next_on_last_does_nothing(self) -> None:
         self.start_with(A0, B0)
@@ -1157,6 +1163,7 @@ class PlayerDuckingTest(PlayerCase):
                              clock=lambda: self.now,
                              sessions=Sessions(self.runtime / "sessions.json"),
                              daemon_queue=self.daemon, daemon_settings=self.settings)
+        self.player.add_session("S", "/w/proj")
         self.playback = self.player._playback
         self.player.on_change = self.states.append
 
@@ -1491,8 +1498,10 @@ class PlayerHookTasksTest(PlayerCase):
         queue_dir = self.runtime / "hook-queue"
         queue_dir.mkdir()
         (queue_dir / "1.json").write_text('{"id": "z", "session_id": "S", "text": "xy"}')
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()  # S из setUp
         player = Player(self.runtime, None, None, None, hook_tasks_dir=queue_dir,
-                        sessions=Sessions(self.runtime / "sessions.json"),
+                        sessions=sessions,
                         daemon_queue=self.daemon, daemon_settings=self.settings)
         self.daemon.ids.append("aa")
         player.start()
@@ -1506,12 +1515,14 @@ class PlayerHookTasksTest(PlayerCase):
             self.player.add_session("u1", "/p/TTSReader")
         self.assertIn("session add u1", "\n".join(logs.output))
         data = json.loads(path.read_text())
-        self.assertEqual(("u1", [{"id": "u1", "project": "TTSReader"}]),
+        self.assertEqual(("S", [{"id": "S", "project": "proj"},
+                                {"id": "u1", "project": "TTSReader"}]),
                          (data["active"], data["sessions"]))
         with self.assertLogs("tts_player.player", "INFO") as logs:
             self.player.remove_session("u1")
         self.assertIn("session remove u1", "\n".join(logs.output))
-        self.assertEqual([], json.loads(path.read_text())["sessions"])
+        self.assertEqual([{"id": "S", "project": "proj"}],
+                         json.loads(path.read_text())["sessions"])
 
     def test_start_takes_control_before_hook_tasks(self) -> None:
         control_dir = self.runtime / "tts-player" / "control"
@@ -1731,6 +1742,306 @@ class PlayerRevoiceTest(PlayerCase):
         self.assertIn("config.json не JSON", logs.output[0])
         self.assertEqual(1, len(self.daemon.puts))
         self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+
+
+class PlayerSessionsTest(PlayerCase):
+    """Очереди по сессиям (вход плеера «сессии»): в демон — только задачи активной при молчащем
+    своём тексте, остальное — отложенный текст в хвост своей сессии; переключение, очистка,
+    завершение, перезапуск. Активна S (setUp), B — в списке."""
+
+    B1 = "1000000000000000011_b1_tts_queue_B_b1_s0.wav"
+    B2 = "1000000000000000012_b2_tts_queue_B_b2_s0.wav"
+    C1 = "1000000000000000021_c1_tts_queue_C_c1_s0.wav"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.player.add_session("B", "/w/other")
+
+    def hook(self, task_id: str, session: str, player: Player | None = None) -> None:
+        """Задача хука; id задачи демона не запасён: в демон она уйти не должна."""
+        player = self.player if player is None else player
+        player._on_hook_task(HookTask(f"hook-{task_id}", 1.0, session, "proj",
+                                      f"text {task_id}", "p", 1.0,
+                                      {"id": f"hook-{task_id}", "text": f"text {task_id}"}))
+
+    def deliver(self, name: str) -> Path:
+        """Предложение, забранное inbox/, без задачи хука (в отличие от arrive)."""
+        path = self.store_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_wav(path, SECONDS)
+        match = NAME_PATTERN.match(name)
+        self.player._on_sentence(Sentence(int(match["recv_ns"]), match["task_id"],
+                                          match["session_id"], match["token"],
+                                          int(match["index"]), path))
+        return path
+
+    def messages(self, session: str) -> list[Message]:
+        return self.player._queues[session].messages
+
+    def voiced(self, task: str, session: str) -> dict:
+        """Поля задачи демону для отложенного: текущий голос (p, 1.0) и текст сообщения."""
+        return {"persona": "p", "speed": 1.0, "speed_method": "tempo", "voice_sherpa": "voice-p",
+                "text": f"text {task}", "session_id": session, "project": "proj"}
+
+    def b_playing(self) -> Path:
+        """B выбрана, её отложенное b1 озвучено по play/pause и играет; файл предложения."""
+        self.hook("b1", "B")
+        self.player.select_session("B")
+        self.daemon.ids.append("b1")
+        self.player.toggle_play_pause()
+        return self.deliver(self.B1)
+
+    def test_task_of_active_goes_to_daemon_and_list(self) -> None:
+        self.announce("aa")
+        self.assertEqual(1, len(self.daemon.puts))
+        [message] = self.state().messages
+        self.assertEqual(({"aa"}, False), (message.task_ids, message.deferred))
+
+    def test_task_of_inactive_is_deferred_and_not_sent(self) -> None:
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.hook("b1", "B")
+        self.assertEqual([], self.daemon.puts)
+        [message] = self.messages("B")
+        self.assertEqual((True, False, "text b1"), (message.deferred, message.sent, message.text))
+        self.assertEqual([], self.state().messages)
+        self.assertIn("task hook-b1 B deferred", [r.getMessage() for r in logs.records])
+
+    def test_task_of_unlisted_session_is_dropped(self) -> None:
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.hook("x1", "X")
+        self.assertEqual([], self.daemon.puts)
+        self.assertEqual(([], []), (self.messages("S"), self.messages("B")))
+        self.assertNotIn("X", self.player._queues)
+        self.assertEqual(["task hook-x1 X dropped: not in list"],
+                         [r.getMessage() for r in logs.records])
+
+    def test_task_of_active_while_held_is_deferred(self) -> None:
+        self.player.hold()
+        self.hook("s1", "S")
+        self.assertEqual([], self.daemon.puts)
+        [message] = self.state().messages
+        self.assertTrue(message.deferred)
+
+    def test_control_add_lying_before_task_is_taken_first(self) -> None:
+        control_dir = self.runtime / "tts-player" / "control"
+        control_dir.mkdir(parents=True)
+        (control_dir / "1.json").write_text('{"op": "add", "session": "C", "cwd": "/p/X"}')
+        player = Player(self.runtime, None, None, None,
+                        sessions=Sessions(self.runtime / "sessions2.json"),
+                        control_dir=control_dir,
+                        daemon_queue=self.daemon, daemon_settings=self.settings)
+        self.daemon.ids.append("c1")
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.hook("c1", "C", player)
+        self.assertNotIn("dropped", "\n".join(logs.output))
+        self.assertEqual(["text c1"], [put["text"] for put in self.daemon.puts])
+        self.assertEqual(["text c1"], [m.text for m in player.state().messages])
+        self.assertEqual([], list(control_dir.iterdir()))
+
+    def test_select_stops_and_waits_on_first_unheard_then_play_voices_deferred(self) -> None:
+        self.player.start()
+        self.arrive(A0)
+        self.hook("b1", "B")
+        self.hook("b2", "B")
+        b1, b2 = self.messages("B")
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.player.select_session("B")
+        self.assertIn("session select B", [r.getMessage() for r in logs.records])
+        state = self.state()
+        self.assertEqual((None, "B", b1, "stopped", 0.0, [b1, b2]),
+                         (self.playback.playing, state.active, state.current, state.status,
+                          state.position_s, state.messages))
+        self.assertFalse(self.player._queue.is_started(b1))
+        self.assertEqual("B", json.loads((self.runtime / "sessions.json").read_text())["active"])
+        self.daemon.ids.append("b1")
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.player.toggle_play_pause()
+        self.assertIn("voice deferred B: p 1.0", [r.getMessage() for r in logs.records])
+        self.assertEqual(self.voiced("b1", "B"), self.daemon.puts[-1])
+        self.assertEqual(({"b1"}, False, True, "playing"),
+                         (b1.task_ids, b1.deferred, b1.sent, self.state().status))
+        self.deliver(self.B1)
+        self.assertEqual([A0, self.B1], self.playback.played)
+
+    def test_autoplay_transition_to_deferred_sends_it_and_waits(self) -> None:
+        self.player.start()
+        self.arrive(A0)
+        self.player.hold()
+        self.hook("ab", "S")
+        self.player.release()
+        self.player.toggle_play_pause()
+        self.finish()
+        deferred = self.state().messages[1]
+        self.daemon.ids.append("ab")
+        self.player._on_entry(self.joined(seconds=SECONDS))
+        self.assertEqual(self.voiced("ab", "S"), self.daemon.puts[-1])
+        self.assertEqual((deferred, "playing", False, False),
+                         (self.state().current, self.state().status, deferred.heard,
+                          deferred.deferred))
+        self.deliver("1000000000000000031_ab_tts_queue_S_ab_s0.wav")
+        self.assertEqual("1000000000000000031_ab_tts_queue_S_ab_s0.wav",
+                         self.playback.played[-1])
+
+    def test_select_active_or_unknown_changes_nothing(self) -> None:
+        self.start_with(A0)
+        before = self.state()
+        with self.assertNoLogs("tts_player.player", "INFO"):
+            self.player.select_session("S")
+            self.player.select_session("X")
+        self.assertEqual(before, self.state())
+        self.assertEqual((0, self.path(A0)), (self.playback.stops, self.playback.playing))
+
+    def test_tail_is_per_session(self) -> None:
+        self.player.apply_prefs(Prefs(tail=1))
+        self.start_with(A0)
+        a = self.state().current
+        self.b_playing()
+        self.player.select_session("S")
+        self.assertEqual([a], self.state().messages)
+        self.assertTrue(self.player._queue.is_started(a))
+        self.assertTrue(self.path(A0).exists())
+
+    def test_late_sentence_of_left_session_joins_its_message_and_does_not_play(self) -> None:
+        self.start_with(A0)
+        self.player.select_session("B")
+        self.deliver(A1)
+        self.assertEqual([A0], self.playback.played)
+        [a] = self.messages("S")
+        self.assertEqual([A0, A1], [s.path.name for s in a.sentences])
+        self.assertEqual(("idle", None), (self.state().status, self.state().current))
+
+    def test_sentence_of_other_session_ends_waiting_current_by_common_order(self) -> None:
+        """aa поставлена раньше b1: предложение b1 (сессия B) завершает ожидающее aa."""
+        self.player.start()
+        self.announce("aa")
+        self.player.select_session("B")
+        self.hook("b1", "B")
+        self.daemon.ids.append("b1")
+        self.player.toggle_play_pause()
+        self.player.select_session("S")
+        self.player.toggle_play_pause()
+        self.deliver(A0)
+        self.finish()
+        self.assertEqual("playing", self.state().status)
+        self.deliver(self.B1)
+        self.assertEqual(("idle", True, [A0]),
+                         (self.state().status, self.state().current.heard, self.playback.played))
+
+    def test_deferred_with_unreadable_config_warns_not_voiced_and_is_skipped(self) -> None:
+        self.hook("b1", "B")
+        self.player.select_session("B")
+        self.settings.error = SettingsError("config.json не JSON")
+        with self.assertLogs("tts_player.player", "WARNING") as logs:
+            self.player.toggle_play_pause()
+        [line] = [r.getMessage() for r in logs.records]
+        self.assertIn("отложенное сообщение B не озвучено", line)
+        self.assertIn("config.json не JSON", line)
+        self.assertNotIn("кэш считается актуальным", line)
+        [b1] = self.messages("B")
+        self.assertEqual(([], True, True), (self.daemon.puts, b1.heard, b1.deferred))
+
+    def test_entry_of_session_not_in_list_is_not_attached(self) -> None:
+        self.start_with(A0, A1)
+        self.player.remove_session("B")
+        path = self.history_dir / "tts-2000000000.000-B.wav"
+        write_wav(path, 1.0)
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "B", "proj", 1.0))
+        self.assertEqual([f"для склейки {path.name} нет сессии B в списке"],
+                         [r.getMessage() for r in logs.records])
+        self.assertEqual([None], [m.created_at for m in self.messages("S")])
+
+    def test_select_clears_output_failure(self) -> None:
+        self.start_with(A0)
+        self.playback.fail("no output", True)
+        self.assertTrue(self.state().output_down)
+        self.player.select_session("B")
+        self.assertFalse(self.state().output_down)
+        self.glib.source_remove.assert_called_with(42)
+
+    def test_remove_session_before_start_does_not_raise(self) -> None:
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()  # S и B из setUp
+        player = Player(self.runtime, None, None, None, sessions=sessions,
+                        daemon_queue=self.daemon, daemon_settings=self.settings)
+        player.remove_session("B")
+        player._on_hook_task(HookTask("h1", 1.0, "S", "proj", "x", "p", 1.0, {"id": "h1"}))
+        self.assertEqual((["S"], ["x"]), ([s.id for s in player.state().sessions],
+                                          [m.text for m in player.state().messages]))
+
+    def test_clear_removes_only_active_session(self) -> None:
+        b_file = self.b_playing()
+        self.player.select_session("S")
+        self.arrive(A0)
+        self.player.clear()
+        self.assertEqual(([], False, "S"),
+                         (self.state().messages, self.path(A0).exists(), self.state().active))
+        self.assertEqual(["text b1"], [m.text for m in self.messages("B")])
+        self.assertTrue(b_file.exists())
+
+    def test_remove_inactive_deletes_its_files_and_active_plays_on(self) -> None:
+        b_file = self.b_playing()
+        self.player.select_session("S")
+        self.arrive(A0)
+        self.player.remove_session("B")
+        self.assertFalse(b_file.exists())
+        self.assertNotIn("B", self.player._queues)
+        self.assertEqual(("playing", "S", self.path(A0)),
+                         (self.state().status, self.state().active, self.playback.playing))
+
+    def test_remove_active_stops_and_late_sentences_are_foreign(self) -> None:
+        self.start_with(A0)
+        self.player.remove_session("S")
+        state = self.state()
+        self.assertEqual((None, None, "idle", [], False),
+                         (self.playback.playing, state.active, state.status, state.messages,
+                          self.path(A0).exists()))
+        self.assertEqual(None, state.current)
+        with self.assertLogs("tts_player.queue", "WARNING"):
+            late = self.deliver(A1)
+        self.assertFalse(late.exists())
+
+    def test_state_lists_sessions_and_active(self) -> None:
+        state = self.state()
+        self.assertEqual(([Session("S", "proj"), Session("B", "other")], "S"),
+                         (state.sessions, state.active))
+
+    def test_added_session_after_removed_active_is_not_active_while_list_not_empty(self) -> None:
+        self.player.remove_session("S")
+        self.player.add_session("D", "/w/d")
+        self.assertIsNone(self.state().active)
+
+    def test_first_session_in_empty_list_becomes_active_with_empty_queue(self) -> None:
+        self.player.remove_session("S")
+        self.player.remove_session("B")
+        self.player.add_session("D", "/w/d")
+        self.announce("dd", "D")
+        self.assertEqual(("D", ["text dd"]),
+                         (self.state().active, [m.text for m in self.state().messages]))
+
+    def test_restart_restores_messages_by_session_and_drops_unlisted(self) -> None:
+        self.player.add_session("C", "/w/c")
+        self.player.select_session("C")
+        self.announce("c1", "C")
+        c_file = self.deliver(self.C1)
+        self.player.select_session("S")
+        self.player.start()
+        self.arrive(A0)
+        self.hook("b1", "B")
+        self.player.shutdown()
+        self.assertTrue(c_file.exists())
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()
+        sessions.remove("C")
+        with self.assertLogs("tts_player", "INFO"):
+            self.restart()
+        self.assertEqual(["text aa"], [m.text for m in self.messages("S")])
+        [b1] = self.messages("B")
+        self.assertEqual(("text b1", True, False), (b1.text, b1.deferred, b1.sent))
+        self.assertNotIn("C", self.player._queues)
+        self.assertFalse(c_file.exists())
+        self.assertTrue(self.path(A0).exists())
+        self.assertEqual([A0], self.playback.played)
 
 
 if __name__ == "__main__":

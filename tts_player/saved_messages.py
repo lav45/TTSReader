@@ -1,7 +1,8 @@
 """Сообщения между запусками плеера: $XDG_RUNTIME_DIR/tts-player/messages.json.
 
-Пишет Player.shutdown (снимок очереди, MessageQueue.release), читает Player.start до
-inbox/ и задач хука; файл живёт от выхода до следующего старта. Текст и кэш временные:
+Пишет Player.shutdown (снимки очередей всех сессий одним снимком, MessageQueue.release),
+читает Player.start до inbox/ и задач хука и раскладывает сообщения по очередям сессий по
+их session_id; файл живёт от выхода до следующего старта. Текст и кэш временные:
 перезапуск плеера их сохраняет, выход из сеанса ($XDG_RUNTIME_DIR) — нет."""
 import json
 import logging
@@ -80,6 +81,7 @@ class SavedMessages:
             "received_at": message.received_at,
             "sent": message.sent,
             "heard": message.heard,
+            "deferred": message.deferred,
             "started": started,
             "created_at": message.created_at,
             "duration_s": message.duration_s,
@@ -107,6 +109,7 @@ class SavedMessages:
             created_at=self._optional_number(item["created_at"]),
             duration_s=duration_s,
             heard=bool(item["heard"]),
+            deferred=bool(item.get("deferred", False)),  # файл до сессий в плеере — без ключа
         )
 
     def _sentences(self, names: list) -> list:

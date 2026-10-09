@@ -38,14 +38,16 @@ class SavedMessagesTest(unittest.TestCase):
         heard = Message("N", text="пока", persona="q", speed=1.0, task_ids={"cc"},
                         received_at=6.0, heard=True)
         not_sent = Message("S", text="x", sent=False)
-        return QueueSnapshot([unheard, heard, not_sent], [unheard],
+        deferred = Message("B", text="отложено", persona="p", speed=1.0, received_at=8.0,
+                           sent=False, deferred=True)
+        return QueueSnapshot([unheard, heard, not_sent, deferred], [unheard],
                              {"aa": 1, "bb": 3, "cc": 2}, 3)
 
     def fields(self, message: Message) -> tuple:
         return (message.session_id, message.project, message.text, message.persona,
                 message.speed, message.task_ids, message.sentences, message.received_at,
                 message.sent, message.audio, message.created_at, message.duration_s,
-                message.heard)
+                message.heard, message.deferred)
 
     def test_round_trip_and_file_deleted_after_load(self):
         snapshot = self.snapshot()
@@ -57,6 +59,15 @@ class SavedMessagesTest(unittest.TestCase):
                          [self.fields(m) for m in loaded.messages])
         self.assertEqual([loaded.messages[0]], loaded.started)
         self.assertEqual(({"aa": 1, "bb": 3, "cc": 2}, 3), (loaded.task_order, loaded.delivered))
+
+    def test_deferred_is_saved_and_missing_key_reads_as_false(self):
+        self.saved.save(self.snapshot())
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual([False, False, False, True], [m["deferred"] for m in data["messages"]])
+        for item in data["messages"]:
+            del item["deferred"]
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual([False] * 4, [m.deferred for m in self.saved.load().messages])
 
     def test_saved_file_names_are_relative_to_store(self):
         self.saved.save(self.snapshot())

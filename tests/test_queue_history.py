@@ -8,7 +8,7 @@ from unittest import mock
 
 from tts_player.history import HistoryEntry
 from tts_player.model import Message, Sentence
-from tts_player.queue import MessageQueue
+from tts_player.queue import MessageQueue, TaskOrder
 
 RATE = 1000
 
@@ -31,7 +31,7 @@ class QueueHistoryTest(unittest.TestCase):
         self.history = root / "history"
         for d in (self.dir, self.store, self.history):
             d.mkdir()
-        self.queue = MessageQueue(tail=5)
+        self.queue = MessageQueue(tail=5, order=TaskOrder())
 
     def add(self, recv_ns, seconds, task="t1", index=0, session="s1", token="aa"):
         """Предложение задачи task; сообщения для task ещё нет — оно заводится первым."""

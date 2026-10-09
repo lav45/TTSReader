@@ -41,6 +41,16 @@ class AddTest(SessionsCase):
         self.assertEqual(self.sessions.active, "u1")
         self.assertEqual(self.file_data()["active"], "u1")
 
+    def test_add_after_active_removed_keeps_no_active_while_list_not_empty(self):
+        """Активной становится только первая в пустом списке; завершённую активную заменяет
+        выбор пользователя, а не следующий add."""
+        self.sessions.add("u1", "/a/one")
+        self.sessions.add("u2", "/a/two")
+        self.sessions.remove("u1")
+        self.sessions.add("u3", "/a/three")
+        self.assertIsNone(self.sessions.active)
+        self.assertIsNone(self.file_data()["active"])
+
     def test_repeated_add_returns_false_and_does_not_rewrite(self):
         self.sessions.add("u1", "/a/one")
         os.utime(self.path, (1, 1))
@@ -78,6 +88,31 @@ class RemoveTest(SessionsCase):
 
     def test_remove_missing_returns_false(self):
         self.assertFalse(self.sessions.remove("nope"))
+
+
+class SelectTest(SessionsCase):
+    def test_select_listed_makes_it_active_in_file(self):
+        self.sessions.add("u1", "/a/one")
+        self.sessions.add("u2", "/a/two")
+        self.assertTrue(self.sessions.select("u2"))
+        self.assertEqual(self.sessions.active, "u2")
+        self.assertEqual(self.file_data(), {"active": "u2", "sessions": [
+            {"id": "u1", "project": "one"}, {"id": "u2", "project": "two"}]})
+
+    def test_select_after_active_removed(self):
+        self.sessions.add("u1", "/a/one")
+        self.sessions.add("u2", "/a/two")
+        self.sessions.remove("u1")
+        self.assertTrue(self.sessions.select("u2"))
+        self.assertEqual(self.file_data()["active"], "u2")
+
+    def test_select_active_or_unknown_returns_false_and_does_not_rewrite(self):
+        self.sessions.add("u1", "/a/one")
+        os.utime(self.path, (1, 1))
+        self.assertFalse(self.sessions.select("u1"))
+        self.assertFalse(self.sessions.select("nope"))
+        self.assertEqual(self.sessions.active, "u1")
+        self.assertEqual(self.path.stat().st_mtime, 1)
 
 
 class LoadTest(SessionsCase):

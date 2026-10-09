@@ -6,7 +6,7 @@ import shutil
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from tts_player.model import Message, Sentence
 
@@ -29,6 +29,48 @@ class QueueSnapshot:
     delivered: int
 
 
+class TaskOrder:
+    """Порядок постановки задач демону для всех сессий и наибольший доставленный.
+
+    Демон синтезирует задачи всех сессий строго по одной в порядке постановки, поэтому
+    порядок один на все очереди сессий (MessageQueue): предложение поздней задачи одной
+    сессии завершает более раннее сообщение другой. Помнит задачи за всё время, в том
+    числе забытых сообщений."""
+
+    def __init__(self) -> None:
+        self._sequence = itertools.count(1)
+        self._order: dict[str, int] = {}
+        self._delivered = 0  # наибольший порядок задачи, от которой пришло предложение
+
+    def link(self, task_id: str) -> None:
+        """Задача поставлена демону: ей следующий номер."""
+        self._order[task_id] = next(self._sequence)
+
+    def order(self, task_id: str) -> int:
+        return self._order[task_id]
+
+    def deliver(self, task_id: str) -> None:
+        """От задачи пришло предложение."""
+        self._delivered = max(self._delivered, self._order[task_id])
+
+    def delivered_after(self, task_id: str) -> bool:
+        """Доставлена задача, поставленная позже task_id."""
+        return self._delivered > self._order[task_id]
+
+    def snapshot(self, task_ids: Iterable[str]) -> tuple[dict[str, int], int]:
+        """(порядок указанных задач, наибольший доставленный) — для QueueSnapshot."""
+        return {task_id: self._order[task_id] for task_id in task_ids}, self._delivered
+
+    def restore(self, task_order: dict[str, int], delivered: int) -> None:
+        """Принимает порядок прошлого запуска; новые задачи — после всех известных и
+        доставленных (clear забывает задачи, но не delivered): иначе новое сообщение
+        считалось бы завершённым с первого предложения."""
+        self._order.update(task_order)
+        self._delivered = max(self._delivered, delivered)
+        last = max([*self._order.values(), self._delivered])
+        self._sequence = itertools.count(last + 1)
+
+
 class MessageQueue:
     """Сообщения в порядке прихода задач хука; хвост из tail начатых сообщений.
 
@@ -47,13 +89,9 @@ class MessageQueue:
     """
     DURATION_TOLERANCE_S = 0.05
 
-    def __init__(self, tail: int) -> None:
+    def __init__(self, tail: int, order: TaskOrder) -> None:
         self.tail = tail
-        # Порядок постановки задач демону за всё время очереди (и забытых сообщений): демон
-        # синтезирует задачи по одной в этом порядке.
-        self._sequence = itertools.count(1)
-        self._task_order: dict[str, int] = {}
-        self._delivered = 0  # наибольший порядок задачи, от которой пришло предложение
+        self._order = order  # общий с очередями других сессий
         self._forget()
 
     def _forget(self) -> None:
@@ -73,11 +111,15 @@ class MessageQueue:
     def link(self, message: Message, task_id: str) -> None:
         """Задача демона task_id поставлена для message: её предложения — его."""
         message.task_ids.add(task_id)
-        self._task_order[task_id] = next(self._sequence)
+        self._order.link(task_id)
 
     def task_of(self, message: Message) -> str | None:
         """Последняя задача демона сообщения; None, если ни одна не поставлена."""
-        return max(message.task_ids, key=self._task_order.__getitem__, default=None)
+        return max(message.task_ids, key=self._order.order, default=None)
+
+    def owns(self, task_id: str) -> bool:
+        """Задача — одного из живых сообщений очереди."""
+        return self._find(task_id) is not None
 
     def add(self, sentence: Sentence) -> None:
         """Добавляет предложение в сообщение его задачи. Задача чужая (нет сообщения:
@@ -94,7 +136,7 @@ class MessageQueue:
                      sentence.task_id, sentence.path)
             self._unlink(sentence)
             return
-        self._delivered = max(self._delivered, self._task_order[sentence.task_id])
+        self._order.deliver(sentence.task_id)
         received = [s.recv_ns for s in message.sentences]
         message.sentences.insert(bisect.bisect_right(received, sentence.recv_ns), sentence)
 
@@ -160,7 +202,7 @@ class MessageQueue:
         if message.audio is not None or message.created_at is not None or not message.sent:
             return True
         task_id = self.task_of(message)
-        return task_id is not None and self._delivered > self._task_order[task_id]
+        return task_id is not None and self._order.delivered_after(task_id)
 
     def clear(self) -> None:
         """Удаляет файлы всех сообщений, включая хвост, и забывает их вместе с задачами:
@@ -189,9 +231,9 @@ class MessageQueue:
                 message.sentences = []
                 message.audio = None
                 message.duration_s = None
-        task_order = {task_id: self._task_order[task_id]
-                      for message in self._messages for task_id in message.task_ids}
-        snapshot = QueueSnapshot(self._messages, self._started, task_order, self._delivered)
+        task_ids = [task_id for message in self._messages for task_id in message.task_ids]
+        task_order, delivered = self._order.snapshot(task_ids)
+        snapshot = QueueSnapshot(self._messages, self._started, task_order, delivered)
         self._forget()
         return snapshot
 
@@ -212,12 +254,7 @@ class MessageQueue:
         """Старт плеера: сообщения прошлого запуска — перед уже пришедшими, с их задачами
         (поздние предложения этих задач — их) и завершённостью; хвост начатых подгоняется
         к tail, лишние удаляются, самые старые первыми."""
-        self._task_order.update(snapshot.task_order)
-        self._delivered = max(self._delivered, snapshot.delivered)
-        # новые задачи — после всех известных и доставленных (clear забывает задачи, но не
-        # delivered): иначе новое сообщение считалось бы завершённым с первого предложения
-        last = max([*self._task_order.values(), self._delivered])
-        self._sequence = itertools.count(last + 1)
+        self._order.restore(snapshot.task_order, snapshot.delivered)
         self._messages[:0] = snapshot.messages
         self._started[:0] = snapshot.started
         while len(self._started) > self.tail:

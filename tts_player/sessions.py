@@ -86,12 +86,14 @@ class Sessions:
             self._active, self._sessions = None, []
 
     def add(self, session_id: str, cwd: str) -> bool:
-        """False — сессия уже в списке, файл не пишется. Первая сессия становится активной."""
+        """False — сессия уже в списке, файл не пишется. Первая сессия в пустом списке
+        становится активной; после завершения активной (active None) новая сессия активной
+        не становится — её выбирает пользователь (select)."""
         if self.has(session_id):
             return False
-        self._sessions.append(Session(session_id, Path(cwd).name))
-        if self._active is None:
+        if not self._sessions:
             self._active = session_id
+        self._sessions.append(Session(session_id, Path(cwd).name))
         self._write()
         return True
 
@@ -101,6 +103,15 @@ class Sessions:
         self._sessions = [s for s in self._sessions if s.id != session_id]
         if self._active == session_id:
             self._active = None
+        self._write()
+        return True
+
+    def select(self, session_id: str) -> bool:
+        """Сессия из списка становится активной. False — она уже активна или не в списке,
+        файл не пишется."""
+        if session_id == self._active or not self.has(session_id):
+            return False
+        self._active = session_id
         self._write()
         return True
 

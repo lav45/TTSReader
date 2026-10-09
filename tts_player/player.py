@@ -20,9 +20,9 @@ from tts_player.hook_tasks import HookTasks  # noqa: E402
 from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
-from tts_player.queue import MessageQueue  # noqa: E402
+from tts_player.queue import MessageQueue, QueueSnapshot, TaskOrder  # noqa: E402
 from tts_player.saved_messages import SavedMessages  # noqa: E402
-from tts_player.sessions import Sessions  # noqa: E402
+from tts_player.sessions import Session, Sessions  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 
 log = logging.getLogger("tts_player.player")
@@ -34,7 +34,8 @@ LOGGED_TEXT_CHARS = 80  # столько знаков текста задачи 
 
 @dataclass(frozen=True)
 class PlayerState:
-    """Снимок для окна. idle — ничего не играет: current доигран либо ещё не начат
+    """Снимок для окна. Сообщения и курсор — очереди активной сессии (нет активной —
+    сообщений нет). idle — ничего не играет: current доигран либо ещё не начат
     (при выключенном автовоспроизведении), или None, если сообщений нет."""
     status: Status
     current: Message | None
@@ -45,6 +46,8 @@ class PlayerState:
     lengths: list[float]  # queue.length(m) для каждого из messages, в том же порядке
     completes: list[bool]  # queue.is_complete(m) для каждого из messages, в том же порядке
     autoplay: bool  # плеер сам начинает следующее и новое сообщение (контракт (6))
+    sessions: list[Session]  # порядок списка (Sessions.sessions)
+    active: str | None  # активная сессия; None — не выбрана
 
 
 class Player:
@@ -61,13 +64,22 @@ class Player:
     RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор. Отказ кончается,
     когда звук пошёл (Playback.on_started); повтор, упавший до звука, — тот же отказ.
 
-    Сообщение заводит задача хука (контракт (11)): она сразу уходит в очередь демона, а
-    сообщение с её текстом — в список, ещё без звука; предложения приходят по id задачи
-    демона (контракты (12), (13)). Начало проигрывания (_start: play/pause, автопереход,
-    next/prev) сообщения, которое демон уже не озвучивает, сверяет его голос с текущим из
-    config.json: устарел — кэш удаляется и текст уходит в демон заново (переозвучка),
-    сообщение играет по мере прихода предложений, как растущее. Сообщение без звука
-    переозвучивает только команда пользователя; автозапуск его пропускает (прослушано).
+    Сессии (Sessions, вход «сессии»): у каждой сессии из списка своя MessageQueue — свой
+    хвост, — все над одним TaskOrder: демон синтезирует задачи всех сессий по одной.
+    Курсор ходит по очереди активной сессии (_queue); нет активной — по пустой очереди.
+    Предложение (13) идёт в очередь, которой принадлежит его задача (MessageQueue.owns),
+    склейка — в очередь своей сессии; чужое предложение удаляет играемая очередь.
+
+    Сообщение заводит задача хука (контракт (11)) своей сессии: сессия активна и свой текст не
+    звучит — задача сразу уходит в очередь демона (12), иначе сообщение отложено (deferred) —
+    только текст; сессии нет в списке — задача удалена. Сообщение с текстом — в конец своей
+    очереди, ещё без звука; предложения приходят по id задачи демона (13). Начало
+    проигрывания (_start: play/pause, автопереход, next/prev) отложенного сообщения отдаёт
+    его текст демону текущим голосом; сообщения, которое демон уже не озвучивает, — сверяет
+    его голос с текущим из config.json: устарел — кэш удаляется и текст уходит в демон
+    заново (переозвучка). В обоих случаях сообщение играет по мере прихода предложений, как
+    растущее. Сообщение без звука (не отложенное) переозвучивает только команда пользователя;
+    автозапуск его пропускает (прослушано).
 
     Склейка играющего по предложениям сообщения подменяет их с той же позиции. Пока
     вывод недоступен, звука нет — повтор начнёт склейку с позиции, с которой запускался
@@ -103,12 +115,17 @@ class Player:
         """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
         hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
         очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки;
-        sessions — список сессий (загружен до start()), control_dir — control/ (контракт (14)),
-        None — без запросов session add/remove."""
+        sessions — список сессий, уже загруженный: его сессиям очереди заводятся здесь, а
+        сообщения прошлого запуска раскладывает по ним start(); control_dir — control/ (контракт (14)), None — без запросов session add/remove."""
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
-        self._queue = MessageQueue(defaults.tail)
+        self._tail = defaults.tail
+        self._task_order = TaskOrder()  # общий порядок задач демона для очередей сессий
+        self._sessions = sessions
+        # по session_id, сессии из Sessions; нет активной — курсор ходит по пустой
+        self._queues = {session.id: self._new_queue() for session in sessions.sessions}
+        self._no_session = self._new_queue()
         self._playback = Playback(audio_sink)
         self._playback.on_finished = self._on_finished
         self._playback.on_error = self._on_error
@@ -118,7 +135,6 @@ class Player:
                                     self._inbox.store)
         self._daemon_queue = daemon_queue
         self._daemon_settings = daemon_settings
-        self._sessions = sessions
         self._control = None
         if control_dir is not None:
             self._control = ControlRequests(control_dir, self.add_session, self.remove_session)
@@ -149,9 +165,12 @@ class Player:
         self._watch_id = 0
 
     def apply_prefs(self, prefs: Prefs) -> None:
-        """Настройки плеера: хвост очереди, автовоспроизведение, процент приглушения;
-        играющее не трогается. Новый процент во время игры — restore, затем duck(новый)."""
-        self._queue.tail = prefs.tail
+        """Настройки плеера: хвост очереди каждой сессии, автовоспроизведение, процент
+        приглушения; играющее не трогается. Новый процент во время игры — restore, затем
+        duck(новый)."""
+        self._tail = prefs.tail
+        for queue in [*self._queues.values(), self._no_session]:
+            queue.tail = prefs.tail
         self._autoplay = prefs.autoplay
         if prefs.duck != self._duck:
             self._duck = prefs.duck
@@ -180,17 +199,18 @@ class Player:
         существовавшей до запуска. Колбэки обеих частей идут из цикла GLib, поэтому
         такой порядок ничего не теряет.
 
-        Сообщения прошлого запуска (messages.json) восстанавливаются до inbox/ и задач хука:
-        поздние предложения их задач — их, а не чужие; файлы store/, на которые они не
-        ссылаются, удаляет Inbox. Непрослушанное играет само, если включено
-        автовоспроизведение."""
+        Сообщения прошлого запуска (messages.json) восстанавливаются до inbox/ и задач хука,
+        каждое — в очередь своей сессии; сообщения сессий не из списка не восстанавливаются.
+        Поздние предложения восстановленных задач — их, а не чужие; файлы store/, на которые
+        сообщения не ссылаются, удаляет Inbox. Непрослушанное активной сессии играет само,
+        если включено автовоспроизведение."""
         if self._history is not None:
             try:
                 self._history.start()
             except OSError as error:
                 log.warning("история %s недоступна (%s), работаю без склеек",
                             self._history_dir, error)
-        self._queue.restore(self._saved.load())
+        self._restore(self._saved.load())
         self._inbox.start(self._store_files())
         if self._control is not None:
             self._control.start()  # раньше задач хука: их сессии уже в списке
@@ -202,42 +222,111 @@ class Player:
                 self._begin(message, requested=False)
         self._changed()
 
+    def _new_queue(self) -> MessageQueue:
+        return MessageQueue(self._tail, self._task_order)
+
+    def _restore(self, snapshot: QueueSnapshot) -> None:
+        """Снимок прошлого запуска — по очередям сессий из списка; сообщения прочих сессий
+        забываются (их файлы удалит Inbox: на них никто не ссылается)."""
+        for session_id, queue in self._queues.items():
+            messages = [m for m in snapshot.messages if m.session_id == session_id]
+            started = [m for m in snapshot.started if m.session_id == session_id]
+            queue.restore(QueueSnapshot(messages, started, snapshot.task_order,
+                                        snapshot.delivered))
+        for session_id in {m.session_id for m in snapshot.messages} - self._queues.keys():
+            log.info("сообщения сессии %s не восстановлены: её нет в списке", session_id)
+
+    @property
+    def _queue(self) -> MessageQueue:
+        """Очередь, по которой ходит курсор: активной сессии; нет активной — пустая."""
+        return self._queues.get(self._sessions.active, self._no_session)
+
     def _store_files(self) -> frozenset[Path]:
-        """Файлы store/, которые держат сообщения очереди: предложения и склейки."""
-        files = {s.path for m in self._queue.messages for s in m.sentences}
-        files.update(m.audio for m in self._queue.messages if m.audio is not None)
+        """Файлы store/, которые держат сообщения очередей сессий: предложения и склейки."""
+        messages = [m for queue in self._queues.values() for m in queue.messages]
+        files = {s.path for m in messages for s in m.sentences}
+        files.update(m.audio for m in messages if m.audio is not None)
         return frozenset(files)
 
     def add_session(self, session_id: str, cwd: str) -> None:
-        """Запрос `session add`; строку журнала (её читает e2e) пишет только настоящая смена."""
-        if self._sessions.add(session_id, cwd):
-            log.info("session add %s", session_id)
-
-    def remove_session(self, session_id: str) -> None:
-        """Запрос `session remove`; строка журнала — только при настоящей смене."""
-        if self._sessions.remove(session_id):
-            log.info("session remove %s", session_id)
-
-    def _on_hook_task(self, task: HookTask) -> None:
-        """Задача хука забрана (строка журнала — её читает e2e): её поля как есть уходят в
-        очередь демона, сообщение с её текстом — в конец списка, ещё без звука."""
-        log.info("task %s %s %d chars", task.id, task.session_id, len(task.text))
-        message = Message(task.session_id, project=task.project, text=task.text,
-                          persona=task.persona, speed=task.speed, received_at=task.timestamp)
-        self._queue.append(message)
-        self._send(message, task.fields, f"задача хука {task.id}")
+        """Запрос `session add`: у новой сессии пустая очередь; стала активной (первая в
+        пустом списке) — играет её очередь. Строку журнала (её читает e2e) пишет только
+        настоящая смена."""
+        if not self._sessions.add(session_id, cwd):
+            return
+        log.info("session add %s", session_id)
+        self._queues[session_id] = self._new_queue()
         self._changed()
 
-    def _send(self, message: Message, fields: dict, origin: str) -> None:
-        """Задача демону для message; сбой записи — сообщение «не отправлено» и строка в
-        журнал с origin и началом текста: задача не теряется молча."""
+    def remove_session(self, session_id: str) -> None:
+        """Запрос `session remove` («Завершить»): файлы и тексты сессии удалены, её поздние
+        предложения — чужие. Была активной — звук стоп, активной нет, пока пользователь не
+        выберет сессию: текущего нет, статус idle. Строка журнала — только при настоящей
+        смене."""
+        was_active = session_id == self._sessions.active
+        if not self._sessions.remove(session_id):
+            return
+        log.info("session remove %s", session_id)
+        if was_active:
+            self._halt()
+            self._reset_cursor()
+        self._queues.pop(session_id).clear()
+        self._changed()
+
+    def select_session(self, session_id: str) -> None:
+        """Клик по сессии: активная или не из списка — ничего. Иначе звук стоп, она активна,
+        текущее — её первое непрослушанное с позиции 0, не начатое (в хвост входит при
+        play/pause, как после клика по строке): статус stopped, без него — idle."""
+        if session_id == self._sessions.active or not self._sessions.has(session_id):
+            return
+        self._halt()
+        self._sessions.select(session_id)
+        log.info("session select %s", session_id)
+        self._current = self._queue.first_unheard()
+        self._sentence = None
+        self._position = 0.0
+        self._status = "idle" if self._current is None else "stopped"
+        self._output_down = False  # повтор снят _halt: отказ вывода больше не показывается
+        self._changed()
+
+    def _on_hook_task(self, task: HookTask) -> None:
+        """Задача хука забрана. Сначала — запросы control/, лежащие сейчас: `/tts-on` пишет
+        add раньше, чем немедленная озвучка — задачу. Сессии нет в списке — задача удалена
+        (строка «dropped»). Иначе (строка «chars» — её читает e2e) сообщение с её текстом —
+        в конец очереди сессии, ещё без звука; сессия активна и свой текст не звучит — поля
+        задачи как есть уходят в очередь демона, иначе сообщение отложено (строка
+        «deferred»)."""
+        if self._control is not None:
+            self._control.drain()
+        session_id = task.session_id
+        if not self._sessions.has(session_id):
+            log.info("task %s %s dropped: not in list", task.id, session_id)
+            return
+        log.info("task %s %s %d chars", task.id, session_id, len(task.text))
+        message = Message(session_id, project=task.project, text=task.text,
+                          persona=task.persona, speed=task.speed, received_at=task.timestamp)
+        queue = self._queues[session_id]
+        queue.append(message)
+        if session_id == self._sessions.active and not self._held:
+            self._send(queue, message, task.fields, f"задача хука {task.id}")
+        else:
+            message.sent = False
+            message.deferred = True
+            log.info("task %s %s deferred", task.id, session_id)
+        self._changed()
+
+    def _send(self, queue: MessageQueue, message: Message, fields: dict, origin: str) -> None:
+        """Задача демону для message очереди queue; отложенное перестаёт им быть. Сбой
+        записи — сообщение «не отправлено» и строка в журнал с origin и началом текста:
+        задача не теряется молча."""
         task_id = self._daemon_queue.put(fields)
         message.sent = task_id is not None
         if task_id is None:
             log.warning("%s не отправлена в демон: %.*s", origin, LOGGED_TEXT_CHARS,
                         message.text or "")
             return
-        self._queue.link(message, task_id)
+        message.deferred = False
+        queue.link(message, task_id)
 
     def shutdown(self) -> None:
         """Выход процесса: громкость чужих потоков — обратно; сообщения — в messages.json
@@ -254,7 +343,20 @@ class Player:
             self._history.stop()
         position = self._now()
         self._halt()
-        self._saved.save(self._queue.release(self._current, position))
+        self._saved.save(self._release(position))
+
+    def _release(self, position: float) -> QueueSnapshot:
+        """Снимки очередей всех сессий одним снимком (сообщение помнит свою сессию); текущее
+        с позицией — только у играемой. Порядок задач общий: delivered у снимков один."""
+        messages, started, task_order, delivered = [], [], {}, 0
+        for queue in self._queues.values():
+            current = self._current if queue is self._queue else None
+            snapshot = queue.release(current, position)
+            messages += snapshot.messages
+            started += snapshot.started
+            task_order.update(snapshot.task_order)
+            delivered = max(delivered, snapshot.delivered)
+        return QueueSnapshot(messages, started, task_order, delivered)
 
     def state(self) -> PlayerState:
         current = self._current
@@ -263,7 +365,8 @@ class Player:
         lengths = [self._queue.length(m) for m in messages]
         completes = [self._queue.is_complete(m) for m in messages]
         return PlayerState(self._status, current, self._now(), length,
-                           messages, self._output_down, lengths, completes, self._autoplay)
+                           messages, self._output_down, lengths, completes, self._autoplay,
+                           self._sessions.sessions, self._sessions.active)
 
     def toggle_play_pause(self) -> None:
         """Кнопка play/pause: playing — пауза с запомненной позицией; paused — с неё дальше;
@@ -338,6 +441,7 @@ class Player:
         self._sentence = None
         self._position = 0.0
         self._status = "stopped"
+        self._output_down = False  # повтор снят _leave: отказ вывода больше не показывается
         self._changed()
 
     def seek(self, position_s: float) -> None:
@@ -353,19 +457,31 @@ class Player:
         self._changed()
 
     def clear(self) -> None:
-        """Очистка буфера: звук стоп, все файлы удалены; новые предложения играют как обычно."""
+        """«Очистить» активную сессию: звук стоп, её файлы и тексты удалены, сессия остаётся;
+        новые предложения играют как обычно. Очереди других сессий не трогаются."""
         self._halt()
         self._queue.clear()
+        self._reset_cursor()
+        self._changed()
+
+    def _reset_cursor(self) -> None:
+        """Текущего нет, статус idle (после _halt): очередь очищена или сессии больше нет."""
         self._current = None
         self._sentence = None
         self._position = 0.0
         self._status = "idle"
         self._output_down = False
-        self._changed()
 
     def _on_sentence(self, sentence: Sentence) -> None:
-        self._queue.add(sentence)
-        if self._status == "idle" and self._starts_by_itself():
+        """Предложение — в очередь, которой принадлежит его задача; ничья — играемой, она
+        удаляет его как чужое. Предложение другой сессии не играет, но может завершить
+        ожидающее текущее: порядок задач общий."""
+        queue = next((q for q in self._queues.values() if q.owns(sentence.task_id)), self._queue)
+        queue.add(sentence)
+        if queue is not self._queue:
+            if self._waiting() and self._next_sentence() is None:
+                self._message_end()
+        elif self._status == "idle" and self._starts_by_itself():
             message = self._queue.first_unheard()
             if message is not None:
                 self._begin(message, requested=False)
@@ -378,10 +494,15 @@ class Player:
         self._changed()
 
     def _on_entry(self, entry: HistoryEntry) -> None:
-        message = self._queue.attach(entry, self._inbox.store)
+        """Склейка — сообщению очереди своей сессии; сессии нет в списке — ничья."""
+        queue = self._queues.get(entry.session_id)
+        if queue is None:
+            log.info("для склейки %s нет сессии %s в списке", entry.path.name, entry.session_id)
+            return
+        message = queue.attach(entry, self._inbox.store)
         if message is None:
             return
-        task_id = self._queue.task_of(message)
+        task_id = queue.task_of(message)
         if message.audio is None:
             log.info("ended %s %s", message.session_id, task_id)
         else:
@@ -488,47 +609,62 @@ class Player:
 
     def _start(self, message: Message, position: float, requested: bool) -> None:
         """Начало проигрывания — одно место для play/pause, автоперехода и next/prev:
-        сообщение входит в хвост; кэш устарел — переозвучка с начала. requested — команда
-        пользователя (play/pause, next/prev); только она переозвучивает сообщение без звука,
-        автозапуск его пропускает (_play_at: прослушано, дальше следующее)."""
+        сообщение входит в хвост; отложенное или с устаревшим кэшем — озвучка с начала.
+        requested — команда пользователя (play/pause, next/prev); только она переозвучивает
+        сообщение без звука, автозапуск его пропускает (_play_at: прослушано, дальше
+        следующее), кроме отложенного: его текст демону ещё не отдавался."""
         self._queue.start(message)
         self._current = message
         self._status = "playing"
-        if self._revoice_if_stale(message, requested):
+        if self._voice_if_due(message, requested):
             position = 0.0
         self._play_at(position)
 
-    def _revoice_if_stale(self, message: Message, requested: bool) -> bool:
+    def _voice_if_due(self, message: Message, requested: bool) -> bool:
         """Сообщение, которое демон уже не озвучивает (is_complete), с голосом, отличным от
-        текущего, или без звука (только requested): файлы удалены, текст — в демон текущим
-        голосом. True — переозвучка начата (и при сбое записи задачи: старого звука уже нет).
-        Сбой чтения config.json — кэш считается актуальным, строка в журнал."""
+        текущего, или без звука (отложенное — всегда, прочее — только requested): файлы
+        удалены, текст — в демон текущим голосом. True — озвучка начата (и при сбое записи
+        задачи: старого звука уже нет). Сбой чтения config.json — кэш считается актуальным,
+        строка в журнал; отложенное тогда остаётся без звука и пропускается, как не
+        отправленное."""
         if not self._queue.is_complete(message):
             return False
         silent = not message.sentences and message.audio is None
-        if silent and not requested:
+        if silent and not requested and not message.deferred:
             return False
-        voice = self._active_voice()
+        voice = self._active_voice(message)
         if voice is None:
             return False
         if not silent and (message.persona, message.speed) == (voice.persona, voice.speed):
             return False
-        log.info("revoice %s %s: %s %s -> %s %s", message.session_id,
-                 self._queue.task_of(message), message.persona, message.speed,
-                 voice.persona, voice.speed)
+        if message.deferred:
+            log.info("voice deferred %s: %s %s", message.session_id, voice.persona, voice.speed)
+            origin = "отложенное сообщение"
+        else:
+            log.info("revoice %s %s: %s %s -> %s %s", message.session_id,
+                     self._queue.task_of(message), message.persona, message.speed,
+                     voice.persona, voice.speed)
+            origin = "переозвучка"
         self._queue.forget_audio(message)
         message.persona = voice.persona
         message.speed = voice.speed
         fields = {**voice.fields, "text": message.text, "session_id": message.session_id,
                   "project": message.project}
-        self._send(message, fields, "переозвучка")
+        self._send(self._queue, message, fields, origin)
         return True
 
-    def _active_voice(self) -> ActiveVoice | None:
+    def _active_voice(self, message: Message) -> ActiveVoice | None:
+        """Текущий голос для озвучки message; сбой чтения — None и строка в журнал: у
+        озвученного кэш считается актуальным, отложенное остаётся без звука."""
         try:
             return self._daemon_settings.active_voice()
         except SettingsError as error:
-            log.warning("голос не прочитан (%s), кэш считается актуальным", error)
+            if message.deferred:
+                log.warning("голос не прочитан (%s): отложенное сообщение %s не озвучено;"
+                            " автовоспроизведение пропустит его как прослушанное, play"
+                            " пользователя повторит", error, message.session_id)
+            else:
+                log.warning("голос не прочитан (%s), кэш считается актуальным", error)
             return None
 
     def _play_at(self, position: float) -> None:
