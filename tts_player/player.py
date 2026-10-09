@@ -163,7 +163,9 @@ class Player:
         self._ducking = False  # duck() вызван, restore() ещё нет
         self._refresh_id = 0
         self._watch_id = 0
-        # cwd очищенной `/clear` активной сессии: сессия оттуда станет активной вместо неё
+        # cwd очищенной `/clear` активной сессии: сессия оттуда станет активной вместо неё.
+        # Инвариант: ожидание замены => активной сессии нет (ставится только при снятии
+        # активной, любая активация его снимает)
         self._replace_cwd: str | None = None
 
     def apply_prefs(self, prefs: Prefs) -> None:
@@ -302,8 +304,8 @@ class Player:
         if session_id == self._sessions.active or not self._sessions.has(session_id):
             return
         self._replace_cwd = None
-        log.info("session select %s", session_id)
         self._activate(session_id)
+        log.info("session select %s", session_id)
         self._changed()
 
     def _activate(self, session_id: str) -> None:
@@ -318,7 +320,6 @@ class Player:
         session_id = self._sessions.active
         if not self._sessions.deselect():
             return
-        self._replace_cwd = None
         log.info("session close %s", session_id)
         self._halt()
         self._reset_cursor()

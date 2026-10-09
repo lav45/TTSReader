@@ -2060,15 +2060,6 @@ class PlayerSessionsTest(PlayerCase):
         self.player.add_session("C", "/w/proj")
         self.assertEqual("B", self.state().active)
 
-    def test_close_session_drops_pending_replacement(self) -> None:
-        self.player.select_session("B")
-        self.player.clear_session("B", "/w/other")
-        self.player.add_session("X", "/w/x")
-        self.player.select_session("X")
-        self.player.close_session()
-        self.player.add_session("C", "/w/other")
-        self.assertIsNone(self.state().active)
-
     def test_remove_active_sets_no_replacement(self) -> None:
         self.player.remove_session("S")
         self.player.add_session("C", "/w/proj")

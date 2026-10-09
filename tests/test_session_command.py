@@ -205,9 +205,16 @@ class SessionRequestTest(unittest.TestCase):
         self.assertEqual([], list(self.control.iterdir()))
 
     def test_usage_errors(self) -> None:
-        for args in (("session", "add", "u1"), ("session", "add"), ("session", "remove"),
-                     ("session", "remove", "u1", "u2"),
-                     ("session", "clear"), ("session", "clear", "u1"), ("session", "clear", "u1", "/p", "x"), ("session", "add", "u1", "/p", "x")):
+        for args in (
+            ("session", "add", "u1"),
+            ("session", "add"),
+            ("session", "add", "u1", "/p", "x"),
+            ("session", "remove"),
+            ("session", "remove", "u1", "u2"),
+            ("session", "clear"),
+            ("session", "clear", "u1"),
+            ("session", "clear", "u1", "/p", "x"),
+        ):
             with self.subTest(args=args):
                 result = run_cli(self.runtime, *args)
                 self.assertEqual(2, result.returncode)
