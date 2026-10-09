@@ -52,10 +52,13 @@
   остаётся (выбрано пользователем из: SessionEnd убирает любую / кроме активной / только кнопка;
   я рекомендовал «кроме активной» — `/clear` посреди прослушивания обрывает звук и удаляет хвост).
 - Повторный `SessionStart` той же сессии (`--resume`) ничего не меняет: сессия уже в списке.
-- Хук `SessionStart` зовёт `tts-player-hook on <uuid> <cwd>` — то, что звал `/tts-on`: демон с
+- Хук `SessionStart` зовёт `tts-player-hook start` (JSON хука на stdin) — то, что звал `/tts-on`: демон с
   обёрткой, плеер в трее, `session add`. Гейт `tts-gate.sh` остаётся как есть (выбрано из:
   SessionStart поднимает всё / автозапуск с рабочим столом и только `session add`; причина — один
   механизм запуска, и упавший плеер поднимает следующая сессия; моя рекомендация, принята).
+- `start` в режиме claude-tts не `queue` ничего не запускает и сессию не добавляет — как прежний
+  `tts-toggle.sh` (решение при исполнении); `end` гейта не имеет.
+- Путь к хуку в `settings.json` — симлинк `~/.local/bin/tts-player-hook`, как в установке из README.
 - Сессии, запущенные до перехода, в список не попадают и молчат до перезапуска; это шаг в README
   перехода (моё решение: случай разовый).
 
@@ -103,16 +106,13 @@ stdout:   пусто
 
 ~/.claude/settings.json:
   "SessionStart": [{"hooks": [{"type": "command",
-                    "command": "/home/lav45/Programs/TTSReader/bin/tts-player-hook start", "timeout": 5}]}]
+                    "command": "/home/lav45/.local/bin/tts-player-hook start", "timeout": 5}]}]
   "SessionEnd":   [{"hooks": [{"type": "command",
-                    "command": "/home/lav45/Programs/TTSReader/bin/tts-player-hook end", "timeout": 5}]}]
+                    "command": "/home/lav45/.local/bin/tts-player-hook end", "timeout": 5}]}]
 ```
 
 ## Открытые вопросы
 
 - Свой текст (удержание, hold) без фокуса: режется ли очередь до `tail`, пока звучит свой текст, —
   по правилу «нет фокуса» да; важно, если свой текст долгий, а ответы сессии идут потоком.
-- Путь к `tts-player-hook` в `settings.json`: абсолютный в репозиторий или через `PATH`
-  (`tts-player-hook` уже должен быть в `PATH` по README) — решит план по тому, как прописаны
-  остальные хуки.
 

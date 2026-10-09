@@ -1,14 +1,20 @@
 #!/bin/bash
 #
-# tts-player-hook - поднимает демон озвучки и плеер и регистрирует сессию Claude Code.
+# tts-player-hook - хуки SessionStart и SessionEnd Claude Code: поднимает демон озвучки и
+# плеер и регистрирует или снимает сессию в списке плеера.
 #
 # Демон claude-tts ищет проигрыватель по имени paplay через PATH; обёртка
 # daemon-bin/paplay кладёт звук в буфер плеера, но работает, только если daemon-bin
-# стоит первым в PATH демона. Зовёт tts-toggle.sh на /tts-on.
+# стоит первым в PATH демона.
 #
-# Вызов: tts-player-hook on <uuid> <cwd>; любые другие аргументы - usage, код 1,
-# ничего не запускается.
+# Вызов (JSON хука приходит на stdin; любые другие аргументы - usage, код 1, ничего не
+# запускается и stdin не читается):
+#   tts-player-hook start   - хук SessionStart: {"session_id": ..., "cwd": ..., ...}
+#   tts-player-hook end     - хук SessionEnd:   {"session_id": ..., ...}
 #
+# start. Гейт режима: в ~/.claude-tts/config.json поле mode не queue (нет файла, нечитаемый
+# файл или нет поля - считается direct, как у прежней обёртки tts-toggle.sh) -> одна строка в
+# hook.log, код 0, ничего не запускается и сессия не добавляется. У end гейта нет.
 # Демона нет (нет живого PID в ~/.claude-tts/daemon.pid) -> claude-tts daemon start;
 # демон жив, а первый элемент PATH в /proc/<pid>/environ не daemon-bin ->
 # claude-tts daemon restart (до ~15 с, а у хука 5 с, поэтому отвязан через setsid,
@@ -18,11 +24,18 @@
 # claude_code_tts, иначе демона нет (старт, не перезапуск).
 # Затем плеер: не запущен -> tts-player --tray отвязанным процессом (вывод в
 # player.log); уже запущен (проба player.lock без записи) -> не трогать. Хук не ждёт плеер.
-# Затем tts-player session add <uuid> <cwd>: сессия попадает в список плеера, вывод
-# команды идёт в stdout хука, а её код выхода становится кодом хука (1 - запрос не записан).
+# Затем tts-player session add <session_id> <cwd>: сессия попадает в список плеера.
 #
-# Код 0; 1 - нет claude-tts или tts-player в PATH, нет XDG_RUNTIME_DIR, неверные или пустые
-# аргументы (сообщение в stderr), session add не записал запрос.
+# end. Только tts-player session remove <session_id>: claude-tts не нужен, демон и плеер
+# не запускаются.
+#
+# stdout хука пуст всегда: строки состояния (демон, плеер, вывод session add|remove,
+# предупреждение о перезапуске демона) дописываются в $XDG_RUNTIME_DIR/tts-player/hook.log,
+# ошибки идут в stderr.
+#
+# Код 0; 1 - stdin не один JSON-объект, нет session_id (у start и cwd) непустой строкой, нет
+# claude-tts (start) или tts-player в PATH, нет XDG_RUNTIME_DIR, неверные аргументы
+# (сообщение в stderr), session add|remove вернул не 0.
 # Только для тестов: TTS_HOOK_PROC (вместо /proc), TTS_HOOK_HOME (вместо $HOME).
 
 set -u
@@ -32,11 +45,12 @@ fail() {
     exit 1
 }
 
-# Аргументы проверяются до всего остального: неверный вызов ничего не запускает.
-if [ "$#" -ne 3 ] || [ "$1" != "on" ] || [ -z "$2" ] || [ -z "$3" ]; then
-    fail "Usage: tts-player-hook on <uuid> <cwd>"
+# Аргументы проверяются до всего остального: неверный вызов ничего не запускает и
+# не читает stdin.
+if [ "$#" -ne 1 ] || { [ "$1" != "start" ] && [ "$1" != "end" ]; }; then
+    fail "Usage: tts-player-hook start|end (JSON хука на stdin)"
 fi
-shift
+MODE="$1"
 
 DAEMON_BIN="$(dirname "$(dirname "$(readlink -f "$0")")")/daemon-bin"
 PROC="${TTS_HOOK_PROC:-/proc}"
@@ -46,6 +60,8 @@ PID_FILE="$HOME_DIR/.claude-tts/daemon.pid"
 [ -z "${XDG_RUNTIME_DIR:-}" ] && fail "XDG_RUNTIME_DIR не задан"
 STATE="$XDG_RUNTIME_DIR/tts-player"
 LOCK="$STATE/player.lock"
+
+LOG="$STATE/hook.log"
 
 command -v tts-player > /dev/null || fail "tts-player не найден в PATH"
 
@@ -83,42 +99,79 @@ daemon_first_path() {
     done < "$PROC/$1/environ" 2> /dev/null
 }
 
-on() {
-    # $1 - uuid сессии, $2 - cwd
+log() {
+    echo "$*" >> "$LOG"
+}
+
+# Поле строкой из JSON-объекта на stdin или пусто.
+json_field() {
+    jq -r --arg key "$1" '.[$key] | select(type == "string")' <<< "$INPUT"
+}
+
+# Режим claude-tts из config.json; нет файла, нечитаемый файл или нет поля - direct.
+claude_tts_mode() {
+    jq -r '.mode // "direct"' "$HOME_DIR/.claude-tts/config.json" 2> /dev/null || echo direct
+}
+
+start() {
+    # $1 - session_id, $2 - cwd
     command -v claude-tts > /dev/null || fail "claude-tts не найден в PATH"
-    mkdir -p "$STATE" || fail "не удалось создать $STATE"
+
+    if [ "$(claude_tts_mode)" != "queue" ]; then
+        log "режим claude-tts не queue — плеер не участвует, сессия не добавлена"
+        return 0
+    fi
 
     local pid first restarted=0
     pid="$(daemon_pid)"
     if [ -z "$pid" ]; then
         PATH="$DAEMON_BIN:$PATH" claude-tts daemon start < /dev/null > /dev/null 2>&1
         if [ -n "$(daemon_pid)" ]; then
-            echo "демон запущен"
+            log "демон запущен"
         else
-            echo "демон не запустился, см. ~/.claude-tts/daemon.log"
+            log "демон не запустился, см. ~/.claude-tts/daemon.log"
         fi
     else
         first="$(daemon_first_path "$pid")"
         if [ "$first" = "$DAEMON_BIN" ]; then
-            echo "демон уже с обёрткой"
+            log "демон уже с обёрткой"
         else
             PATH="$DAEMON_BIN:$PATH" setsid claude-tts daemon restart \
                 < /dev/null >> "$STATE/daemon-restart.log" 2>&1 &
             restarted=1
-            echo "перезапуск демона с обёрткой запущен"
+            log "перезапуск демона с обёрткой запущен"
         fi
     fi
 
     if player_running; then
-        echo "плеер уже запущен"
+        log "плеер уже запущен"
     else
         setsid tts-player --tray < /dev/null >> "$STATE/player.log" 2>&1 &
-        echo "запуск плеера отдан (ошибки - $STATE/player.log)"
+        log "запуск плеера отдан (ошибки - $STATE/player.log)"
     fi
     if [ "$restarted" = 1 ]; then
-        echo "первый ответ после перезапуска может прозвучать мимо плеера - повторите /tts-on через несколько секунд"
+        log "первый ответ после перезапуска демона может прозвучать мимо плеера"
     fi
-    tts-player session add "$1" "$2" < /dev/null
+    tts-player session add "$1" "$2" < /dev/null >> "$LOG" 2>&1 || fail "session add не записал запрос, см. $LOG"
 }
 
-on "$1" "$2"
+end() {
+    # $1 - session_id
+    tts-player session remove "$1" < /dev/null >> "$LOG" 2>&1 || fail "session remove не выполнен, см. $LOG"
+}
+
+mkdir -p "$STATE" || fail "не удалось создать $STATE"
+command -v jq > /dev/null || fail "jq не найден в PATH"
+
+INPUT="$(cat)"
+jq -s -e 'length == 1 and (.[0] | type == "object")' <<< "$INPUT" > /dev/null 2>&1 || fail "stdin не один JSON-объект"
+SESSION_ID="$(json_field session_id)"
+[ -n "$SESSION_ID" ] || fail "в JSON нет session_id"
+
+if [ "$MODE" = "start" ]; then
+    CWD="$(json_field cwd)"
+    [ -n "$CWD" ] || fail "в JSON нет cwd"
+    start "$SESSION_ID" "$CWD"
+else
+    end "$SESSION_ID"
+fi
