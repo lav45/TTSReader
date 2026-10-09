@@ -18,6 +18,7 @@ from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
+from tts_player.sessions import Sessions  # noqa: E402
 from tts_player.text_speaker import TextSpeaker, TextState  # noqa: E402
 
 LOOP_LIMIT_S = 10.0
@@ -520,6 +521,7 @@ class TextSpeakerDuckingTest(TextSpeakerCase):
         super().setUp()
         self.ducker = FakeDucker()
         self.main = Player(self.runtime, "fakesink", None, None, ducker=self.ducker,
+                           sessions=Sessions(self.runtime / "sessions.json"),
                            daemon_queue=DaemonQueue(self.runtime / "daemon-queue"),
                            daemon_settings=DaemonSettings(self.runtime / "claude-tts"))
         self.addCleanup(self.main.shutdown)

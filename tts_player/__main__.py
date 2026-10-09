@@ -33,6 +33,7 @@ from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
+from tts_player.sessions import Sessions, sessions_path  # noqa: E402
 from tts_player import session_command  # noqa: E402
 from tts_player.text_speaker import TextSpeaker  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
@@ -113,12 +114,15 @@ def main(argv: list[str] | None = None) -> int:
     # голос и скорость: экран настроек и переозвучка сообщений с устаревшим кэшем;
     # очередь демона и ссылки hook-home — в том же каталоге claude-tts, чтобы не разошлись
     settings = DaemonSettings(tts_config_dir)
+    sessions = Sessions(sessions_path(Path(runtime)))
+    sessions.load()  # сессии прошлого запуска — до player.start()
     try:
         player = Player(Path(runtime), args.audio_sink,
                         Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
                         ducker, hook_tasks_dir=hook_home.queue_dir,
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
-                        daemon_settings=settings)
+                        daemon_settings=settings, sessions=sessions,
+                        control_dir=Path(runtime) / "tts-player" / "control")
         prefs = PlayerSettings(Path(args.settings_file).expanduser())
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:

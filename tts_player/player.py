@@ -10,6 +10,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
+from tts_player.control import ControlRequests  # noqa: E402
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import ActiveVoice, DaemonSettings  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
@@ -21,6 +22,7 @@ from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.queue import MessageQueue  # noqa: E402
 from tts_player.saved_messages import SavedMessages  # noqa: E402
+from tts_player.sessions import Sessions  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 
 log = logging.getLogger("tts_player.player")
@@ -95,10 +97,14 @@ class Player:
                  clock: Callable[[], float] = time.monotonic,
                  hook_tasks_dir: Path | None = None, *,
                  daemon_queue: DaemonQueue,
-                 daemon_settings: DaemonSettings) -> None:
+                 daemon_settings: DaemonSettings,
+                 sessions: Sessions,
+                 control_dir: Path | None = None) -> None:
         """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
         hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
-        очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки."""
+        очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки;
+        sessions — список сессий (загружен до start()), control_dir — control/ (контракт (14)),
+        None — без запросов session add/remove."""
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
@@ -112,6 +118,10 @@ class Player:
                                     self._inbox.store)
         self._daemon_queue = daemon_queue
         self._daemon_settings = daemon_settings
+        self._sessions = sessions
+        self._control = None
+        if control_dir is not None:
+            self._control = ControlRequests(control_dir, self.add_session, self.remove_session)
         self._hook_tasks = None
         if hook_tasks_dir is not None:
             self._hook_tasks = HookTasks(hook_tasks_dir, self._on_hook_task)
@@ -182,6 +192,8 @@ class Player:
                             self._history_dir, error)
         self._queue.restore(self._saved.load())
         self._inbox.start(self._store_files())
+        if self._control is not None:
+            self._control.start()  # раньше задач хука: их сессии уже в списке
         if self._hook_tasks is not None:
             self._hook_tasks.start()
         if self._status == "idle" and self._starts_by_itself():
@@ -195,6 +207,16 @@ class Player:
         files = {s.path for m in self._queue.messages for s in m.sentences}
         files.update(m.audio for m in self._queue.messages if m.audio is not None)
         return frozenset(files)
+
+    def add_session(self, session_id: str, cwd: str) -> None:
+        """Запрос `session add` забран (строку журнала читает e2e)."""
+        log.info("session add %s", session_id)
+        self._sessions.add(session_id, cwd)
+
+    def remove_session(self, session_id: str) -> None:
+        """Запрос `session remove` забран (строку журнала читает e2e)."""
+        log.info("session remove %s", session_id)
+        self._sessions.remove(session_id)
 
     def _on_hook_task(self, task: HookTask) -> None:
         """Задача хука забрана (строка журнала — её читает e2e): её поля как есть уходят в
@@ -224,6 +246,8 @@ class Player:
         self._unduck()
         self._stop_watch()
         self._inbox.stop()
+        if self._control is not None:
+            self._control.stop()
         if self._hook_tasks is not None:
             self._hook_tasks.stop()
         if self._history is not None:
