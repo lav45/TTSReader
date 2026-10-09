@@ -73,12 +73,6 @@ class FakePlayer:
         self.calls.append(("apply_prefs", prefs))
         self.change(self.snapshot)
 
-    def next(self) -> None:
-        self.calls.append(("next",))
-
-    def prev(self) -> None:
-        self.calls.append(("prev",))
-
     def seek(self, position_s: float) -> None:
         self.calls.append(("seek", position_s))
 
