@@ -25,6 +25,7 @@ from gi.repository import GLib  # noqa: E402
 
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
+from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
@@ -97,20 +98,26 @@ def main(argv: list[str] | None = None) -> int:
     ducker = Ducker(Path(runtime) / "tts-player" / "duck.json", os.getpid(),
                     Path(runtime) / "tts-player" / "duck-orphans.json")
     ducker.recover()  # остаток после падения — до первого duck в player.start()
-    player = Player(Path(runtime), args.audio_sink,
-                    Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
-                    ducker)
-    prefs = PlayerSettings(Path(args.settings_file).expanduser())
-    player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
-    if args.no_gui:
-        loop = GLib.MainLoop()
-        run(player, loop.run, loop.quit)
-    else:
-        settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
-        voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
-        text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
-                                   SYNTH_WORKER, player, args.audio_sink)
-        run_gui(player, settings, prefs, voicing, text_speaker, args.show)
+    # подменённый HOME хука: его queue/ плеер забирает, heartbeat держит HookHome
+    hook_home = HookHome(Path(runtime) / "tts-player", Path("~/.claude-tts").expanduser())
+    hook_home.start()  # до player.start(): к первой задаче хука hook-home уже готов
+    try:
+        player = Player(Path(runtime), args.audio_sink,
+                        Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
+                        ducker, hook_tasks_dir=hook_home.queue_dir)
+        prefs = PlayerSettings(Path(args.settings_file).expanduser())
+        player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
+        if args.no_gui:
+            loop = GLib.MainLoop()
+            run(player, loop.run, loop.quit, hook_home=hook_home)
+        else:
+            settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
+            voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
+            text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
+                                       SYNTH_WORKER, player, args.audio_sink)
+            run_gui(player, settings, prefs, voicing, text_speaker, args.show, hook_home)
+    finally:
+        hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
     return 0
 
 
@@ -143,7 +150,7 @@ def gtk_ready() -> bool:
 
 
 def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voicing: Voicing,
-            text_speaker: TextSpeaker, show: bool) -> None:
+            text_speaker: TextSpeaker, show: bool, hook_home: HookHome) -> None:
     from gi.repository import Gtk
 
     from tts_player.window import PlayerWindow, TrayIcon
@@ -152,7 +159,7 @@ def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voi
     tray = TrayIcon(window, Gtk.main_quit)  # noqa: F841 — значок живёт, пока жива ссылка
     if show:
         window.present()
-    run(player, Gtk.main, Gtk.main_quit, text_speaker)
+    run(player, Gtk.main, Gtk.main_quit, text_speaker, hook_home)
 
 
 def stop_sound(player: Player, text_speaker: TextSpeaker | None) -> None:
@@ -164,11 +171,12 @@ def stop_sound(player: Player, text_speaker: TextSpeaker | None) -> None:
 
 
 def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None],
-        text_speaker: TextSpeaker | None = None) -> None:
+        text_speaker: TextSpeaker | None = None, hook_home: HookHome | None = None) -> None:
     """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, незаконченное — обратно в inbox/.
 
     Свой текст (только с окном): остатки прошлых запусков удаляются до player.start(), выход
-    TextSpeaker — до player.shutdown(), иначе его release() пришёл бы в остановленный плеер."""
+    TextSpeaker — до player.shutdown(), иначе его release() пришёл бы в остановленный плеер.
+    HookHome (запущен до run) останавливается последним, после player.shutdown()."""
     def on_signal() -> bool:
         quit_loop()
         return GLib.SOURCE_REMOVE
@@ -195,10 +203,14 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
         main_loop()
     finally:
         try:
-            if text_speaker is not None:
-                text_speaker.shutdown()
+            try:
+                if text_speaker is not None:
+                    text_speaker.shutdown()
+            finally:
+                player.shutdown()
         finally:
-            player.shutdown()
+            if hook_home is not None:
+                hook_home.stop()
 
 
 if __name__ == "__main__":

@@ -495,6 +495,27 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(0, result.returncode)
         self.assertIn("плеер не запущен", result.stderr)
 
+    def test_hook_task_is_taken_and_logged(self) -> None:
+        claude_tts = self.home / ".claude-tts"
+        claude_tts.mkdir()
+        (claude_tts / "daemon.heartbeat").write_text(str(time.time()))
+        self.start_player()
+        hook_base = self.runtime / "tts-player" / "hook-home" / ".claude-tts"
+        queue_dir = hook_base / "queue"
+        deadline = time.monotonic() + WAIT
+        while not queue_dir.is_dir():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.02)
+        tmp = queue_dir / "1.tmp"
+        tmp.write_text(json.dumps({"id": "abc", "session_id": "sess", "text": "Привет"}))
+        tmp.rename(queue_dir / "1.json")
+        self.assertEqual("task abc sess 6 chars", self.next_line("task "))
+        self.assertFalse((queue_dir / "1.json").exists())
+        self.assertFalse((self.runtime / "hook-home").exists())
+        while not (hook_base / "daemon.heartbeat").exists():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.02)
+
     def test_tray_conflicts(self) -> None:
         for extra in ("--show", "--no-gui"):
             result = subprocess.run(
