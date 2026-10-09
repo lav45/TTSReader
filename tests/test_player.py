@@ -1625,13 +1625,17 @@ class PlayerRevoiceTest(PlayerCase):
 
     def test_message_in_flight_is_not_revoiced(self) -> None:
         """Задача сообщения ещё синтезируется: оно играет, как растёт, без новой задачи."""
-        self.settings.persona = "q"
         self.start_with(A0)
+        self.announce("bb")  # у второго сообщения нет предложений: «aa» ещё не завершено
+        self.player.play_message(self.player._queue.messages[1])
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertEqual("stopped", self.state().status)
+        self.settings.persona = "q"
+        puts = len(self.daemon.puts)
         self.player.toggle_play_pause()
-        self.player.toggle_play_pause()
-        self.assertEqual(1, len(self.daemon.puts))
+        self.assertEqual(puts, len(self.daemon.puts))
         self.assertEqual(0, self.settings.reads)
-        self.assertEqual([A0, A0], self.playback.played)
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
 
     def test_click_only_selects_and_play_revoices(self) -> None:
         self.start_with(A0, B0)

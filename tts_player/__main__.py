@@ -36,8 +36,6 @@ from tts_player import session_command  # noqa: E402
 from tts_player.text_speaker import TextSpeaker  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
 
-log = logging.getLogger(__name__)
-
 SYNTH_WORKER = Path(__file__).resolve().parent / "synth_worker.py"
 
 
