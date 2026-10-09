@@ -541,6 +541,19 @@ class SingleInstanceTest(PlayerProcessCase):
                           "sessions": [{"id": self.session, "project": "proj"}]},
                          self.sessions_file())
 
+    def test_session_clear_hands_active_to_new_session_from_same_cwd(self) -> None:
+        self.start_player()
+        self.wait_lock()
+        self.assertEqual(0, self.run_bin("session", "add", "b1", "/p/b").returncode)
+        self.next_line("session add b1")
+        self.assertEqual(self.session, self.sessions_file()["active"])
+        self.assertEqual(0, self.run_bin("session", "clear", self.session, "/p/a").returncode)
+        self.next_line(f"session clear {self.session}")
+        self.assertIsNone(self.sessions_file()["active"])
+        self.assertEqual(0, self.run_bin("session", "add", "c1", "/p/a").returncode)
+        self.next_line("session replace c1")
+        self.assertEqual("c1", self.sessions_file()["active"])
+
     def test_session_add_without_player_is_executed_at_player_start(self) -> None:
         added = self.run_bin("session", "add", "u2", "/p/X")
         self.assertEqual(0, added.returncode)
