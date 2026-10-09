@@ -287,13 +287,17 @@ class ActiveVoiceTest(unittest.TestCase):
             "speaker_sherpa": 0, "voice_mlx": "", "speaker_mlx": "", "lang_mlx": "",
             "pitch_filter": ""}), voice)
 
-    def test_missing_speed_and_method_take_defaults(self):
+    def test_missing_keys_take_hook_defaults(self):
+        """Как claude-tts config.py:300–313 и write_queue_message: скорость 2.0, метод
+        playback, speaker_sherpa -1, остальное — пустая строка."""
         config = make_config()
-        del config["personas"]["supertonic-3"]["speed"]
-        del config["personas"]["supertonic-3"]["speed_method"]
+        for key in ("speed", "speed_method", "voice_sherpa", "speaker_sherpa"):
+            del config["personas"]["supertonic-3"][key]
         self.write_config(config)
-        voice = self.settings.active_voice()
-        self.assertEqual((2.0, "playback"), (voice.speed, voice.fields["speed_method"]))
+        fields = self.settings.active_voice().fields
+        self.assertEqual((2.0, "playback", -1, ""),
+                         (fields["speed"], fields["speed_method"], fields["speaker_sherpa"],
+                          fields["voice_sherpa"]))
 
     def test_speed_out_of_screen_range_is_still_voice(self):
         """Диапазон спина экрана настроек к переозвучке не относится."""

@@ -18,9 +18,11 @@ SESSIONS_DIR = "sessions.d"
 SESSION_KEYS = ("persona", "speed")
 DEFAULT_SPEED = 2.0  # как в claude-tts get_persona_config, если у персоны нет speed
 DEFAULT_SPEED_METHOD = "playback"  # как в claude-tts write_queue_message, если у персоны нет
-# голос персоны в задаче демона (формат claude-tts 9.20.1, audio.py:670); нет у персоны — ""
-VOICE_KEYS = ("voice_kokoro", "voice_kokoro_blend", "voice_sherpa", "speaker_sherpa",
-              "voice_mlx", "speaker_mlx", "lang_mlx", "pitch_filter")
+# Голос персоны в задаче демона (формат claude-tts 9.20.1, audio.py:670) и значение, когда
+# его нет у персоны, — как в claude-tts config.py:305–313.
+VOICE_DEFAULTS = {"voice_kokoro": "", "voice_kokoro_blend": "", "voice_sherpa": "",
+                  "speaker_sherpa": -1, "voice_mlx": "", "speaker_mlx": "", "lang_mlx": "",
+                  "pitch_filter": ""}
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,8 @@ class VoiceSettings:
 @dataclass(frozen=True)
 class ActiveVoice:
     """Текущий голос озвучки: активная персона, её скорость и поля задачи демона
-    (persona, speed, speed_method и VOICE_KEYS) — как их пишет хук claude-tts."""
+    (persona, speed, speed_method и ключи VOICE_DEFAULTS) — с теми же значениями по
+    умолчанию, что пишет хук claude-tts."""
     persona: str
     speed: float
     fields: dict
@@ -80,7 +83,7 @@ class DaemonSettings:
             "persona": active,
             "speed": float(speed),
             "speed_method": persona.get("speed_method") or DEFAULT_SPEED_METHOD,
-            **{key: persona.get(key, "") for key in VOICE_KEYS},
+            **{key: persona.get(key, default) for key, default in VOICE_DEFAULTS.items()},
         }
         return ActiveVoice(active, float(speed), fields)
 

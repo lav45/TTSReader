@@ -298,12 +298,14 @@ class PlayerHistoryTest(PlayerCase):
         self.assertEqual("aa", self.task())
         self.assertTrue(self.state().current.heard)
 
-    def test_shutdown_during_joined_file_keeps_its_files(self) -> None:
-        """Выход: непрослушанное сохраняется в messages.json, его файлы и склейка — в store/."""
+    def test_shutdown_during_joined_file_keeps_unfinished_sentences(self) -> None:
+        """Выход на 0,7 с склейки: непрослушанное — в messages.json; доигранное A0 и склейка
+        удалены, недоигранное A1 и следующее N0 — в store/."""
         self.switch_on_a1()
+        self.playback.at = 0.7  # склейка играет с 0,7 с
         self.player.shutdown()
         self.assertEqual([], list(self.inbox_dir.iterdir()))
-        self.assertEqual(sorted([A0, A1, N0, JOINED]),
+        self.assertEqual(sorted([A1, N0]),
                          sorted(p.name for p in self.store_dir.iterdir()))
         self.assertTrue(self.saved_file().exists())
 
@@ -326,6 +328,36 @@ class PlayerHistoryTest(PlayerCase):
         self.finish()
         self.assertEqual([A0, A1, B0], self.playback.played)
         self.assertEqual(1, len(self.daemon.puts) - 1)  # переозвучки нет: кэш актуален
+
+    def test_restart_resumes_current_from_unfinished_sentence(self) -> None:
+        """Как прежний возврат store/ → inbox/: доигранные до позиции предложения текущего
+        удаляются при выходе, следующий запуск играет с недоигранного."""
+        self.start_with(A0, A1, B0)
+        self.finish()
+        self.playback.at = 0.2  # играет A1: позиция 0,7 в сообщении aa
+        self.player.shutdown()
+        self.assertEqual(sorted([A1, B0]), sorted(p.name for p in self.store_dir.iterdir()))
+        self.restart()
+        self.assertEqual([(A1, 0.0)], self.playback.starts)
+        self.finish()
+        self.assertEqual(B0, self.playback.played[-1])
+
+    def test_new_message_after_clear_and_restart_plays_all_sentences(self) -> None:
+        """Очистка, выход, старт: новые задачи идут после доставленных до очистки — новое
+        сообщение растёт, а не завершено с первого предложения."""
+        self.start_with(A0, B0)
+        self.arrive(C0)
+        self.player.clear()
+        self.player.shutdown()
+        self.restart()
+        self.arrive("1000000000000000006_ee_tts_queue_S_ee_s0.wav")
+        message = self.state().current
+        self.assertFalse(self.player._queue.is_complete(message))
+        self.finish()
+        self.assertFalse(message.heard)
+        self.arrive("1000000000000000007_ee_tts_queue_S_ee_s1.wav")
+        self.assertEqual("1000000000000000007_ee_tts_queue_S_ee_s1.wav", self.playback.played[-1])
+        self.assertEqual(4, len(self.daemon.puts))  # aa, bb, cc, ee — без повторной задачи
 
     def test_heard_message_is_saved_without_files(self) -> None:
         self.start_with(A0, B0)
@@ -1562,9 +1594,6 @@ class PlayerHookTasksTest(PlayerCase):
         self.assertEqual([{"id": "z", "session_id": "S", "text": "xy"}], self.daemon.puts)
         self.assertEqual([], list(queue_dir.iterdir()))
 
-    def test_hook_tasks_need_daemon_queue_and_settings(self) -> None:
-        with self.assertRaises(ValueError):
-            Player(self.runtime, None, None, None, hook_tasks_dir=self.runtime / "q")
 
 
 class PlayerRevoiceTest(PlayerCase):

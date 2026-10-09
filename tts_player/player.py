@@ -92,15 +92,12 @@ class Player:
                  history_dir: Path | None, history_db: Path | None,
                  ducker: Ducker | None = None,
                  clock: Callable[[], float] = time.monotonic,
-                 hook_tasks_dir: Path | None = None,
-                 daemon_queue: DaemonQueue | None = None,
-                 daemon_settings: DaemonSettings | None = None) -> None:
+                 hook_tasks_dir: Path | None = None, *,
+                 daemon_queue: DaemonQueue,
+                 daemon_settings: DaemonSettings) -> None:
         """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
         hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
-        очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки:
-        оба нужны, чтобы принимать задачи хука."""
-        if hook_tasks_dir is not None and (daemon_queue is None or daemon_settings is None):
-            raise ValueError("задачам хука нужны daemon_queue и daemon_settings")
+        очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки."""
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
@@ -230,8 +227,9 @@ class Player:
             self._hook_tasks.stop()
         if self._history is not None:
             self._history.stop()
+        position = self._now()
         self._halt()
-        self._saved.save(self._queue.release())
+        self._saved.save(self._queue.release(self._current, position))
 
     def state(self) -> PlayerState:
         current = self._current

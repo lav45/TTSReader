@@ -458,6 +458,56 @@ class SnapshotTest(unittest.TestCase):
         self.assertFalse(sentences[0].path.exists())
         self.assertTrue(all(queue.is_started(m) for m in queue.messages))
 
+    def test_new_task_after_restore_of_cleared_queue_is_not_complete(self):
+        """Очистка забыла задачи, а delivered остался: порядок новых задач идёт после него."""
+        self.add(1, task="t1")
+        self.add(2, task="t2")
+        self.queue.clear()
+        snapshot = self.queue.release()
+        self.assertEqual(({}, 2), (snapshot.task_order, snapshot.delivered))
+        queue = MessageQueue(tail=5)
+        queue.restore(snapshot)
+        fresh = Message("s1")
+        queue.append(fresh)
+        queue.link(fresh, "t3")
+        queue.add(self.sentence(3, task="t3"))
+        self.assertFalse(queue.is_complete(fresh))
+
+    def test_release_drops_finished_sentences_of_current(self):
+        """Позиция текущего непрослушанного: кончившиеся до неё предложения и склейка
+        удаляются — следующий запуск продолжит с недоигранного."""
+        message = self.message("t1")
+        first, second, third = (self.sentence(n, "t1", n) for n in (1, 2, 3))
+        for sentence in (first, second, third):
+            self.queue.add(sentence)
+        audio = self.dir / "joined.wav"
+        audio.write_bytes(b"wav")
+        message.audio, message.duration_s = audio, 3.0
+        with mock.patch.object(MessageQueue, "_duration", return_value=1.0):
+            snapshot = self.queue.release(message, 1.5)
+        self.assertEqual([second, third], snapshot.messages[0].sentences)
+        self.assertFalse(first.path.exists())
+        self.assertFalse(audio.exists())
+        self.assertEqual((None, None), (message.audio, message.duration_s))
+
+    def test_release_keeps_current_at_sentence_boundary_from_next(self):
+        message = self.message("t1")
+        first, second = self.sentence(1, "t1", 0), self.sentence(2, "t1", 1)
+        self.queue.add(first)
+        self.queue.add(second)
+        with mock.patch.object(MessageQueue, "_duration", return_value=1.0):
+            self.queue.release(message, 1.0)
+        self.assertEqual([second], message.sentences)
+
+    def test_release_at_zero_keeps_current_whole(self):
+        message = self.message("t1")
+        sentence = self.add(1, task="t1")
+        audio = self.dir / "joined.wav"
+        audio.write_bytes(b"wav")
+        message.audio, message.duration_s = audio, 1.0
+        self.queue.release(message, 0.0)
+        self.assertEqual(([sentence], audio), (message.sentences, message.audio))
+
     def test_empty_snapshot_restores_nothing(self):
         self.queue.restore(QueueSnapshot([], [], {}, 0))
         self.assertEqual([], self.queue.messages)

@@ -172,9 +172,15 @@ class MessageQueue:
             self._unlink_audio(message)
         self._forget()
 
-    def release(self) -> QueueSnapshot:
+    def release(self, current: Message | None = None, position_s: float = 0.0) -> QueueSnapshot:
         """Выход плеера: файлы прослушанных удалены (их текст остаётся), файлы остальных
-        остаются в store/; очередь забывает всё и отдаёт снимок для следующего запуска."""
+        остаются в store/; очередь забывает всё и отдаёт снимок для следующего запуска.
+
+        current (непрослушанное) на позиции position_s > 0: предложения, кончившиеся до
+        неё, и склейка удаляются — следующий запуск продолжит с недоигранного (предложение
+        нулевой длины на позиции и начинающееся на ней остаются)."""
+        if current is not None and not current.heard and position_s > 0:
+            self._drop_played(current, position_s)
         for message in self._messages:
             if message.heard:
                 for sentence in message.sentences:
@@ -189,13 +195,29 @@ class MessageQueue:
         self._forget()
         return snapshot
 
+    def _drop_played(self, message: Message, position_s: float) -> None:
+        played = [s for s in message.sentences if not self._unfinished(message, s, position_s)]
+        for sentence in played:
+            self._unlink(sentence)
+        self._unlink_audio(message)
+        message.sentences = [s for s in message.sentences if s not in played]
+        message.audio = None
+        message.duration_s = None
+
+    def _unfinished(self, message: Message, sentence: Sentence, position_s: float) -> bool:
+        start = self.offset_of(message, sentence)
+        return start + self._duration(sentence) > position_s or start >= position_s
+
     def restore(self, snapshot: QueueSnapshot) -> None:
         """Старт плеера: сообщения прошлого запуска — перед уже пришедшими, с их задачами
         (поздние предложения этих задач — их) и завершённостью; хвост начатых подгоняется
         к tail, лишние удаляются, самые старые первыми."""
         self._task_order.update(snapshot.task_order)
-        self._sequence = itertools.count(max(self._task_order.values(), default=0) + 1)
         self._delivered = max(self._delivered, snapshot.delivered)
+        # новые задачи — после всех известных и доставленных (clear забывает задачи, но не
+        # delivered): иначе новое сообщение считалось бы завершённым с первого предложения
+        last = max([*self._task_order.values(), self._delivered])
+        self._sequence = itertools.count(last + 1)
         self._messages[:0] = snapshot.messages
         self._started[:0] = snapshot.started
         while len(self._started) > self.tail:
@@ -232,10 +254,10 @@ class MessageQueue:
         """Привязывает склейку демона к сообщению её сессии; None, если сообщения нет.
 
         Сообщение — с наибольшим первым recv_ns среди сообщений сессии с предложениями,
-        без audio и записи истории, все предложения которых получены раньше entry.created_at. При совпадении
-        длительности (допуск DURATION_TOLERANCE_S) склейка копируется в store/ и
-        становится audio; иначе (или при сбое копирования) audio остаётся None, а
-        сообщение доигрывается по предложениям. created_at/project заполняются
+        без audio и записи истории, все предложения которых получены раньше
+        entry.created_at. При совпадении длительности (допуск DURATION_TOLERANCE_S) склейка
+        копируется в store/ и становится audio; иначе (или при сбое копирования) audio
+        остаётся None, а сообщение доигрывается по предложениям. created_at/project заполняются
         в любом случае: сообщение считается завершённым (is_complete). Переход
         играющего сообщения на склейку решает Player.
         """
