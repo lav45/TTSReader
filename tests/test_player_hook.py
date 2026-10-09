@@ -34,6 +34,15 @@ class PlayerHookTest(unittest.TestCase):
         self.records.mkdir()
         self.stub("claude-tts", starts_daemon=True)
         self.stub("tts-player")
+        self.addCleanup(self.wait_stubs_finished)  # после tmp.cleanup в обратном порядке: до удаления каталога
+
+    def wait_stubs_finished(self, wait=15.0):
+        """Отвязанные (setsid) заглушки пишут в records/ после возврата хука: каталог удаляется,
+        только когда ни один процесс заглушек не жив."""
+        deadline = time.monotonic() + wait
+        while subprocess.run(["pgrep", "-f", str(self.stubs)], capture_output=True).returncode == 0:
+            self.assertLess(time.monotonic(), deadline, "заглушки не завершились")
+            time.sleep(0.05)
 
     def stub(self, name, starts_daemon=False):
         """Заглушка; starts_daemon: «daemon start» оставляет PID-файл и фальшивый /proc."""
