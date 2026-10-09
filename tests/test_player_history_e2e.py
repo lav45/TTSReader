@@ -81,6 +81,37 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assertLessEqual(position, 1.0)
         self.assertTrue(self.next_line("playing ").endswith(f"{other}_bbbbbb_s0.wav"))
 
+    def test_two_passes_of_one_task_complete_as_one_message(self) -> None:
+        """Обёртка с playback.json (id задачи X) кладёт два прохода синтеза с разными token:
+        плеер играет их одним сообщением, склейка задачи даёт одну строку complete."""
+        session = uuid.uuid4().hex
+        sentences = [*self.message(session, "aaaaaa", 2), self.sentence(session, "bbbbbb", 0, seconds=SECONDS)]
+        self.task("0123456789abcdef")
+        self.start_player()
+        for path in sentences:
+            self.drop(path)
+        first = self.next_line("playing ")
+        self.assertTrue(first.endswith(f"_0123456789abcdef_tts_queue_{session}_aaaaaa_s0.wav"),
+                        first)
+        self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s1.wav"))
+        self.daemon_saves(session, sentences)
+        lines = self.lines_until("complete ")
+        self.assertEqual(f"complete {session} aaaaaa 1.50s", lines[-1])
+        self.assertEqual([], [line for line in lines if line.startswith("ended ")])
+        tail = self.lines_for(e2e.QUIET)
+        self.assertEqual([], [line for line in tail if line.startswith(("complete ", "ended "))])
+
+    def lines_for(self, seconds: float) -> list[str]:
+        """Все строки за seconds."""
+        lines = []
+        deadline = time.monotonic() + seconds
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                lines.append(self.lines.get(timeout=left))
+            except queue.Empty:
+                break
+        return lines
+
     def test_joined_file_of_other_length_leaves_sentences(self) -> None:
         session = uuid.uuid4().hex
         sentences = self.message(session, "aaaaaa", 3)

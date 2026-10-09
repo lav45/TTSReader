@@ -20,11 +20,11 @@ from tts_player.model import Sentence  # noqa: E402
 from tts_player.player import Player, PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 
-A0 = "1000000000000000001_tts_queue_S_aa_s0.wav"
-A1 = "1000000000000000002_tts_queue_S_aa_s1.wav"
-B0 = "1000000000000000003_tts_queue_S_bb_s0.wav"
-N0 = "1000000000000000004_tts_queue_N_cc_s0.wav"  # другая сессия: склейка S её не берёт
-C0 = "1000000000000000005_tts_queue_S_cc_s0.wav"
+A0 = "1000000000000000001_unknown_tts_queue_S_aa_s0.wav"
+A1 = "1000000000000000002_unknown_tts_queue_S_aa_s1.wav"
+B0 = "1000000000000000003_unknown_tts_queue_S_bb_s0.wav"
+N0 = "1000000000000000004_unknown_tts_queue_N_cc_s0.wav"  # другая сессия: склейка S её не берёт
+C0 = "1000000000000000005_unknown_tts_queue_S_cc_s0.wav"
 JOINED = "tts-2000000000.000-S.wav"
 RATE = 1000
 SECONDS = 0.5
@@ -133,8 +133,9 @@ class PlayerCase(unittest.TestCase):
         path = self.store_dir / name
         write_wav(path, seconds)
         match = NAME_PATTERN.match(name)
-        self.player._on_sentence(Sentence(int(match["recv_ns"]), match["session_id"],
-                                          match["token"], int(match["index"]), path))
+        self.player._on_sentence(Sentence(int(match["recv_ns"]), match["task_id"],
+                                          match["session_id"], match["token"],
+                                          int(match["index"]), path))
 
     def path(self, name: str) -> Path:
         return self.store_dir / name
@@ -496,7 +497,7 @@ class PlayerCursorTest(PlayerCase):
         self.assertEqual([A0, B0], self.playback.played)
 
     def test_tail_keeps_five_started_messages(self) -> None:
-        names = [f"100000000000000000{i}_tts_queue_S_{t}_s0.wav"
+        names = [f"100000000000000000{i}_unknown_tts_queue_S_{t}_s0.wav"
                  for i, t in enumerate(["a1", "a2", "a3", "a4", "a5", "a6"], start=1)]
         self.start_with(*names)
         for _ in range(5):
@@ -579,7 +580,7 @@ class PlayerButtonsTest(PlayerCase):
         self.assertFalse(bb.heard)
         self.assertTrue(self.state().messages[0].heard)
         self.assertTrue(self.path(B0).exists())
-        self.arrive("1000000000000000006_tts_queue_S_bb_s1.wav")
+        self.arrive("1000000000000000006_unknown_tts_queue_S_bb_s1.wav")
         bb = self.state().messages[1]
         self.assertEqual(2, len(bb.sentences))
         self.assertFalse(bb.heard)

@@ -33,10 +33,10 @@ class QueueHistoryTest(unittest.TestCase):
             d.mkdir()
         self.queue = MessageQueue(tail=5)
 
-    def add(self, recv_ns, seconds, token="t1", index=0, session="s1"):
-        path = self.dir / f"{session}-{token}-{index}-{recv_ns}.wav"
+    def add(self, recv_ns, seconds, token="t1", index=0, session="s1", task="unknown"):
+        path = self.dir / f"{task}-{session}-{token}-{index}-{recv_ns}.wav"
         write_wav(path, seconds)
-        sentence = Sentence(recv_ns, session, token, index, path)
+        sentence = Sentence(recv_ns, task, session, token, index, path)
         self.queue.add(sentence)
         return sentence
 
@@ -48,6 +48,14 @@ class QueueHistoryTest(unittest.TestCase):
     def message(self, token="t1", session="s1"):
         return next(m for m in self.queue.messages
                     if m.token == token and m.session_id == session)
+
+    def test_attaches_to_message_of_two_passes_of_one_task(self):
+        """Склейка задачи, синтезированной в два прохода, — к одному сообщению обоих проходов."""
+        self.add(1_000_000_000, 1, token="aa", task="f00d")
+        self.add(2_000_000_000, 1, token="bb", task="f00d")
+        message = self.queue.attach(self.entry(2), self.store)
+        self.assertEqual(("f00d", "aa"), (message.task_id, message.token))
+        self.assertEqual(self.store / "tts-1.wav", message.audio)
 
     def test_attaches_latest_message_of_session_without_audio(self):
         self.add(1_000_000_000, 1, token="old")

@@ -39,7 +39,9 @@ def make_wav(path: Path, seconds: float = SECONDS) -> Path:
 class PlayerProcessCase(unittest.TestCase):
     """Процесс плеера во временном окружении: свой XDG_RUNTIME_DIR, свой XDG_CONFIG_HOME
     (настройки плеера пользователя не читаются), своя история демона, заглушка pactl первой
-    в PATH (громкость настоящих потоков пользователя не меняется ни в одном e2e)."""
+    в PATH (громкость настоящих потоков пользователя не меняется ни в одном e2e), свой HOME
+    (обёртка paplay читает id задачи из временного .claude-tts/playback.json, а не из
+    настоящего; без task() файла нет — id "unknown")."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -48,6 +50,8 @@ class PlayerProcessCase(unittest.TestCase):
         self.runtime = self.tmp / "run"
         self.runtime.mkdir()
         self.config = self.tmp / "config"
+        self.home = self.tmp / "home"
+        self.home.mkdir()
         self.inbox = self.runtime / "tts-player" / "inbox"
         self.store = self.runtime / "tts-player" / "store"
         self.wavs = self.tmp / "wavs"
@@ -74,6 +78,7 @@ class PlayerProcessCase(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
         env["XDG_RUNTIME_DIR"] = str(self.runtime)
         env["XDG_CONFIG_HOME"] = str(self.config)
+        env["HOME"] = str(self.home)
         env["PATH"] = f"{self.pactl_bin}{os.pathsep}{env.get('PATH', '')}"
         env["PACTL_LOG"] = str(self.pactl_log)
         env["PACTL_FIXTURE"] = str(self.pactl_fixture)
@@ -132,6 +137,13 @@ class PlayerProcessCase(unittest.TestCase):
         else:
             path.write_bytes(b"not a wav at all")
         return path
+
+    def task(self, task_id: str) -> None:
+        """Текущая задача демона, как её видит обёртка paplay: current_message.id."""
+        claude_tts = self.home / ".claude-tts"
+        claude_tts.mkdir(exist_ok=True)
+        (claude_tts / "playback.json").write_text(
+            json.dumps({"current_message": {"id": task_id}}))
 
     def drop(self, path: Path) -> None:
         subprocess.run([str(PAPLAY), str(path)], env=self.env(), check=True)

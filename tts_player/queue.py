@@ -6,12 +6,24 @@ import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tts_player.model import Message, Sentence
+from tts_player.model import UNKNOWN_TASK, Message, Sentence
 
 if TYPE_CHECKING:
     from tts_player.history import HistoryEntry
 
 log = logging.getLogger("tts_player.queue")
+
+_MessageKey = str | tuple[str, str]
+
+
+def _message_key(item: Sentence | Message) -> _MessageKey:
+    """Ключ сообщения: id задачи демона; без него ("unknown") — пара (session_id, token).
+
+    Проходы синтеза одной задачи (разные token) получают один ключ — одно сообщение.
+    """
+    if item.task_id != UNKNOWN_TASK:
+        return item.task_id
+    return item.session_id, item.token
 
 
 class MessageQueue:
@@ -37,7 +49,7 @@ class MessageQueue:
     def _forget(self) -> None:
         self._messages: list[Message] = []
         self._started: list[Message] = []
-        self._evicted: set[tuple[str, str]] = set()
+        self._evicted: set[_MessageKey] = set()
         self._durations: dict[Path, float] = {}
 
     @property
@@ -47,19 +59,19 @@ class MessageQueue:
 
     def add(self, sentence: Sentence) -> None:
         """Добавляет предложение в его сообщение; к прослушанному или вытесненному — удаляет файл."""
-        message = self._find(sentence.session_id, sentence.token)
-        late = (sentence.session_id, sentence.token) in self._evicted or (
-            message is not None and message.heard)
+        key = _message_key(sentence)
+        message = self._find(key)
+        late = key in self._evicted or (message is not None and message.heard)
         if late:
-            log.info("предложение законченного сообщения %s/%s не играется: %s",
-                     sentence.session_id, sentence.token, sentence.path)
+            log.info("предложение законченного сообщения %s/%s/%s не играется: %s",
+                     sentence.task_id, sentence.session_id, sentence.token, sentence.path)
             self._unlink(sentence)
             return
         if message is None:
-            message = Message(sentence.session_id, sentence.token, [])
+            message = Message(sentence.task_id, sentence.session_id, sentence.token, [])
             self._messages.append(message)
-        keys = [s.recv_ns for s in message.sentences]
-        message.sentences.insert(bisect.bisect_right(keys, sentence.recv_ns), sentence)
+        received = [s.recv_ns for s in message.sentences]
+        message.sentences.insert(bisect.bisect_right(received, sentence.recv_ns), sentence)
         self._messages.sort(key=lambda m: m.sentences[0].recv_ns)
 
     def following(self, message: Message) -> Message | None:
@@ -81,8 +93,8 @@ class MessageQueue:
         tail, новое начатое вытесняет самое старое только сверх tail.
         """
         if message not in self._messages:
-            log.debug("сообщение %s/%s уже не в очереди, не начинается",
-                      message.session_id, message.token)
+            log.debug("сообщение %s/%s/%s уже не в очереди, не начинается",
+                      message.task_id, message.session_id, message.token)
             return
         if message in self._started:
             return
@@ -107,8 +119,8 @@ class MessageQueue:
     def is_complete(self, message: Message) -> bool:
         """Сообщение больше не растёт: есть склейка или запись истории, или есть более позднее.
 
-        Более позднее сообщение означает новый token: демон синтезирует сообщения
-        строго по одному.
+        Более позднее сообщение — сообщение с другим ключом (_message_key): демон
+        синтезирует задачи строго по одной.
         """
         return (message.audio is not None or message.created_at is not None
                 or self.following(message) is not None)
@@ -150,7 +162,7 @@ class MessageQueue:
         Ключи очищенных сообщений запоминаются как вытесненные: их поздние предложения
         не добавляются, файлы удаляются. Новые сообщения приходят как обычно.
         """
-        cleared = {(m.session_id, m.token) for m in self._messages}
+        cleared = {_message_key(m) for m in self._messages}
         for message in self._messages:
             for sentence in message.sentences:
                 self._unlink(sentence)
@@ -159,19 +171,17 @@ class MessageQueue:
         self._forget()
         self._evicted = evicted
 
-    def _find(self, session_id: str, token: str) -> Message | None:
-        for message in self._messages:
-            if message.session_id == session_id and message.token == token:
-                return message
-        return None
+    def _find(self, key: _MessageKey) -> Message | None:
+        return next((m for m in self._messages if _message_key(m) == key), None)
 
     def _drop(self, message: Message) -> None:
         self._messages.remove(message)
-        self._evicted.add((message.session_id, message.token))
+        self._evicted.add(_message_key(message))
         for sentence in message.sentences:
             self._unlink(sentence)
         self._unlink_audio(message)
-        log.info("сообщение %s/%s удалено из хвоста", message.session_id, message.token)
+        log.info("сообщение %s/%s/%s удалено из хвоста", message.task_id, message.session_id,
+                 message.token)
 
     def _unlink(self, sentence: Sentence) -> None:
         self._durations.pop(sentence.path, None)
@@ -210,9 +220,9 @@ class MessageQueue:
         message.project = entry.project
         total = sum(self._duration(s) for s in message.sentences)
         if abs(entry.duration_s - total) > self.DURATION_TOLERANCE_S + 1e-9:
-            log.warning("склейка %s: %.3f с, предложения сообщения %s/%s: %.3f с;"
-                        " играется по предложениям", entry.path.name,
-                        entry.duration_s, message.session_id, message.token, total)
+            log.warning("склейка %s: %.3f с, предложения сообщения %s/%s/%s: %.3f с;"
+                        " играется по предложениям", entry.path.name, entry.duration_s,
+                        message.task_id, message.session_id, message.token, total)
             return message
         target = store / entry.path.name
         try:
