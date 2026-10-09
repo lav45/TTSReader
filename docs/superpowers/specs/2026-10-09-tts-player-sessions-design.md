@@ -1,6 +1,6 @@
 # TTS Player — несколько озвучиваемых сессий
 
-**Статус:** в работе (обсуждение возобновлено 2026-10-09), карта не собрана. Реализуется после спеки кэша `2026-10-09-tts-player-text-cache-design.md` — опирается на её цепочку (11)–(13).
+**Статус:** карта согласована 2026-10-09; план — после реализации спеки кэша. Реализуется после спеки кэша `2026-10-09-tts-player-text-cache-design.md` — опирается на её цепочку (11)–(13).
 
 ## Задача
 
@@ -74,11 +74,50 @@
 
 ## Цепочка
 
-Не согласована.
+Согласована 2026-10-09. Строится на цепочке спеки кэша ((11)–(13)).
+
+```
+/tts-on  → tts-toggle.sh on  → tts-player-hook on → tts-player session add <UUID> <cwd>
+/tts-off → tts-toggle.sh off → tts-player session remove <UUID>
+                                        │ (14) команда сессии: файл в control/, плеер забирает
+                                        ▼
+TTS Player — список сессий; пишет sessions.json (кто в списке, кто активен)
+                                        │ (15) sessions.json: читают гейт и CLI
+                                        ▼
+Stop-хук → tts-gate.sh: tts-player session has <UUID>?   (вместо флага /tmp/claude-tts.on)
+             да → HOME=hook-home CLAUDE_TTS_SESSION=<UUID> claude-tts speak --from-hook
+                    │ (11) задача хука с session_id = UUID
+                    ▼
+плеер: сообщение в хвост своей сессии;
+       сессия активна и свой текст не звучит → (12) задача демону
+       иначе — только текст, звук при проигрывании
+```
 
 ## Контракты
 
-Не согласованы.
+Нумерация продолжает спеку кэша ((11)–(13)).
+
+### (14) CLI → плеер: команда сессии
+
+```
+tts-player session add <uuid> <cwd> | remove <uuid> | has <uuid>
+  add:    уже в списке → stdout «сессия уже в списке», exit 0; иначе запрос в
+          $XDG_RUNTIME_DIR/tts-player/control/<ns>.json {"op":"add","session":…,"cwd":…}
+          (сначала .tmp, затем rename)
+  remove: запрос {"op":"remove","session":…}; нет в списке → «сессия не в списке», exit 0
+  has:    exit 0 — в списке, 1 — нет (читает sessions.json, плеер не трогает)
+  плеер не запущен → add/remove: exit 0 с сообщением; has → 1
+плеер: забирает control/*.json монитором (как inbox/), выполняет, удаляет файл;
+       не JSON / неизвестный op → файл удалён, строка в stderr
+```
+
+### (15) Плеер → гейт и CLI: список сессий
+
+```
+$XDG_RUNTIME_DIR/tts-player/sessions.json   пишет только плеер, атомарно
+  {"active": "<uuid>" | null,
+   "sessions": [{"id": "<uuid>", "project": "<последний компонент cwd>"}, …]}
+```
 
 ## Открытые вопросы
 
