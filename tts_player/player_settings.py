@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tts_player import atomic_json
-from tts_player.daemon_settings import SettingsError
+from tts_player.settings_error import SettingsError
 
 log = logging.getLogger(__name__)
 

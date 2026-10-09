@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tts_player.daemon_settings import DaemonSettings, SettingsError, Voice
+from tts_player.daemon_settings import DaemonSettings, Voice
+from tts_player.settings_error import SettingsError
 
 NAMES = [
     "claude-prime", "claude-chill", "code-reviewer",
@@ -228,7 +229,7 @@ class DaemonSettingsTest(unittest.TestCase):
                 self.assertEqual(self.config.read_bytes(), before)
 
     def test_save_removes_temp_file_on_non_os_error(self):
-        with mock.patch("tts_player.daemon_settings.json.dump", side_effect=TypeError("boom")):
+        with mock.patch("tts_player.atomic_json.json.dump", side_effect=TypeError("boom")):
             with self.assertRaises(TypeError):
                 self.settings.save("ru-denis", 1.3)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["config.json", "sessions.d"])

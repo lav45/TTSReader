@@ -23,7 +23,8 @@ Status = Literal["playing", "paused", "stopped", "idle"]
 
 @dataclass(frozen=True)
 class PlayerState:
-    """Снимок для окна. idle — нечего играть: current доигран (или None, если сообщений нет)."""
+    """Снимок для окна. idle — ничего не играет: current доигран либо ещё не начат
+    (при выключенном автовоспроизведении), или None, если сообщений нет."""
     status: Status
     current: Message | None
     position_s: float  # внутри текущего сообщения

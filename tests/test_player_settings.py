@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tts_player.daemon_settings import SettingsError
+from tts_player.settings_error import SettingsError
 from tts_player.player_settings import PlayerSettings, Prefs
 
 

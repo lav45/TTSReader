@@ -10,10 +10,11 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("XApp", "1.0")
 from gi.repository import Gdk, GLib, Gtk, Pango, XApp  # noqa: E402
 
-from tts_player.daemon_settings import DaemonSettings, SettingsError, Voice  # noqa: E402
+from tts_player.daemon_settings import DaemonSettings, Voice  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import PlayerSettings, Prefs  # noqa: E402
+from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
 from tts_player.view import (MessageRow, next_enabled, play_pause_enabled,  # noqa: E402
                              play_pause_label, position_label, prev_enabled, rows)
@@ -222,6 +223,8 @@ class PlayerWindow(Gtk.Window):
         голос и скорость, если они прочитались. Экран остаётся, итог — в блоке внизу."""
         try:
             self.tail_spin.update()  # набранный текст без потери фокуса
+            # autoplay здесь не правится: берём текущее значение плеера (его же показывает
+            # кнопка), хвост — из спина
             prefs = Prefs(tail=self.tail_spin.get_value_as_int(),
                           autoplay=self._player.state().autoplay)
             self._prefs.save(prefs)
@@ -236,24 +239,27 @@ class PlayerWindow(Gtk.Window):
             return
         self._show_status(SAVED_TEXT, STATUS_SUCCESS)
 
-    def _show_status(self, text: str, kind: str) -> None:
+    def _clear_status_classes(self) -> Gtk.StyleContext:
         context = self.settings_status.get_style_context()
         for name in (STATUS_SUCCESS, STATUS_ERROR):
             context.remove_class(name)
-        context.add_class(kind)
+        return context
+
+    def _show_status(self, text: str, kind: str) -> None:
+        self._clear_status_classes().add_class(kind)
         self.settings_status.set_text(text)
         self.settings_status.show()
 
     def _hide_status(self) -> None:
-        context = self.settings_status.get_style_context()
-        for name in (STATUS_SUCCESS, STATUS_ERROR):
-            context.remove_class(name)
+        self._clear_status_classes()
         self.settings_status.set_text("")
         self.settings_status.hide()
 
     def _on_autoplay_toggled(self, button: Gtk.ToggleButton) -> None:
         """Переключение пользователем: хвост — из файла плеера, autoplay — новое значение.
         Сбой записи — в лог, кнопка возвращается к состоянию плеера."""
+        # хвост здесь не правится: берём сохранённый в файле (спин мог быть набран, но не сохранён),
+        # autoplay — из кнопки
         prefs = Prefs(tail=self._prefs.load().tail, autoplay=button.get_active())
         try:
             self._prefs.save(prefs)

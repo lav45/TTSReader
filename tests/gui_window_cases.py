@@ -19,7 +19,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gtk  # noqa: E402
 
-from tts_player.daemon_settings import SettingsError, Voice, VoiceSettings  # noqa: E402
+from tts_player.daemon_settings import Voice, VoiceSettings  # noqa: E402
+from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
@@ -605,6 +606,19 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual("settings.json не записан", w.settings_status.get_text())
         self.assertEqual({"error"}, css_classes(w.settings_status))
         self.assertEqual([], self.player.calls)
+        self.assertEqual([], [call for call in self.settings.calls if call[0] == "save"])
+
+    def test_voice_save_error_after_prefs_saved_keeps_order(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        self.settings.save_error = SettingsError("не удалось записать")
+        w.save_button.clicked()
+        # хвост уже записан и применён к плееру до сбоя записи голоса
+        prefs_saves = [call for call in self.prefs.calls if call[0] == "save"]
+        self.assertEqual(1, len(prefs_saves))
+        self.assertEqual([("apply_prefs", prefs_saves[0][1])], self.player.calls)
+        self.assertEqual(1, len([call for call in self.settings.calls if call[0] == "save"]))
+        self.assertEqual("не удалось записать", w.settings_status.get_text())
 
     def test_reopen_hides_result(self) -> None:
         w = self.window

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tts_player import atomic_json
+from tts_player.settings_error import SettingsError
 
 log = logging.getLogger("tts_player.daemon_settings")
 
@@ -29,13 +30,6 @@ class VoiceSettings:
     voices: list[Voice]
     active: str
     speed: float
-
-
-class SettingsError(Exception):
-    """Причина, по которой настройки не прочитаны или не сохранены (текст для экрана)."""
-
-
-_FileGone = atomic_json.FileGone  # файл сессии удалён демоном между чтением и записью
 
 
 class DaemonSettings:
@@ -138,14 +132,14 @@ class DaemonSettings:
                 data.pop(key, None)
             try:
                 self._write_json(path, data, create=False)
-            except _FileGone:
+            except atomic_json.FileGone:  # файл сессии удалён демоном между чтением и записью
                 log.debug("Файл сессии %s удалён демоном, пропущен", path)
 
     @staticmethod
     def _write_json(path: Path, data: dict, create: bool = True) -> None:
         """Атомарная запись (tts_player.atomic_json); OSError -> SettingsError.
 
-        create=False: файла уже нет (удалён демоном) — _FileGone, не воскрешаем."""
+        create=False: файла уже нет (удалён демоном) — atomic_json.FileGone, не воскрешаем."""
         try:
             atomic_json.write_json(path, data, create=create)
         except OSError as e:
