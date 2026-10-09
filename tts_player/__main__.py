@@ -1,7 +1,7 @@
 """Процесс плеера: разбор аргументов и главный цикл; устройство — в tts_player.player.
 
 Запуск: python3 -m tts_player [--audio-sink NAME] [--history-dir DIR] [--history-db FILE]
-                              [--no-gui] [--show] [--tray]
+                              [--tts-config-dir DIR] [--no-gui] [--show] [--tray]
        python3 -m tts_player stop    (SIGUSR1 запущенному плееру: остановить текущее)
        python3 -m tts_player play    (SIGUSR2: продолжить остановленное, играющее не трогать)
 Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window); нет графической сессии —
@@ -20,6 +20,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
+from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 
@@ -38,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="каталог склеек демона")
     parser.add_argument("--history-db", default="~/.claude-tts/handy_analysis.db",
                         help="база истории демона (только чтение)")
+    parser.add_argument("--tts-config-dir", default="~/.claude-tts",
+                        help="каталог настроек claude-tts (голос и скорость с экрана настроек)")
     parser.add_argument("--no-gui", action="store_true",
                         help="без окна и трея: только плеер в цикле GLib")
     parser.add_argument("--show", action="store_true", help="показать окно сразу при запуске")
@@ -77,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         loop = GLib.MainLoop()
         run(player, loop.run, loop.quit)
     else:
-        run_gui(player, args.show)
+        run_gui(player, DaemonSettings(Path(args.tts_config_dir).expanduser()), args.show)
     return 0
 
 
@@ -109,12 +112,12 @@ def gtk_ready() -> bool:
     return initialized
 
 
-def run_gui(player: Player, show: bool) -> None:
+def run_gui(player: Player, settings: DaemonSettings, show: bool) -> None:
     from gi.repository import Gtk
 
     from tts_player.window import PlayerWindow, TrayIcon
 
-    window = PlayerWindow(player)
+    window = PlayerWindow(player, settings)
     tray = TrayIcon(window, Gtk.main_quit)  # noqa: F841 — значок живёт, пока жива ссылка
     if show:
         window.present()

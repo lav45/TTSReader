@@ -9,6 +9,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("XApp", "1.0")
 from gi.repository import Gdk, GLib, Gtk, Pango, XApp  # noqa: E402
 
+from tts_player.daemon_settings import DaemonSettings, SettingsError, Voice  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.view import (MessageRow, current_title, next_enabled, pause_enabled,  # noqa: E402
                              pause_label, play_stop_label, position_label, prev_enabled, rows)
@@ -18,16 +19,24 @@ NEXT_LABEL = "⏭"
 
 
 class PlayerWindow(Gtk.Window):
-    """Кнопки prev / pause / play|stop / next, ползунок позиции, список сообщений, очистка.
+    """Два экрана в одном Gtk.Stack.
+
+    "main": кнопки prev / pause / play|stop / next, ползунок позиции, список сообщений,
+    внизу слева значки «Очистить буфер» и «Настройки». "settings": голос и скорость
+    claude-tts через DaemonSettings; «Сохранить» пишет их и возвращает на главный экран,
+    стрелка назад возвращает без записи.
 
     Обновляется по player.on_change и, пока окно видно, таймером REFRESH_MS — позиция
     играющего файла сама on_change не вызывает. Закрытие прячет окно в трей.
     """
     REFRESH_MS = 250
+    SPEED_STEP = 0.1
+    SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
 
-    def __init__(self, player) -> None:
+    def __init__(self, player, settings: DaemonSettings) -> None:
         super().__init__(title="TTS Player")
         self._player = player
+        self._settings = settings
         self._refresh_id = 0
         self._dragging = False
         self._drag_value: float | None = None  # change-value за перетаскивание; None — не двигали
@@ -47,7 +56,10 @@ class PlayerWindow(Gtk.Window):
         self.pause_button = self._button("", player.toggle_pause)
         self.play_stop_button = self._button("", player.toggle_play_stop)
         self.next_button = self._button(NEXT_LABEL, player.next)
-        self.clear_button = self._button("Очистить буфер", player.clear)
+        self.clear_button = self._icon_button("user-trash-symbolic", "Очистить буфер",
+                                              player.clear)
+        self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
+                                                 self._open_settings)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         for button in (self.prev_button, self.pause_button, self.play_stop_button,
@@ -59,14 +71,24 @@ class PlayerWindow(Gtk.Window):
         scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.add(self.message_list)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=12)
-        box.pack_start(self.title_label, False, False, 0)
-        box.pack_start(self.scale, False, False, 0)
-        box.pack_start(buttons, False, False, 0)
-        box.pack_start(scrolled, True, True, 0)
-        box.pack_start(self.clear_button, False, False, 0)
-        self.add(box)
-        box.show_all()
+        # ряд значков внизу слева; следующие значки — pack_start сюда же
+        tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        for button in (self.clear_button, self.settings_button):
+            tools.pack_start(button, False, False, 0)
+
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        main.pack_start(self.title_label, False, False, 0)
+        main.pack_start(self.scale, False, False, 0)
+        main.pack_start(buttons, False, False, 0)
+        main.pack_start(scrolled, True, True, 0)
+        main.pack_start(tools, False, False, 0)
+
+        self.stack = Gtk.Stack(margin=12)
+        self.stack.add_named(main, "main")
+        self.stack.add_named(self._settings_screen(), "settings")
+        self.add(self.stack)
+        self.stack.show_all()
+        self.stack.set_visible_child_name("main")
 
         self.connect("delete-event", self._on_delete)
         self.connect("show", self._on_show)
@@ -79,6 +101,90 @@ class PlayerWindow(Gtk.Window):
         button = Gtk.Button(label=label)
         button.connect("clicked", lambda _button: command())
         return button
+
+    @staticmethod
+    def _icon_button(icon: str, tooltip: str, command) -> Gtk.Button:
+        """Значок без текста; что делает — в подсказке."""
+        button = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
+        button.set_relief(Gtk.ReliefStyle.NONE)
+        button.set_tooltip_text(tooltip)
+        button.connect("clicked", lambda _button: command())
+        return button
+
+    def _settings_screen(self) -> Gtk.Box:
+        """Экран настроек: стрелка назад, голос, скорость, «Сохранить», причина сбоя."""
+        self.back_button = self._icon_button("go-previous-symbolic", "Назад", self._show_main)
+        self.voice_combo = Gtk.ComboBoxText()
+        for renderer in self.voice_combo.get_cells():
+            # длинное «имя — описание» обрезается, а не растягивает окно
+            renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
+        self.speed_spin = Gtk.SpinButton.new_with_range(
+            DaemonSettings.SPEED_MIN, DaemonSettings.SPEED_MAX, self.SPEED_STEP)
+        self.speed_spin.set_digits(self.SPEED_DIGITS)
+        self.save_button = self._button("Сохранить", self._save_settings)
+        self.settings_error = Gtk.Label(xalign=0.0, wrap=True, selectable=True)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header.pack_start(self.back_button, False, False, 0)
+        header.pack_start(Gtk.Label(label="Настройки", xalign=0.0), False, False, 0)
+
+        fields = Gtk.Grid(row_spacing=6, column_spacing=12)
+        fields.attach(Gtk.Label(label="Голос", xalign=0.0), 0, 0, 1, 1)
+        fields.attach(self.voice_combo, 1, 0, 1, 1)
+        fields.attach(Gtk.Label(label="Скорость", xalign=0.0), 0, 1, 1, 1)
+        fields.attach(self.speed_spin, 1, 1, 1, 1)
+        self.voice_combo.set_hexpand(True)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        actions.pack_end(self.save_button, False, False, 0)
+
+        screen = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        screen.pack_start(header, False, False, 0)
+        screen.pack_start(fields, False, False, 0)
+        screen.pack_start(actions, False, False, 0)
+        screen.pack_start(self.settings_error, False, False, 0)
+        return screen
+
+    def _open_settings(self) -> None:
+        """Каждый вход читает настройки заново: несохранённое с прошлого раза не остаётся."""
+        self.voice_combo.remove_all()
+        try:
+            loaded = self._settings.load()
+        except SettingsError as e:
+            self._set_settings_enabled(False)
+            self.settings_error.set_text(str(e))
+        else:
+            for voice in loaded.voices:
+                self.voice_combo.append(voice.name, self._voice_text(voice))
+            self.voice_combo.set_active_id(loaded.active)
+            self.speed_spin.set_value(loaded.speed)
+            self._set_settings_enabled(True)
+            self.settings_error.set_text("")
+        self.stack.set_visible_child_name("settings")
+
+    @staticmethod
+    def _voice_text(voice: Voice) -> str:
+        if voice.description:
+            return f"{voice.name} — {voice.description}"
+        return voice.name
+
+    def _set_settings_enabled(self, enabled: bool) -> None:
+        for widget in (self.voice_combo, self.speed_spin, self.save_button):
+            widget.set_sensitive(enabled)
+
+    def _save_settings(self) -> None:
+        try:
+            self.speed_spin.update()  # набранный текст без потери фокуса
+            # стрелка даёт 1.9000000000000001: округляем до знаков спина
+            speed = round(self.speed_spin.get_value(), self.SPEED_DIGITS)
+            self._settings.save(self.voice_combo.get_active_id(), speed)
+        except SettingsError as e:
+            self.settings_error.set_text(str(e))
+            return
+        self._show_main()
+
+    def _show_main(self) -> None:
+        self.stack.set_visible_child_name("main")
 
     def _show_state(self, state: PlayerState) -> None:
         self.title_label.set_text(current_title(state))
