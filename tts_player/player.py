@@ -137,7 +137,8 @@ class Player:
         self._daemon_settings = daemon_settings
         self._control = None
         if control_dir is not None:
-            self._control = ControlRequests(control_dir, self.add_session, self.remove_session)
+            self._control = ControlRequests(control_dir, self.add_session, self.remove_session,
+                                            lambda session, cwd: self.remove_session(session))  # до Task 2
         self._hook_tasks = None
         if hook_tasks_dir is not None:
             self._hook_tasks = HookTasks(hook_tasks_dir, self._on_hook_task)

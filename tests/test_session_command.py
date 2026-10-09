@@ -131,6 +131,21 @@ class SessionRequestTest(unittest.TestCase):
         self.assertEqual((0, "сессия не в списке\n"), (result.returncode, result.stdout))
         self.assertEqual([], self.requests())
 
+    def test_clear_writes_request(self) -> None:
+        Sessions(self.path).add("u1", "/p")
+        self.lock_player()
+        result = run_cli(self.runtime, "session", "clear", "u1", "/p")
+        self.assertEqual((0, "сессия передана плееру на удаление\n", ""),
+                         (result.returncode, result.stdout, result.stderr))
+        self.assertEqual([{"op": "clear", "session": "u1", "cwd": "/p"}], self.requests())
+        self.assert_no_tmp()
+
+    def test_clear_not_listed(self) -> None:
+        self.lock_player()
+        result = run_cli(self.runtime, "session", "clear", "u1", "/p")
+        self.assertEqual((0, "сессия не в списке\n"), (result.returncode, result.stdout))
+        self.assertEqual([], self.requests())
+
     def test_remove_after_pending_add_writes_both(self) -> None:
         run_cli(self.runtime, "session", "add", "u1", "/p/X")
         result = run_cli(self.runtime, "session", "remove", "u1")
@@ -191,12 +206,14 @@ class SessionRequestTest(unittest.TestCase):
 
     def test_usage_errors(self) -> None:
         for args in (("session", "add", "u1"), ("session", "add"), ("session", "remove"),
-                     ("session", "remove", "u1", "u2"), ("session", "add", "u1", "/p", "x")):
+                     ("session", "remove", "u1", "u2"),
+                     ("session", "clear"), ("session", "clear", "u1"), ("session", "clear", "u1", "/p", "x"), ("session", "add", "u1", "/p", "x")):
             with self.subTest(args=args):
                 result = run_cli(self.runtime, *args)
                 self.assertEqual(2, result.returncode)
                 self.assertIn("add <uuid> <cwd>", result.stderr)
                 self.assertIn("remove <uuid>", result.stderr)
+                self.assertIn("clear <uuid> <cwd>", result.stderr)
                 self.assertIn("has <uuid>", result.stderr)
                 self.assertFalse(self.control.exists())
 
