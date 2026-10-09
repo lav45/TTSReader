@@ -1,7 +1,8 @@
-"""Собственные настройки плеера: сколько последних реплик озвучивать (tail) и автовоспроизведение.
+"""Собственные настройки плеера: сколько последних реплик озвучивать (tail),
+автовоспроизведение и до скольких процентов приглушать чужие звуки во время речи (duck).
 
 Файл $XDG_CONFIG_HOME/tts-player/settings.json (иначе ~/.config/tts-player/settings.json):
-{"tail": <целое 1-20>, "autoplay": <true|false>}. Чтение не бросает: на любой порче
+{"tail": <целое 1-20>, "autoplay": <true|false>, "duck": <целое 0-100>}. Чтение не бросает: на любой порче
 возвращаются значения по умолчанию и пишется предупреждение в лог (stderr).
 """
 import json
@@ -23,11 +24,14 @@ FILE_NAME = "settings.json"
 class Prefs:
     tail: int = 5
     autoplay: bool = True
+    duck: int = 30  # чужие потоки во время речи — до duck % их громкости; 100 — не трогать
 
 
 class PlayerSettings:
     TAIL_MIN = 1
     TAIL_MAX = 20
+    DUCK_MIN = 0
+    DUCK_MAX = 100
 
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
@@ -57,14 +61,23 @@ class PlayerSettings:
             log.warning("%s: autoplay %r не true/false, взято %s",
                         self._path, autoplay, defaults.autoplay)
             autoplay = defaults.autoplay
-        return Prefs(tail=tail, autoplay=autoplay)
+        duck = data.get("duck", defaults.duck)
+        if not self._duck_valid(duck):
+            log.warning("%s: duck %r вне %d-%d или не целое, взято %d",
+                        self._path, duck, self.DUCK_MIN, self.DUCK_MAX, defaults.duck)
+            duck = defaults.duck
+        return Prefs(tail=tail, autoplay=autoplay, duck=duck)
 
     def save(self, prefs: Prefs) -> None:
         if not self._tail_valid(prefs.tail):
             raise SettingsError(
                 f"tail {prefs.tail!r} вне диапазона {self.TAIL_MIN}-{self.TAIL_MAX}"
             )
-        data = {"tail": prefs.tail, "autoplay": bool(prefs.autoplay)}
+        if not self._duck_valid(prefs.duck):
+            raise SettingsError(
+                f"duck {prefs.duck!r} вне диапазона {self.DUCK_MIN}-{self.DUCK_MAX}"
+            )
+        data = {"tail": prefs.tail, "autoplay": bool(prefs.autoplay), "duck": prefs.duck}
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             atomic_json.write_json(self._path, data)
@@ -91,6 +104,15 @@ class PlayerSettings:
 
     @classmethod
     def _tail_valid(cls, value) -> bool:
+        return cls._int_within(value, cls.TAIL_MIN, cls.TAIL_MAX)
+
+    @classmethod
+    def _duck_valid(cls, value) -> bool:
+        return cls._int_within(value, cls.DUCK_MIN, cls.DUCK_MAX)
+
+    @staticmethod
+    def _int_within(value, low: int, high: int) -> bool:
+        """Целое (bool — не целое) в пределах [low, high]."""
         if isinstance(value, bool) or not isinstance(value, int):
             return False
-        return cls.TAIL_MIN <= value <= cls.TAIL_MAX
+        return low <= value <= high

@@ -9,6 +9,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
+from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.history import History, HistoryEntry  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
 from tts_player.model import Message, Sentence  # noqa: E402
@@ -54,11 +55,19 @@ class Player:
     вывод недоступен, звука нет — повтор начнёт склейку с позиции, с которой запускался
     несыгравший файл (начало предложения или точка seek/продолжения в нём).
     На паузе и после stop склейка лишь запоминается: следующий запуск найдёт её locate.
+
+    Приглушение (ducker, контракт (9)): статус стал playing — чужие потоки до prefs.duck %,
+    пока playing — refresh раз в REFRESH_SECONDS, статус ушёл из playing и выход — restore.
+    Ожидание предложения растущего сообщения — тоже playing: громкость не дрожит. Решает
+    одно место — _follow_status из _changed, после которого видна каждая смена статуса.
     """
     RETRY_SECONDS = 2
+    REFRESH_SECONDS = 1
 
     def __init__(self, runtime_dir: Path, audio_sink: str | None,
-                 history_dir: Path | None, history_db: Path | None) -> None:
+                 history_dir: Path | None, history_db: Path | None,
+                 ducker: Ducker | None = None) -> None:
+        """ducker None — без приглушения чужих звуков."""
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
         self._queue = MessageQueue(defaults.tail)
@@ -83,11 +92,19 @@ class Player:
         self._output_down = False
         self._retry_id = 0
         self._autoplay = defaults.autoplay
+        self._ducker = ducker
+        self._duck = defaults.duck
+        self._ducking = False  # duck() вызван, restore() ещё нет
+        self._refresh_id = 0
 
     def apply_prefs(self, prefs: Prefs) -> None:
-        """Настройки плеера: хвост очереди и автовоспроизведение; играющее не трогается."""
+        """Настройки плеера: хвост очереди, автовоспроизведение, процент приглушения;
+        играющее не трогается. Новый процент во время игры — restore, затем duck(новый)."""
         self._queue.tail = prefs.tail
         self._autoplay = prefs.autoplay
+        if prefs.duck != self._duck:
+            self._duck = prefs.duck
+            self._unduck()  # _changed приглушит заново, если статус playing
         self._changed()
 
     def start(self) -> None:
@@ -105,7 +122,9 @@ class Player:
         self._changed()
 
     def shutdown(self) -> None:
-        """Выход процесса: незаконченное — обратно в inbox/, законченное удаляет очередь."""
+        """Выход процесса: громкость чужих потоков — обратно; незаконченное — обратно в
+        inbox/, законченное удаляет очередь."""
+        self._unduck()
         self._inbox.stop()
         if self._history is not None:
             self._history.stop()
@@ -405,7 +424,34 @@ class Player:
         at = self._playback.position()
         return self._position if at is None else self._file_base + at
 
+    def _follow_status(self) -> None:
+        """Приглушение по статусу: вход в playing — duck и таймер refresh, выход — restore."""
+        if self._ducker is None:
+            return
+        playing = self._status == "playing"
+        if playing and not self._ducking:
+            self._ducker.duck(self._duck)
+            self._ducking = True
+            self._refresh_id = GLib.timeout_add_seconds(self.REFRESH_SECONDS, self._refresh)
+        elif not playing:
+            self._unduck()
+
+    def _refresh(self) -> bool:
+        self._ducker.refresh()
+        return GLib.SOURCE_CONTINUE
+
+    def _unduck(self) -> None:
+        """Снять таймер refresh и вернуть громкость; не приглушено — ничего."""
+        if not self._ducking:
+            return
+        GLib.source_remove(self._refresh_id)
+        self._refresh_id = 0
+        self._ducking = False
+        self._ducker.restore()
+
     def _changed(self) -> None:
+        """Каждая смена статуса доходит сюда: сначала приглушение по статусу, затем окно."""
+        self._follow_status()
         try:
             self.on_change(self.state())
         except Exception:

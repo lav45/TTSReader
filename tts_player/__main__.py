@@ -23,6 +23,7 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
+from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="хук, который кнопка выключения зовёт как `<хук> off`")
     parser.add_argument("--settings-file",
                         default=str(PlayerSettings.default_path(os.environ)),
-                        help="файл настроек плеера: хвост и автовоспроизведение")
+                        help="файл настроек плеера: хвост, автовоспроизведение, приглушение")
     parser.add_argument("--no-gui", action="store_true",
                         help="без окна и трея: только плеер в цикле GLib")
     parser.add_argument("--show", action="store_true", help="показать окно сразу при запуске")
@@ -85,8 +86,12 @@ def main(argv: list[str] | None = None) -> int:
               " (без окна — --no-gui)", file=sys.stderr)
         return 1
 
+    # после блокировки: второй экземпляр не возвращает громкости, приглушённые первым
+    ducker = Ducker(Path(runtime) / "tts-player" / "duck.json", os.getpid())
+    ducker.recover()  # остаток после падения — до первого duck в player.start()
     player = Player(Path(runtime), args.audio_sink,
-                    Path(args.history_dir).expanduser(), Path(args.history_db).expanduser())
+                    Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
+                    ducker)
     prefs = PlayerSettings(Path(args.settings_file).expanduser())
     player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
     if args.no_gui:

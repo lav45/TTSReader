@@ -1,4 +1,4 @@
-"""Тесты PlayerSettings: файл настроек плеера (tail, autoplay)."""
+"""Тесты PlayerSettings: файл настроек плеера (tail, autoplay, duck)."""
 import json
 import os
 import tempfile
@@ -44,7 +44,7 @@ class DefaultPathTest(unittest.TestCase):
 
 class LoadTest(PlayerSettingsCase):
     def test_no_file(self):
-        self.assertEqual(self.settings.load(), Prefs(5, True))
+        self.assertEqual(self.settings.load(), Prefs(5, True, 30))
 
     def test_valid(self):
         self.write_raw('{"tail": 7, "autoplay": false}')
@@ -66,6 +66,22 @@ class LoadTest(PlayerSettingsCase):
         prefs = self.load_warned('{"tail": 3, "autoplay": "no"}')
         self.assertEqual(prefs, Prefs(3, True))
 
+    def test_duck_read(self):
+        self.write_raw('{"tail": 7, "autoplay": false, "duck": 55}')
+        self.assertEqual(self.settings.load(), Prefs(7, False, 55))
+
+    def test_duck_bounds_accepted(self):
+        for duck in (0, 100):
+            with self.subTest(duck=duck):
+                self.write_raw(json.dumps({"tail": 5, "autoplay": True, "duck": duck}))
+                self.assertEqual(self.settings.load().duck, duck)
+
+    def test_bad_duck_keeps_others(self):
+        for duck in ("101", "-1", '"30"', "true", "2.5", "null"):
+            with self.subTest(duck=duck):
+                prefs = self.load_warned('{"tail": 3, "autoplay": false, "duck": %s}' % duck)
+                self.assertEqual(prefs, Prefs(3, False, 30))
+
     def test_bounds_accepted(self):
         for tail in (1, 20):
             with self.subTest(tail=tail):
@@ -75,9 +91,10 @@ class LoadTest(PlayerSettingsCase):
 
 class SaveTest(PlayerSettingsCase):
     def test_roundtrip_creates_dir_without_tmp(self):
-        self.settings.save(Prefs(3, False))
-        self.assertEqual(self.settings.load(), Prefs(3, False))
-        self.assertEqual(json.loads(self.path.read_text()), {"tail": 3, "autoplay": False})
+        self.settings.save(Prefs(3, False, 40))
+        self.assertEqual(self.settings.load(), Prefs(3, False, 40))
+        self.assertEqual(json.loads(self.path.read_text()),
+                         {"tail": 3, "autoplay": False, "duck": 40})
         self.assertEqual([p.name for p in self.dir.iterdir()], ["settings.json"])
 
     def test_bad_tail_leaves_file_untouched(self):
@@ -88,6 +105,14 @@ class SaveTest(PlayerSettingsCase):
                 self.settings.save(Prefs(tail, True))
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual([p.name for p in self.dir.iterdir()], ["settings.json"])
+
+    def test_bad_duck_leaves_file_untouched(self):
+        self.write_raw('{"tail": 4, "autoplay": true, "duck": 30}')
+        before = self.path.read_bytes()
+        for duck in (-1, 101, "30", True, 2.5):
+            with self.subTest(duck=duck), self.assertRaises(SettingsError):
+                self.settings.save(Prefs(4, True, duck))
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_no_write_permission(self):
         self.dir.mkdir(parents=True)

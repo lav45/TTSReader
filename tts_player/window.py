@@ -1,6 +1,7 @@
 """Окно плеера и значок в трее. Что показывать — решает tts_player.view над player.state();
 команды уходят в Player только через его методы."""
 import logging
+from dataclasses import replace
 from typing import Callable
 
 import gi
@@ -256,11 +257,11 @@ class PlayerWindow(Gtk.Window):
         self.settings_status.hide()
 
     def _on_autoplay_toggled(self, button: Gtk.ToggleButton) -> None:
-        """Переключение пользователем: хвост — из файла плеера, autoplay — новое значение.
-        Сбой записи — в лог, кнопка возвращается к состоянию плеера."""
-        # хвост здесь не правится: берём сохранённый в файле (спин мог быть набран, но не сохранён),
-        # autoplay — из кнопки
-        prefs = Prefs(tail=self._prefs.load().tail, autoplay=button.get_active())
+        """Переключение пользователем: остальные ключи — из файла плеера, autoplay — новое
+        значение. Сбой записи — в лог, кнопка возвращается к состоянию плеера."""
+        # хвост и приглушение здесь не правятся: берём сохранённые в файле (спин мог быть
+        # набран, но не сохранён), autoplay — из кнопки
+        prefs = replace(self._prefs.load(), autoplay=button.get_active())
         try:
             self._prefs.save(prefs)
         except SettingsError as e:

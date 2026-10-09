@@ -1,6 +1,6 @@
 """Тесты Player: воспроизведение по курсору, кнопки, снимок состояния, возврат
 незавершённого при штатном выходе, повтор при отказе вывода звука, переход играющего
-сообщения на склейку демона."""
+сообщения на склейку демона, приглушение чужих звуков на время playing (заглушка Ducker)."""
 import tempfile
 import time
 import unittest
@@ -76,6 +76,22 @@ class FakePlayback:
         """Ошибка играющего файла: как настоящий Playback — сначала stop, потом колбэк."""
         path, self.playing = self.playing, None
         self.on_error(path, text, output_failed)
+
+
+class FakeDucker:
+    """Подменяет Ducker: запоминает вызовы, pactl не зовёт никогда."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def duck(self, percent: int) -> None:
+        self.calls.append(("duck", percent))
+
+    def refresh(self) -> None:
+        self.calls.append(("refresh",))
+
+    def restore(self) -> None:
+        self.calls.append(("restore",))
 
 
 class PlayerCase(unittest.TestCase):
@@ -1093,6 +1109,112 @@ class PlayerPrefsTest(PlayerCase):
             self.player.toggle_play_pause()
             self.assertEqual(count + 1, len(self.states))
             self.assertEqual(self.state(), self.states[-1])
+
+
+
+class PlayerDuckingTest(PlayerCase):
+    """Приглушение (контракт (9)): вход в playing — duck(prefs.duck), выход — restore,
+    пока playing — refresh по таймеру раз в 1 с."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ducker = FakeDucker()
+        self.player = Player(self.runtime, None, self.history_dir,
+                             self.runtime / "handy_analysis.db", ducker=self.ducker)
+        self.playback = self.player._playback
+        self.player.on_change = self.states.append
+
+    def calls(self) -> list[tuple]:
+        return [c for c in self.ducker.calls if c != ("refresh",)]
+
+    def refresh_timers(self) -> list:
+        """Колбэки таймеров refresh (раз в 1 с), в порядке постановки."""
+        return [c.args[1] for c in self.glib.timeout_add_seconds.call_args_list
+                if c.args[0] == 1]
+
+    def test_start_of_playback_ducks_once_with_default_percent(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.finish()
+        self.finish()
+        self.assertEqual([("duck", 30)], self.calls())
+
+    def test_pause_restores_and_resume_ducks(self) -> None:
+        self.start_with(A0, B0)
+        self.player.toggle_play_pause()
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+        self.player.toggle_play_pause()
+        self.assertEqual([("duck", 30), ("restore",), ("duck", 30)], self.calls())
+
+    def test_end_without_following_restores(self) -> None:
+        self.start_with(A0)
+        self.finish()
+        self.player._on_entry(self.joined(seconds=3.0))
+        self.assertEqual("idle", self.state().status)
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+    def test_waiting_for_next_sentence_keeps_ducked(self) -> None:
+        self.start_with(A0)
+        self.finish()
+        self.assertEqual("playing", self.state().status)
+        self.arrive(A1)
+        self.finish()
+        self.assertEqual([("duck", 30)], self.calls())
+
+    def test_next_while_playing_keeps_ducked(self) -> None:
+        self.start_with(A0, B0)
+        self.player.next()
+        self.assertEqual([("duck", 30)], self.calls())
+
+    def test_stop_restores(self) -> None:
+        self.start_with(A0, B0)
+        self.player.stop_playback()
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+    def test_clear_restores(self) -> None:
+        self.start_with(A0, B0)
+        self.player.clear()
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+    def test_shutdown_while_playing_restores(self) -> None:
+        self.start_with(A0)
+        self.player.shutdown()
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+        self.glib.source_remove.assert_called_with(42)
+
+    def test_shutdown_when_idle_does_not_restore_again(self) -> None:
+        self.player.start()
+        self.player.shutdown()
+        self.assertEqual([], self.calls())
+
+    def test_refresh_timer_only_while_playing(self) -> None:
+        self.player.start()
+        self.assertEqual([], self.refresh_timers())
+        self.arrive(A0)
+        self.arrive(B0)
+        timers = self.refresh_timers()
+        self.assertEqual(1, len(timers))
+        timers[0]()
+        self.assertEqual(("refresh",), self.ducker.calls[-1])
+        self.glib.source_remove.assert_not_called()
+        self.player.toggle_play_pause()
+        self.glib.source_remove.assert_called_once_with(42)
+        self.player.toggle_play_pause()
+        self.assertEqual(2, len(self.refresh_timers()))
+
+    def test_apply_prefs_new_duck_while_playing_reducks(self) -> None:
+        self.start_with(A0, B0)
+        self.player.apply_prefs(Prefs(duck=30))
+        self.assertEqual([("duck", 30)], self.calls())
+        self.player.apply_prefs(Prefs(duck=50))
+        self.assertEqual([("duck", 30), ("restore",), ("duck", 50)], self.calls())
+
+    def test_apply_prefs_while_paused_ducks_with_new_on_resume(self) -> None:
+        self.start_with(A0, B0)
+        self.player.toggle_play_pause()
+        self.player.apply_prefs(Prefs(duck=60))
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+        self.player.toggle_play_pause()
+        self.assertEqual([("duck", 30), ("restore",), ("duck", 60)], self.calls())
 
 
 if __name__ == "__main__":

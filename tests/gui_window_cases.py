@@ -391,9 +391,11 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertTrue(button.get_active())
 
     def test_autoplay_toggle_saves_prefs_and_applies(self) -> None:
+        """Остальные ключи (хвост, приглушение) — из файла, меняется только autoplay."""
         w = self.window
+        self.prefs.loaded = Prefs(tail=7, autoplay=True, duck=45)
         w.autoplay_button.set_active(False)
-        expected = Prefs(tail=7, autoplay=False)
+        expected = Prefs(tail=7, autoplay=False, duck=45)
         self.assertIn(("save", expected), self.prefs.calls)
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
         self.assertFalse(w.autoplay_button.get_active())
