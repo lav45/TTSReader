@@ -1284,6 +1284,113 @@ class PlayerDuckingTest(PlayerCase):
         self.player.toggle_play_pause()
         self.assertEqual([("duck", 30), ("restore",), ("duck", 60)], self.calls())
 
+    # Удержание (контракт (10)): свой текст приглушает чужие потоки тем же Ducker с
+    # prefs.duck; у главного, ушедшего в hold из playing, приглушение не прерывается.
+
+    def test_hold_when_idle_ducks_and_release_restores(self) -> None:
+        self.player.start()
+        self.player.apply_prefs(Prefs(duck=40))
+        self.player.hold()
+        self.assertEqual([("duck", 40)], self.calls())
+        self.assertEqual(1, len(self.refresh_timers()))
+        self.player.release()
+        self.assertEqual([("duck", 40), ("restore",)], self.calls())
+
+    def test_hold_while_playing_keeps_one_duck(self) -> None:
+        self.start_with(A0, B0)
+        self.player.hold()
+        self.assertEqual("paused", self.state().status)
+        self.assertEqual([("duck", 30)], self.calls())
+        self.player.release()
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+    def test_no_orphan_watch_while_held(self) -> None:
+        self.ducker.has_orphans = True
+        self.player.start()
+        self.assertEqual(1, len(self.watch_timers()))
+        self.player.hold()
+        self.glib.source_remove.assert_any_call(42)
+        self.player.release()
+        self.assertEqual(2, len(self.watch_timers()))
+
+    def test_shutdown_while_held_restores(self) -> None:
+        self.player.start()
+        self.player.hold()
+        self.player.shutdown()
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+
+
+class PlayerHoldTest(PlayerCase):
+    """Удержание (контракт (10)): пока звучит свой текст, главный плеер на паузе и сам
+    ничего не начинает; release статус не меняет."""
+
+    def test_hold_while_playing_pauses_at_position(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.at = 0.2
+        self.player.hold()
+        state = self.state()
+        self.assertEqual("paused", state.status)
+        self.assertAlmostEqual(0.2, state.position_s)
+        self.assertIsNone(self.playback.playing)
+        self.assertEqual(self.states[-1], state)
+
+    def test_hold_when_idle_keeps_status(self) -> None:
+        self.player.start()
+        self.player.hold()
+        self.assertEqual("idle", self.state().status)
+
+    def test_new_message_in_idle_does_not_start_while_held(self) -> None:
+        self.player.start()
+        self.player.hold()
+        self.arrive(A0)
+        self.assertEqual("idle", self.state().status)
+        self.assertEqual([], self.playback.played)
+        self.assertTrue(self.state().autoplay)
+
+    def test_message_end_does_not_advance_while_held(self) -> None:
+        self.start_with(A0, B0)
+        self.player.hold()
+        self.player.toggle_play_pause()  # пользователь сам продолжил главный
+        self.player._on_entry(self.joined(seconds=SECONDS))
+        self.finish()
+        state = self.state()
+        self.assertEqual(("stopped", "bb"), (state.status, self.token()))
+        self.assertEqual(0.0, state.position_s)
+        self.assertEqual([A0, A0], self.playback.played[:2])
+        self.assertNotIn(B0, self.playback.played)
+
+    def test_release_keeps_paused(self) -> None:
+        self.start_with(A0, B0)
+        self.player.hold()
+        count = len(self.states)
+        self.player.release()
+        self.assertEqual("paused", self.state().status)
+        self.assertEqual(count + 1, len(self.states))
+        self.assertEqual([A0], self.playback.played)
+
+    def test_new_message_after_release_starts_in_idle(self) -> None:
+        self.player.start()
+        self.player.hold()
+        self.player.release()
+        self.arrive(A0)
+        self.assertEqual("playing", self.state().status)
+
+    def test_play_command_does_nothing_while_held(self) -> None:
+        self.start_with(A0, B0)
+        self.player.stop_playback()
+        self.player.hold()
+        self.player.play_if_stopped()
+        self.assertEqual("stopped", self.state().status)
+        self.player.release()
+        self.player.play_if_stopped()
+        self.assertEqual("playing", self.state().status)
+
+    def test_user_commands_work_while_held(self) -> None:
+        self.start_with(A0, B0)
+        self.player.hold()
+        self.player.toggle_play_pause()
+        self.assertEqual("playing", self.state().status)
+
 
 if __name__ == "__main__":
     unittest.main()

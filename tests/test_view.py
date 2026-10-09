@@ -4,8 +4,10 @@ from pathlib import Path
 
 from tts_player.model import Message, Sentence
 from tts_player.player import PlayerState
+from tts_player.text_speaker import TextState
 from tts_player.view import (next_enabled, play_pause_enabled, play_pause_label, position_label,
-                             prev_enabled, rows)
+                             prev_enabled, rows, text_play_enabled, text_play_pause_label,
+                             text_position_label)
 
 CREATED_AT = 1_700_000_000.0
 
@@ -129,3 +131,24 @@ class ControlsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TextViewTest(unittest.TestCase):
+    """Экран «Свой текст»: подписи и доступность по TextState."""
+
+    @staticmethod
+    def text(status: str, position_s: float = 0.0, length_s: float = 0.0) -> TextState:
+        return TextState(status, position_s, length_s, "")
+
+    def test_play_pause_label_per_status(self):
+        for status, label in (("synthesizing", "⏸"), ("playing", "⏸"), ("paused", "⏵"),
+                              ("stopped", "⏵"), ("error", "⏵"), ("empty", "⏵")):
+            self.assertEqual(label, text_play_pause_label(self.text(status)), status)
+
+    def test_play_enabled_unless_empty(self):
+        for status in ("synthesizing", "playing", "paused", "stopped", "error"):
+            self.assertTrue(text_play_enabled(self.text(status)), status)
+        self.assertFalse(text_play_enabled(self.text("empty")))
+
+    def test_position(self):
+        self.assertEqual("1:05 / 1:02:05", text_position_label(self.text("playing", 65.0, 3725.0)))

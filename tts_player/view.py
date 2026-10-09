@@ -1,10 +1,11 @@
-"""Модель отображения: PlayerState -> то, что показывает окно. Без Gtk."""
+"""Модель отображения: PlayerState и TextState -> то, что показывает окно. Без Gtk."""
 import os
 import time
 from dataclasses import dataclass
 
 from tts_player.model import Message
 from tts_player.player import PlayerState
+from tts_player.text_speaker import SOUNDING_STATUSES, TextState
 
 NO_PROJECT = "—"
 PENDING_MARK = "…"
@@ -61,8 +62,12 @@ def rows(state: PlayerState) -> list[MessageRow]:
     ]
 
 
+def _clock(position_s: float, length_s: float) -> str:
+    return f"{format_seconds(position_s)} / {format_seconds(length_s)}"
+
+
 def position_label(state: PlayerState) -> str:
-    return f"{format_seconds(state.position_s)} / {format_seconds(state.length_s)}"
+    return _clock(state.position_s, state.length_s)
 
 
 def play_pause_label(state: PlayerState) -> str:
@@ -87,3 +92,17 @@ def prev_enabled(state: PlayerState) -> bool:
 def next_enabled(state: PlayerState) -> bool:
     index = _current_index(state)
     return index is not None and index < len(state.messages) - 1
+
+
+def text_position_label(state: TextState) -> str:
+    return _clock(state.position_s, state.length_s)
+
+
+def text_play_pause_label(state: TextState) -> str:
+    """Кнопка экрана «Свой текст»: звучит или вот-вот зазвучит (синтез после play) — пауза."""
+    return "⏸" if state.status in SOUNDING_STATUSES else "⏵"
+
+
+def text_play_enabled(state: TextState) -> bool:
+    """Без текста play нечего озвучивать."""
+    return state.status != "empty"
