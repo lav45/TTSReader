@@ -18,6 +18,9 @@ class PaplayWrapperTest(unittest.TestCase):
         self.runtime.mkdir()
         self.src = self.root / "src"
         self.src.mkdir()
+        # HOME во временном каталоге: настоящий ~/.claude-tts/playback.json не читается.
+        self.home = self.root / "home"
+        (self.home / ".claude-tts").mkdir(parents=True)
         self.inbox = self.runtime / "tts-player" / "inbox"
         # Заглушка logger первой в PATH: пишет аргументы в файл, настоящий journal не трогаем.
         self.logged = self.root / "logger.args"
@@ -34,11 +37,14 @@ class PaplayWrapperTest(unittest.TestCase):
         return path
 
     def run_wrapper(self, *args, with_runtime=True):
-        env = {"PATH": f"{self.stubs}:{os.environ.get('PATH', '')}"}
+        env = {"PATH": f"{self.stubs}:{os.environ.get('PATH', '')}", "HOME": str(self.home)}
         if with_runtime:
             env["XDG_RUNTIME_DIR"] = str(self.runtime)
         return subprocess.run([str(WRAPPER), *map(str, args)], env=env,
                               capture_output=True, text=True)
+
+    def write_playback(self, text):
+        (self.home / ".claude-tts" / "playback.json").write_text(text)
 
     def inbox_names(self):
         return sorted(p.name for p in self.inbox.iterdir()) if self.inbox.exists() else []
@@ -57,8 +63,48 @@ class PaplayWrapperTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         names = self.inbox_names()
         self.assertEqual(len(names), 1)
-        self.assertRegex(names[0], r"^\d{19}_tts_queue_S_T_s0\.wav$")
+        self.assertRegex(names[0], r"^\d{19}_unknown_tts_queue_S_T_s0\.wav$")
         self.assertEqual((self.inbox / names[0]).read_bytes(), WAV_BYTES)
+
+    def assert_single_name(self, expected_id):
+        result = self.run_wrapper(self.make_wav("tts_queue_S_tok_s0.wav"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = self.inbox_names()
+        self.assertEqual(len(names), 1)
+        self.assertRegex(names[0], rf"^\d{{19}}_{expected_id}_tts_queue_S_tok_s0\.wav$")
+
+    def test_task_id_from_playback_json(self):
+        self.write_playback('{"paused": false, "current_message": {"id": "a1b2c3d4e5f60718", "x": 1}}')
+        self.assert_single_name("a1b2c3d4e5f60718")
+
+    def test_unknown_without_playback_json(self):
+        self.assert_single_name("unknown")
+
+    def test_unknown_when_current_message_null(self):
+        self.write_playback('{"current_message": null}')
+        self.assert_single_name("unknown")
+
+    def test_unknown_when_json_broken(self):
+        self.write_playback('{"current_message": {"id": ')
+        self.assert_single_name("unknown")
+
+    def test_unknown_when_id_has_bad_characters(self):
+        for bad in ("../evil", "ABC123", "a b", "", "g1", "a" * 65):
+            with self.subTest(bad=bad):
+                self.write_playback('{"current_message": {"id": "%s"}}' % bad)
+                self.inbox_clear()
+                self.assert_single_name("unknown")
+
+    def test_unknown_when_shape_differs(self):
+        for text in ('[]', '"s"', '{"current_message": "abc"}', '{"current_message": {"id": 5}}'):
+            with self.subTest(text=text):
+                self.write_playback(text)
+                self.inbox_clear()
+                self.assert_single_name("unknown")
+
+    def inbox_clear(self):
+        for p in self.inbox.glob("*") if self.inbox.exists() else []:
+            p.unlink()
 
     def test_no_dotfiles_left_after_success(self):
         self.run_wrapper(self.make_wav())
@@ -71,14 +117,14 @@ class PaplayWrapperTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         names = self.inbox_names()
         self.assertEqual(len(names), 1)
-        self.assertRegex(names[0], r"^\d{19}_x\.wav$")
+        self.assertRegex(names[0], r"^\d{19}_unknown_x\.wav$")
 
     def test_names_sort_in_call_order(self):
         wavs = [self.make_wav(f"s{i}.wav") for i in (2, 0, 1)]
         for wav in wavs:
             self.assertEqual(self.run_wrapper(wav).returncode, 0)
         names = self.inbox_names()
-        self.assertEqual([n.split("_", 1)[1] for n in names], ["s2.wav", "s0.wav", "s1.wav"])
+        self.assertEqual([n.split("_", 2)[2] for n in names], ["s2.wav", "s0.wav", "s1.wav"])
 
     def test_announcements_are_skipped(self):
         for name in ("tts_announce.wav", "tts_daemon_announce.wav"):
