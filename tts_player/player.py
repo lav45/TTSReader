@@ -209,14 +209,14 @@ class Player:
         return frozenset(files)
 
     def add_session(self, session_id: str, cwd: str) -> None:
-        """Запрос `session add` забран (строку журнала читает e2e)."""
-        log.info("session add %s", session_id)
-        self._sessions.add(session_id, cwd)
+        """Запрос `session add`; строку журнала (её читает e2e) пишет только настоящая смена."""
+        if self._sessions.add(session_id, cwd):
+            log.info("session add %s", session_id)
 
     def remove_session(self, session_id: str) -> None:
-        """Запрос `session remove` забран (строку журнала читает e2e)."""
-        log.info("session remove %s", session_id)
-        self._sessions.remove(session_id)
+        """Запрос `session remove`; строка журнала — только при настоящей смене."""
+        if self._sessions.remove(session_id):
+            log.info("session remove %s", session_id)
 
     def _on_hook_task(self, task: HookTask) -> None:
         """Задача хука забрана (строка журнала — её читает e2e): её поля как есть уходят в

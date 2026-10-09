@@ -33,7 +33,7 @@ from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
-from tts_player.sessions import Sessions, sessions_path  # noqa: E402
+from tts_player.sessions import Sessions, control_dir, sessions_path  # noqa: E402
 from tts_player import session_command  # noqa: E402
 from tts_player.text_speaker import TextSpeaker  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
                         ducker, hook_tasks_dir=hook_home.queue_dir,
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
                         daemon_settings=settings, sessions=sessions,
-                        control_dir=Path(runtime) / "tts-player" / "control")
+                        control_dir=control_dir(Path(runtime)))
         prefs = PlayerSettings(Path(args.settings_file).expanduser())
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:

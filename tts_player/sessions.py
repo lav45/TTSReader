@@ -26,6 +26,11 @@ def sessions_path(runtime_dir: Path) -> Path:
     return Path(runtime_dir) / APP_DIR / FILE_NAME
 
 
+def control_dir(runtime_dir: Path) -> Path:
+    """Каталог запросов `session add/remove`: пишет CLI, забирает плеер."""
+    return Path(runtime_dir) / APP_DIR / "control"
+
+
 def read_sessions(path: Path) -> tuple[str | None, list[Session]]:
     """(active, sessions). Нет файла — (None, []); нечитаемый или неверной формы — ValueError."""
     try:

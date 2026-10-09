@@ -132,7 +132,9 @@ class ControlCase(unittest.TestCase):
 
         control = ControlRequests(self.control_dir, boom, lambda s: None)
         path = self.write("1.json", {"op": "add", "session": "u1", "cwd": "/p"})
-        control.drain()
+        with self.assertLogs("tts_player.control", "ERROR") as logs:
+            control.drain()
+        self.assertIn("обработчик упал на 1.json", logs.output[0])
         self.assertFalse(path.exists())
 
     def test_stop_before_start_is_harmless(self):

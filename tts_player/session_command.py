@@ -11,7 +11,7 @@ from pathlib import Path
 
 from tts_player.atomic_json import write_json
 from tts_player.instance import is_locked
-from tts_player.sessions import read_sessions, sessions_path
+from tts_player.sessions import control_dir, read_sessions, sessions_path
 
 SESSION_USAGE = "usage: tts-player session add <uuid> <cwd> | remove <uuid> | has <uuid>"
 
@@ -86,7 +86,7 @@ def submit(session_id: str, request: dict, noop_text: str, sent_text: str, offli
 
 
 def write_request(runtime: Path, request: dict) -> None:
-    control = runtime / "tts-player" / "control"
+    control = control_dir(runtime)
     control.mkdir(parents=True, exist_ok=True)
     write_json(control / f"{time.time_ns()}.json", request)
 

@@ -223,9 +223,9 @@ class PlayerCase(unittest.TestCase):
     def restart(self) -> None:
         """Новый процесс плеера в том же $XDG_RUNTIME_DIR (после shutdown прежнего)."""
         self.player = Player(self.runtime, None, self.history_dir,
-                             self.runtime / "handy_analysis.db", sessions=Sessions(self.runtime / "sessions.json"),
-                             daemon_queue=self.daemon,
-                             daemon_settings=self.settings)
+                             self.runtime / "handy_analysis.db",
+                             sessions=Sessions(self.runtime / "sessions.json"),
+                             daemon_queue=self.daemon, daemon_settings=self.settings)
         self.playback = self.player._playback
         self.player.on_change = self.states.append
         self.player.start()
@@ -548,9 +548,9 @@ class PlayerHistoryTest(PlayerCase):
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_without_history_plays(self) -> None:
-        player = Player(self.runtime, None, None, None, sessions=Sessions(self.runtime / "sessions.json"),
-                             daemon_queue=self.daemon,
-                        daemon_settings=self.settings)
+        player = Player(self.runtime, None, None, None,
+                        sessions=Sessions(self.runtime / "sessions.json"),
+                        daemon_queue=self.daemon, daemon_settings=self.settings)
         self.announce("aa", player=player)
         write_wav(self.inbox_dir / A0, SECONDS)
         player.start()
@@ -1240,9 +1240,9 @@ class PlayerDuckingTest(PlayerCase):
         self.now = 0.0
         self.player = Player(self.runtime, None, self.history_dir,
                              self.runtime / "handy_analysis.db", ducker=self.ducker,
-                             clock=lambda: self.now, sessions=Sessions(self.runtime / "sessions.json"),
-                             daemon_queue=self.daemon,
-                             daemon_settings=self.settings)
+                             clock=lambda: self.now,
+                             sessions=Sessions(self.runtime / "sessions.json"),
+                             daemon_queue=self.daemon, daemon_settings=self.settings)
         self.playback = self.player._playback
         self.player.on_change = self.states.append
 
@@ -1594,7 +1594,7 @@ class PlayerHookTasksTest(PlayerCase):
         (queue_dir / "1.json").write_text('{"id": "z", "session_id": "S", "text": "xy"}')
         player = Player(self.runtime, None, None, None, hook_tasks_dir=queue_dir,
                         sessions=Sessions(self.runtime / "sessions.json"),
-                             daemon_queue=self.daemon, daemon_settings=self.settings)
+                        daemon_queue=self.daemon, daemon_settings=self.settings)
         self.daemon.ids.append("aa")
         player.start()
         player.shutdown()
@@ -1621,19 +1621,29 @@ class PlayerHookTasksTest(PlayerCase):
         queue_dir = self.runtime / "hook-queue"
         queue_dir.mkdir()
         (queue_dir / "1.json").write_text('{"id": "z", "session_id": "u1", "text": "xy"}')
-        order: list[str] = []
+        sessions = Sessions(self.runtime / "sessions2.json")
+        listed_at_put: list[bool] = []
+        self.daemon.ids.append("aa")
+        real_put = self.daemon.put
+
+        def put(fields):
+            listed_at_put.append(sessions.has("u1"))
+            return real_put(fields)
+
+        self.daemon.put = put
         player = Player(self.runtime, None, None, None, hook_tasks_dir=queue_dir,
-                        sessions=Sessions(self.runtime / "sessions2.json"),
-                        control_dir=control_dir,
+                        sessions=sessions, control_dir=control_dir,
                         daemon_queue=self.daemon, daemon_settings=self.settings)
         self.addCleanup(player.shutdown)
-        player.add_session = lambda session, cwd: order.append("control")
-        player._control._on_add = player.add_session
-        original = player._on_hook_task
-        player._hook_tasks._on_task = lambda task: (order.append("hook"), original(task))
         player.start()
-        self.assertEqual(["control", "hook"], order)
+        self.assertEqual([True], listed_at_put)
         self.assertEqual([], list(control_dir.iterdir()))
+
+    def test_duplicate_add_and_unknown_remove_are_not_logged(self) -> None:
+        self.player.add_session("u1", "/p/X")
+        with self.assertNoLogs("tts_player.player", "INFO"):
+            self.player.add_session("u1", "/p/X")
+            self.player.remove_session("nope")
 
     def test_shutdown_stops_control_monitor(self) -> None:
         control_dir = self.runtime / "tts-player" / "control"
@@ -1642,10 +1652,27 @@ class PlayerHookTasksTest(PlayerCase):
                         control_dir=control_dir,
                         daemon_queue=self.daemon, daemon_settings=self.settings)
         player.start()
-        self.assertIsNotNone(player._control._monitor)
+        (control_dir / "1.json").write_text('{"op": "add", "session": "u1", "cwd": "/p/X"}')
+        self.spin_real(lambda: not (control_dir / "1.json").exists())
+        self.assertFalse((control_dir / "1.json").exists())
         player.shutdown()
-        self.assertIsNone(player._control._monitor)
+        (control_dir / "2.json").write_text('{"op": "add", "session": "u2", "cwd": "/p/X"}')
+        self.spin_real(None)
+        self.assertTrue((control_dir / "2.json").exists())
 
+    @staticmethod
+    def spin_real(until) -> None:
+        """Настоящий цикл GLib (в тестах плеера player.GLib подменён): до until или 300 мс."""
+        loop = GLib.MainLoop()
+        GLib.timeout_add(5000 if until else 300, loop.quit)
+        if until:
+            def check():
+                if until():
+                    loop.quit()
+                    return False
+                return True
+            GLib.timeout_add(20, check)
+        loop.run()
 
 
 class PlayerRevoiceTest(PlayerCase):
