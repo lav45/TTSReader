@@ -3,11 +3,12 @@
 Запуск: python3 -m tts_player [--audio-sink NAME] [--history-dir DIR] [--history-db FILE]
                               [--tts-config-dir DIR] [--tts-flag FILE]
                               [--tts-off-hook FILE] [--settings-file FILE]
+                              [--tts-python FILE]
                               [--no-gui] [--show] [--tray]
        python3 -m tts_player stop    (SIGUSR1 запущенному плееру: остановить текущее)
        python3 -m tts_player play    (SIGUSR2: продолжить остановленное, играющее не трогать)
-Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window); нет графической сессии —
-выход 1. С --no-gui — GLib.MainLoop без Gtk и XApp (e2e).
+Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window) с экраном «Свой текст»
+(tts_player.text_speaker); нет графической сессии — выход 1. С --no-gui — GLib.MainLoop без Gtk и XApp (e2e).
 """
 import argparse
 import logging
@@ -27,9 +28,12 @@ from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
+from tts_player.text_speaker import TextSpeaker  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
 
 log = logging.getLogger(__name__)
+
+SYNTH_WORKER = Path(__file__).resolve().parent / "synth_worker.py"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settings-file",
                         default=str(PlayerSettings.default_path(os.environ)),
                         help="файл настроек плеера: хвост, автовоспроизведение, приглушение")
+    parser.add_argument("--tts-python",
+                        default="~/.local/share/uv/tools/claude-code-tts/bin/python",
+                        help="интерпретатор окружения claude-tts: синтез своего текста")
     parser.add_argument("--no-gui", action="store_true",
                         help="без окна и трея: только плеер в цикле GLib")
     parser.add_argument("--show", action="store_true", help="показать окно сразу при запуске")
@@ -101,7 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
         voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
-        run_gui(player, settings, prefs, voicing, args.show)
+        text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
+                                   SYNTH_WORKER, player, args.audio_sink)
+        run_gui(player, settings, prefs, voicing, text_speaker, args.show)
     return 0
 
 
@@ -134,20 +143,24 @@ def gtk_ready() -> bool:
 
 
 def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voicing: Voicing,
-            show: bool) -> None:
+            text_speaker: TextSpeaker, show: bool) -> None:
     from gi.repository import Gtk
 
     from tts_player.window import PlayerWindow, TrayIcon
 
-    window = PlayerWindow(player, settings, prefs, voicing)
+    window = PlayerWindow(player, settings, prefs, voicing, text_speaker)
     tray = TrayIcon(window, Gtk.main_quit)  # noqa: F841 — значок живёт, пока жива ссылка
     if show:
         window.present()
-    run(player, Gtk.main, Gtk.main_quit)
+    run(player, Gtk.main, Gtk.main_quit, text_speaker)
 
 
-def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None]) -> None:
-    """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, незаконченное — обратно в inbox/."""
+def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None],
+        text_speaker: TextSpeaker | None = None) -> None:
+    """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, незаконченное — обратно в inbox/.
+
+    Свой текст (только с окном): остатки прошлых запусков удаляются до player.start(), выход
+    TextSpeaker — до player.shutdown(), иначе его release() пришёл бы в остановленный плеер."""
     def on_signal() -> bool:
         quit_loop()
         return GLib.SOURCE_REMOVE
@@ -169,9 +182,13 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
 
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR2, on_play)
     try:
+        if text_speaker is not None:
+            text_speaker.cleanup_leftovers()
         player.start()
         main_loop()
     finally:
+        if text_speaker is not None:
+            text_speaker.shutdown()
         player.shutdown()
 
 

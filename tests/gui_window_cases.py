@@ -21,6 +21,7 @@ from gi.repository import Gdk, Gtk  # noqa: E402
 
 from tts_player.daemon_settings import Voice, VoiceSettings  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
+from tts_player.text_speaker import TextState  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
@@ -142,6 +143,40 @@ class FakeVoicing:
         self.turn_off_calls += 1
 
 
+def text_state(status: str, position_s: float = 0.0, length_s: float = 0.0,
+               error: str = "") -> TextState:
+    return TextState(status, position_s, length_s, False, error)
+
+
+class FakeTextSpeaker:
+    """Контракт TextSpeaker для окна: state(), on_change и команды экрана «Свой текст»;
+    вызовы записываются. toggle_play_pause из playing и synthesizing ставит paused, как
+    настоящий, — окно видит паузу своего текста раньше команды главному плееру."""
+
+    def __init__(self, snapshot: TextState | None = None) -> None:
+        self.snapshot = snapshot or text_state("empty")
+        self.calls: list[tuple] = []
+        self.on_change = lambda st: None
+
+    def state(self) -> TextState:
+        return self.snapshot
+
+    def change(self, snapshot: TextState) -> None:
+        self.snapshot = snapshot
+        self.on_change(snapshot)
+
+    def set_text(self, text: str) -> None:
+        self.calls.append(("set_text", text))
+
+    def toggle_play_pause(self) -> None:
+        self.calls.append(("toggle_play_pause",))
+        if self.snapshot.status in ("playing", "synthesizing"):
+            self.change(text_state("paused", self.snapshot.position_s, self.snapshot.length_s))
+
+    def seek(self, position_s: float) -> None:
+        self.calls.append(("seek", position_s))
+
+
 def voice_settings() -> VoiceSettings:
     return VoiceSettings(voices=[Voice("aria", "Тёплый женский"), Voice("bob", "")],
                          active="bob", speed=1.5)
@@ -169,7 +204,9 @@ class PlayerWindowTest(unittest.TestCase):
         self.settings = FakeSettings(voice_settings())
         self.prefs = FakePrefs(Prefs(tail=7, autoplay=True))
         self.voicing = FakeVoicing(on=False)
-        self.window = PlayerWindow(self.player, self.settings, self.prefs, self.voicing)
+        self.text = FakeTextSpeaker()
+        self.window = PlayerWindow(self.player, self.settings, self.prefs, self.voicing,
+                                   self.text)
         self.addCleanup(self.window.destroy)
 
     def test_buttons_call_player_commands(self) -> None:
@@ -220,7 +257,8 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertTrue(button.get_sensitive())
 
     def test_voicing_off_button_sensitive_at_construction_when_on(self) -> None:
-        window = PlayerWindow(self.player, self.settings, self.prefs, FakeVoicing(on=True))
+        window = PlayerWindow(self.player, self.settings, self.prefs, FakeVoicing(on=True),
+                              self.text)
         self.addCleanup(window.destroy)
         self.assertTrue(window.voicing_off_button.get_sensitive())
 
@@ -292,27 +330,27 @@ class PlayerWindowTest(unittest.TestCase):
 
     def test_drag_seeks_once_on_release_with_dragged_value(self) -> None:
         w = self.window
-        w._on_scale_press(w.scale, None)
+        w.slider.press()
         w.scale.emit("change-value", Gtk.ScrollType.JUMP, 4.0)
         w.scale.emit("change-value", Gtk.ScrollType.JUMP, 6.0)
         self.assertEqual([], self.player.calls)
-        w._on_scale_release(w.scale, None)
+        w.slider.release()
         self.assertEqual([("seek", 6.0)], self.player.calls)
 
     def test_click_without_movement_does_not_seek(self) -> None:
         w = self.window
-        w._on_scale_press(w.scale, None)
-        w._on_scale_release(w.scale, None)
+        w.slider.press()
+        w.slider.release()
         self.assertEqual([], self.player.calls)
 
     def test_lost_release_does_not_freeze_slider(self) -> None:
         w = self.window
-        w._on_scale_press(w.scale, None)
+        w.slider.press()
         w.scale.emit("change-value", Gtk.ScrollType.JUMP, 4.0)
         w.scale.emit("grab-broken-event", Gdk.Event.new(Gdk.EventType.GRAB_BROKEN))
         self.player.change(state("playing", self.b, [self.a, self.b, self.c], 8.0))
         self.assertEqual(8.0, w.scale.get_value())
-        w._on_scale_release(w.scale, None)
+        w.slider.release()
         self.assertEqual([], self.player.calls)
 
     def test_refresh_timer_only_while_visible(self) -> None:
@@ -441,7 +479,9 @@ class SettingsScreenTest(unittest.TestCase):
         self.settings = FakeSettings(voice_settings())
         self.prefs = FakePrefs(Prefs(tail=7, autoplay=True))
         self.voicing = FakeVoicing(on=False)
-        self.window = PlayerWindow(self.player, self.settings, self.prefs, self.voicing)
+        self.text = FakeTextSpeaker()
+        self.window = PlayerWindow(self.player, self.settings, self.prefs, self.voicing,
+                                   self.text)
         self.addCleanup(self.window.destroy)
 
     def test_icon_buttons_without_text_first_in_one_row(self) -> None:
@@ -695,6 +735,180 @@ class SettingsScreenTest(unittest.TestCase):
         w.back_button.clicked()
         self.assertEqual("main", w.stack.get_visible_child_name())
         self.assertEqual([("load",)], self.settings.calls)
+
+
+class TextScreenTest(unittest.TestCase):
+    """Экран «Свой текст» (контракт (10)) поверх FakeTextSpeaker."""
+
+    def setUp(self) -> None:
+        self.player = FakePlayer(state("paused", None, []))
+        self.text = FakeTextSpeaker()
+        self.window = PlayerWindow(self.player, FakeSettings(voice_settings()),
+                                   FakePrefs(Prefs(tail=7, autoplay=True)), FakeVoicing(on=True),
+                                   self.text)
+        self.addCleanup(self.window.destroy)
+
+    def calls(self, name: str) -> list[tuple]:
+        return [call for call in self.text.calls if call[0] == name]
+
+    def test_text_button_icon_tooltip_after_voicing_off(self) -> None:
+        w = self.window
+        button = w.text_button
+        self.assertFalse(button.get_label())
+        self.assertEqual("document-edit-symbolic", icon_name(button))
+        self.assertEqual("Озвучить свой текст", button.get_tooltip_text())
+        row = w.clear_button.get_parent()
+        self.assertEqual([w.settings_button, w.clear_button, w.voicing_off_button, button],
+                         row.get_children()[:4])
+        self.assertEqual(Gtk.PackType.START, row.child_get_property(button, "pack-type"))
+
+    def test_click_opens_text_screen(self) -> None:
+        w = self.window
+        w.text_button.clicked()
+        self.assertEqual("text", w.stack.get_visible_child_name())
+        self.assertIs(w.stack.get_child_by_name("text"), w.stack.get_visible_child())
+
+    def test_text_screen_order_top_to_bottom(self) -> None:
+        w = self.window
+        screen = w.stack.get_child_by_name("text")
+        header = w.text_back_button.get_parent()
+        scrolled = w.text_view.get_parent()
+        self.assertIsInstance(scrolled, Gtk.ScrolledWindow)
+        transport = w.text_play_button.get_parent()
+        self.assertIs(transport, w.text_position.get_parent())
+        self.assertEqual([header, scrolled, w.text_scale, w.text_error, transport],
+                         screen.get_children())
+        self.assertTrue(screen.child_get_property(scrolled, "expand"))
+        self.assertEqual("go-previous-symbolic", icon_name(w.text_back_button))
+        self.assertEqual(Gtk.WrapMode.WORD_CHAR, w.text_view.get_wrap_mode())
+        # время слева, play справа — как в ряду главного экрана
+        self.assertEqual(Gtk.PackType.START,
+                         transport.child_get_property(w.text_position, "pack-type"))
+        self.assertEqual(Gtk.PackType.END,
+                         transport.child_get_property(w.text_play_button, "pack-type"))
+
+    def test_typing_sets_text_from_buffer(self) -> None:
+        buffer = self.window.text_view.get_buffer()
+        buffer.set_text("Привет. Мир.")
+        self.assertEqual(("set_text", "Привет. Мир."), self.calls("set_text")[-1])
+        buffer.set_text("")
+        self.assertEqual(("set_text", ""), self.calls("set_text")[-1])
+
+    def test_play_button_toggles_and_disabled_when_empty(self) -> None:
+        w = self.window
+        self.assertFalse(w.text_play_button.get_sensitive())
+        self.text.change(text_state("stopped"))
+        self.assertTrue(w.text_play_button.get_sensitive())
+        w.text_play_button.clicked()
+        self.assertEqual([("toggle_play_pause",)], self.text.calls)
+        self.assertEqual([], self.player.calls)
+
+    def test_play_label_and_slider_follow_state(self) -> None:
+        w = self.window
+        cases = (
+            (text_state("synthesizing"), "⏸", True, False),
+            (text_state("playing", 2.0, 5.0), "⏸", True, True),
+            (text_state("paused", 3.0, 5.0), "⏵", True, True),
+            (text_state("stopped", 0.0, 5.0), "⏵", True, True),
+            (text_state("error", 0.0, 0.0, "процесс синтеза завершился"), "⏵", True, False),
+            (text_state("empty"), "⏵", False, False),
+        )
+        for snapshot, label, enabled, slider in cases:
+            self.text.change(snapshot)
+            self.assertEqual(label, w.text_play_button.get_label(), snapshot.status)
+            self.assertEqual(enabled, w.text_play_button.get_sensitive(), snapshot.status)
+            self.assertEqual(slider, w.text_scale.get_sensitive(), snapshot.status)
+            self.assertEqual(snapshot.position_s, w.text_scale.get_value(), snapshot.status)
+            adjustment = w.text_scale.get_adjustment()
+            self.assertEqual(snapshot.length_s, adjustment.get_upper(), snapshot.status)
+        self.text.change(text_state("playing", 65.0, 125.0))
+        self.assertEqual("1:05 / 2:05", w.text_position.get_text())
+        self.assertEqual([], self.calls("seek"), "обновление из состояния не перематывает")
+
+    def test_error_text_under_slider_while_error_set(self) -> None:
+        w = self.window
+        w.show_all()
+        flush()
+        self.assertFalse(w.text_error.get_visible())
+        self.text.change(text_state("error", error="процесс синтеза остановлен сигналом 9"))
+        self.assertTrue(w.text_error.get_visible())
+        self.assertEqual("процесс синтеза остановлен сигналом 9", w.text_error.get_text())
+        # готовое доигрывает после сбоя синтеза: статус playing, ошибка уже есть
+        self.text.change(text_state("playing", 1.0, 3.0, "синтез: нет голоса"))
+        self.assertTrue(w.text_error.get_visible())
+        self.assertEqual("синтез: нет голоса", w.text_error.get_text())
+        self.text.change(text_state("stopped", 0.0, 3.0))
+        self.assertFalse(w.text_error.get_visible())
+
+    def test_user_slider_change_seeks_text(self) -> None:
+        w = self.window
+        self.text.change(text_state("paused", 0.0, 10.0))
+        w.text_scale.emit("change-value", Gtk.ScrollType.JUMP, 4.0)
+        self.assertEqual([("seek", 4.0)], self.calls("seek"))
+        self.assertEqual([], self.player.calls)
+
+    def test_text_drag_seeks_once_on_release(self) -> None:
+        w = self.window
+        self.text.change(text_state("playing", 1.0, 10.0))
+        w.text_slider.press()
+        w.text_scale.emit("change-value", Gtk.ScrollType.JUMP, 4.0)
+        w.text_scale.emit("change-value", Gtk.ScrollType.JUMP, 6.0)
+        self.text.change(text_state("playing", 2.0, 10.0))
+        self.assertEqual(6.0, w.text_scale.get_value(), "пока тянут, состояние не двигает")
+        self.assertEqual([], self.calls("seek"))
+        w.text_slider.release()
+        self.assertEqual([("seek", 6.0)], self.calls("seek"))
+
+    def test_back_pauses_playing_text(self) -> None:
+        w = self.window
+        w.text_button.clicked()
+        self.text.change(text_state("playing", 1.0, 5.0))
+        w.text_back_button.clicked()
+        self.assertEqual("main", w.stack.get_visible_child_name())
+        self.assertEqual([("toggle_play_pause",)], self.text.calls)
+        self.assertEqual("paused", self.text.state().status)
+
+    def test_back_pauses_synthesizing_text(self) -> None:
+        w = self.window
+        w.text_button.clicked()
+        self.text.change(text_state("synthesizing"))
+        w.text_back_button.clicked()
+        self.assertEqual("main", w.stack.get_visible_child_name())
+        self.assertEqual([("toggle_play_pause",)], self.text.calls)
+
+    def test_back_leaves_silent_text_alone(self) -> None:
+        w = self.window
+        for status in ("empty", "paused", "stopped", "error"):
+            self.text.calls.clear()
+            w.text_button.clicked()
+            self.text.change(text_state(status))
+            w.text_back_button.clicked()
+            self.assertEqual("main", w.stack.get_visible_child_name(), status)
+            self.assertEqual([], self.text.calls, status)
+
+    def test_main_play_pauses_sounding_text_first(self) -> None:
+        """Один звук за раз: свой текст встаёт на паузу раньше команды главному плееру."""
+        w = self.window
+        order = []
+        self.text.on_change = lambda st: order.append(("text", st.status))
+        self.player.toggle_play_pause = lambda: order.append(("player", "toggle"))
+        self.text.snapshot = text_state("playing", 1.0, 5.0)
+        w.play_pause_button.clicked()
+        self.assertEqual([("text", "paused"), ("player", "toggle")], order)
+
+    def test_main_play_with_silent_text_toggles_only_player(self) -> None:
+        w = self.window
+        self.text.change(text_state("paused", 1.0, 5.0))
+        w.play_pause_button.clicked()
+        self.assertEqual([], self.text.calls)
+        self.assertEqual([("toggle_play_pause",)], self.player.calls)
+
+    def test_refresh_tick_updates_text_position(self) -> None:
+        """Позиция играющего своего текста сама on_change не шлёт: её двигает тик окна."""
+        w = self.window
+        self.text.snapshot = text_state("playing", 3.0, 10.0)
+        w._refresh()
+        self.assertEqual(3.0, w.text_scale.get_value())
 
 
 class TrayMenuTest(unittest.TestCase):
