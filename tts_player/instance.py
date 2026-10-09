@@ -1,12 +1,11 @@
 """Единственный экземпляр плеера: flock на $XDG_RUNTIME_DIR/tts-player/player.lock.
 
 Блокировку держит процесс плеера, пока жив (дескриптор открыт); в файле — его PID.
-`tts-player stop` читает PID и шлёт SIGUSR1 (плеер отвечает stop_playback()),
-`tts-player play` — SIGUSR2 (play_if_stopped()).
+`tts-player` при втором запуске читает PID владельца (holder_pid); `session add|remove|has`
+проверяет блокировку пробой is_locked.
 """
 import fcntl
 import os
-import signal
 import time
 from pathlib import Path
 
@@ -38,14 +37,13 @@ class Instance:
         os.close(self._fd)
 
     @staticmethod
-    def holder_pid(runtime_dir: Path, timeout: float = 1.0, marker: str | None = None) -> int | None:
+    def holder_pid(runtime_dir: Path, timeout: float = 1.0) -> int | None:
         """PID из файла блокировки. Между flock и записью PID файл пуст или хранит чужой PID
-        прошлого владельца, поэтому чтение повторяется (шаг 50 мс, до timeout); с marker
-        PID принимается, только если /proc/<pid>/cmdline содержит marker."""
+        прошлого владельца, поэтому чтение повторяется (шаг 50 мс, до timeout)."""
         deadline = time.monotonic() + timeout
         while True:
             pid = read_pid(runtime_dir)
-            if pid is not None and (marker is None or marker in cmdline(pid)):
+            if pid is not None:
                 return pid
             if time.monotonic() >= deadline:
                 return None
@@ -57,13 +55,6 @@ def read_pid(runtime_dir: Path) -> int | None:
         return int(lock_path(runtime_dir).read_text().strip())
     except (OSError, ValueError):
         return None
-
-
-def cmdline(pid: int) -> str:
-    try:
-        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-    except OSError:
-        return ""
 
 
 def is_locked(runtime_dir: Path) -> bool:
@@ -79,26 +70,3 @@ def is_locked(runtime_dir: Path) -> bool:
     finally:
         os.close(fd)
     return False
-
-
-def send_stop(runtime_dir: Path, marker: str = "tts_player") -> bool:
-    """Блокировка свободна или владелец не опознан как плеер — False; иначе SIGUSR1 и True."""
-    return send_signal(runtime_dir, signal.SIGUSR1, marker)
-
-
-def send_play(runtime_dir: Path, marker: str = "tts_player") -> bool:
-    """То же, что send_stop, но SIGUSR2: плеер отвечает play_if_stopped()."""
-    return send_signal(runtime_dir, signal.SIGUSR2, marker)
-
-
-def send_signal(runtime_dir: Path, signum: int, marker: str) -> bool:
-    if not is_locked(runtime_dir):
-        return False
-    pid = Instance.holder_pid(runtime_dir, marker=marker)
-    if pid is None:
-        return False
-    try:
-        os.kill(pid, signum)
-    except ProcessLookupError:
-        return False
-    return True

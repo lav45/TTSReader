@@ -340,7 +340,7 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertFalse(self.inbox.exists())
 
     def test_autoplay_off_in_settings_file_keeps_new_message_silent(self) -> None:
-        """--settings-file с autoplay: false — первое сообщение не играет само; play — играет."""
+        """--settings-file с autoplay: false — первое сообщение не играет само (начать его без окна нечем)."""
         settings = self.tmp / "prefs" / "settings.json"
         settings.parent.mkdir()
         settings.write_text(json.dumps({"tail": 5, "autoplay": False}))
@@ -352,9 +352,6 @@ class PlayerE2ETest(PlayerProcessCase):
             time.sleep(0.05)
         self.assert_quiet()
         self.assertEqual(1, len(list(self.store.iterdir())))
-        self.assertEqual(0, subprocess.run([str(BIN), "play"], env=self.env(),
-                                           timeout=WAIT).returncode)
-        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
 
     def test_settings_default_to_xdg_config_home(self) -> None:
         """Без --settings-file файл берётся из XDG_CONFIG_HOME подпроцесса."""
@@ -484,43 +481,6 @@ class SingleInstanceTest(PlayerProcessCase):
         names = self.played(2)  # недоигранное aaaaaa сохранено при выходе и играет снова
         self.assertTrue(names[0].endswith("aaaaaa_s0.wav") and names[1].endswith("bbbbbb_s0.wav"))
 
-    def test_stop_without_player_exits_0_silently(self) -> None:
-        result = self.run_bin("stop")
-        self.assertEqual(0, result.returncode)
-        self.assertEqual("", result.stderr)
-
-    def test_stop_while_playing_logs_and_silences_until_next_play(self) -> None:
-        session = uuid.uuid4().hex
-        self.start_player()
-        self.drop(self.sentence(session, "aaaaaa", 0, seconds=5.0))
-        self.drop(self.sentence(session, "bbbbbb", 0))
-        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
-        result = self.run_bin("stop")
-        self.assertEqual(0, result.returncode)
-        self.next_line("stop requested")
-        self.assert_quiet()
-        self.assertIsNone(self.proc.poll())
-
-    def test_play_without_player_exits_0_silently(self) -> None:
-        result = self.run_bin("play")
-        self.assertEqual(0, result.returncode)
-        self.assertEqual("", result.stderr)
-
-    def test_stop_then_play_resumes_and_play_while_playing_changes_nothing(self) -> None:
-        session = uuid.uuid4().hex
-        self.start_player()
-        self.drop(self.sentence(session, "aaaaaa", 0, seconds=5.0))
-        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
-        self.assertEqual(0, self.run_bin("play").returncode)
-        self.next_line("play requested")
-        self.assert_quiet()
-        self.assertEqual(0, self.run_bin("stop").returncode)
-        self.next_line("stop requested")
-        self.assertEqual(0, self.run_bin("play").returncode)
-        self.next_line("play requested")
-        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
-        self.assertIsNone(self.proc.poll())
-
     def sessions_file(self) -> dict:
         return json.loads((self.runtime / "tts-player" / "sessions.json").read_text())
 
@@ -576,47 +536,20 @@ class SingleInstanceTest(PlayerProcessCase):
             time.sleep(0.1)
         self.assertEqual("u1", self.sessions_file()["active"])
 
-    def test_sigusr2_before_player_is_up_does_not_kill(self) -> None:
-        self.start_player()
-        lock = self.runtime / "tts-player" / "player.lock"
-        deadline = time.monotonic() + WAIT
-        while not (lock.exists() and lock.read_text().strip()):
-            self.assertLess(time.monotonic(), deadline)
-            time.sleep(0.001)
-        self.proc.send_signal(signal.SIGUSR2)
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=5.0))
-        self.played(1)
-        self.assertIsNone(self.proc.poll())
-
     def test_bin_works_from_other_cwd_and_through_symlink(self) -> None:
         link = self.tmp / "tts-player-link"
         link.symlink_to(BIN)
-        result = subprocess.run([str(link), "stop"], cwd=self.tmp, env=self.env(),
+        result = subprocess.run([str(link), "session", "has", "u1"], cwd=self.tmp, env=self.env(),
                                 capture_output=True, text=True, timeout=WAIT)
-        self.assertEqual(0, result.returncode)
+        self.assertEqual(1, result.returncode)  # плеера нет: сессии в списке нет
         self.assertEqual("", result.stderr)
 
-    def test_sigusr1_before_player_is_up_does_not_kill_and_stop_works_later(self) -> None:
-        session = uuid.uuid4().hex
-        self.start_player()
-        lock = self.runtime / "tts-player" / "player.lock"
-        deadline = time.monotonic() + WAIT
-        while not (lock.exists() and lock.read_text().strip()):
-            self.assertLess(time.monotonic(), deadline)
-            time.sleep(0.001)
-        self.proc.send_signal(signal.SIGUSR1)
-        self.drop(self.sentence(session, "aaaaaa", 0, seconds=5.0))
-        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
-        self.assertIsNone(self.proc.poll())
-        self.assertEqual(0, self.run_bin("stop").returncode)
-        self.next_line("stop requested")
-
-    def test_stop_without_runtime_dir_exits_0(self) -> None:
-        env = {k: v for k, v in self.env().items() if k != "XDG_RUNTIME_DIR"}
-        result = subprocess.run([str(BIN), "stop"], cwd=ROOT, env=env,
-                                capture_output=True, text=True, timeout=WAIT)
-        self.assertEqual(0, result.returncode)
-        self.assertIn("плеер не запущен", result.stderr)
+    def test_stop_and_play_are_not_commands(self) -> None:
+        for word in ("stop", "play"):
+            result = self.run_bin(word)
+            self.assertEqual(2, result.returncode, word)
+            self.assertIn("unrecognized arguments", result.stderr)
+        self.assertFalse((self.runtime / "tts-player" / "player.lock").exists())
 
     def test_hook_task_goes_to_daemon_queue_and_its_files_play(self) -> None:
         """Задача хука в hook-home → файл в очереди демона с source и новым id; предложения

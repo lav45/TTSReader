@@ -264,35 +264,6 @@ class TextSpeakerPlayTest(TextSpeakerCase):
         self.run_until(lambda: self.status() == "stopped")
 
 
-class TextSpeakerPauseTest(TextSpeakerCase):
-    """pause() — команда `tts-player stop`: звучащий текст на паузу, иначе ничего."""
-
-    def test_pause_while_playing(self) -> None:
-        speaker = self.make([["count", 2], ["wav", 0, 1.0], ["sleep", 30]])
-        speaker.set_text("Раз. Два.")
-        speaker.toggle_play_pause()
-        self.run_until(lambda: self.status() == "playing")
-        speaker.pause()
-        self.assertEqual("paused", self.status())
-        self.assertEqual(["hold", "release"], self.player.calls)
-
-    def test_pause_while_synthesizing(self) -> None:
-        speaker = self.make([["sleep", 30]])
-        speaker.set_text("Раз.")
-        speaker.toggle_play_pause()
-        speaker.pause()
-        self.assertEqual("paused", self.status())
-
-    def test_pause_otherwise_is_noop(self) -> None:
-        speaker = self.make([])
-        speaker.pause()
-        self.assertEqual("empty", self.status())
-        speaker.set_text("Раз.")
-        speaker.pause()
-        self.assertEqual("stopped", self.status())
-        self.assertEqual([], self.player.calls)
-
-
 class TextSpeakerCancelTest(TextSpeakerCase):
     def test_set_text_during_synthesis_terminates_and_removes_dir(self) -> None:
         speaker = self.make([["count", 2], ["sleep", 30]])
