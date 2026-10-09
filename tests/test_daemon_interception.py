@@ -29,6 +29,11 @@ PLAY_SCRIPT = (
 )
 
 
+def wav_name(name):
+    """Имя WAV демона из имени в inbox/: без <recv_ns>_<id задачи>_ (контракт (13))."""
+    return name.split("_", 2)[2]
+
+
 def inbox_reader(inbox):
     """Читатель-заглушка: имена предложений в порядке приёма, без служебных точечных файлов."""
     return sorted(f for f in os.listdir(inbox) if not f.startswith("."))
@@ -49,7 +54,10 @@ class DaemonInterceptionTest(unittest.TestCase):
         self.path = f"{DAEMON_BIN}:{os.environ.get('PATH', '')}"
 
     def daemon_python(self, script, *args, path=None):
-        env = {"PATH": path or self.path, "XDG_RUNTIME_DIR": str(self.runtime)}
+        # HOME — пустой временный: обёртка не читает настоящий ~/.claude-tts/playback.json
+        # и ставит id задачи "unknown".
+        env = {"PATH": path or self.path, "XDG_RUNTIME_DIR": str(self.runtime),
+               "HOME": str(self.root)}
         return subprocess.run([str(DAEMON_PYTHON), "-I", "-c", script, *map(str, args)],
                               env=env, capture_output=True, text=True)
 
@@ -83,7 +91,7 @@ class DaemonInterceptionTest(unittest.TestCase):
             if i == 0:
                 self.play("tts_announce.wav", b"announcement")
         names = inbox_reader(self.inbox)
-        self.assertEqual([n.split("_", 1)[1] for n in names], list(sentences))
+        self.assertEqual([wav_name(n) for n in names], list(sentences))
         for name, data in zip(names, sentences.values()):
             self.assertEqual((self.inbox / name).read_bytes(), data)
 
@@ -92,7 +100,7 @@ class DaemonInterceptionTest(unittest.TestCase):
         self.play("tts_announce.wav", b"announcement")
         self.play("tts_queue_sess_tok_s1.wav", b"s1")
         names = inbox_reader(self.inbox)
-        self.assertEqual([n.split("_", 1)[1] for n in names],
+        self.assertEqual([wav_name(n) for n in names],
                          ["tts_queue_sess_tok_s0.wav", "tts_queue_sess_tok_s1.wav"])
 
 

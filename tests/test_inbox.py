@@ -39,7 +39,8 @@ class InboxTest(unittest.TestCase):
     def run_paplay(self, name):
         src = self.root / name
         src.write_bytes(b"wav")
-        env = {"PATH": os.environ.get("PATH", ""), "XDG_RUNTIME_DIR": str(self.runtime)}
+        env = {"PATH": os.environ.get("PATH", ""), "XDG_RUNTIME_DIR": str(self.runtime),
+               "HOME": str(self.root)}
         result = subprocess.run([str(WRAPPER), str(src)], env=env,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -58,8 +59,8 @@ class InboxTest(unittest.TestCase):
         loop.run()
 
     def test_backlog_delivered_by_recv_ns_not_by_name(self):
-        a = "2000000000000000000_tts_queue_A_aa_s0.wav"
-        b = "1000000000000000000_tts_queue_Z_bb_s1.wav"
+        a = "2000000000000000000_unknown_tts_queue_A_aa_s0.wav"
+        b = "1000000000000000000_unknown_tts_queue_Z_bb_s1.wav"
         self.drop(a)
         self.drop(b)
         self.inbox.start()
@@ -74,7 +75,7 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(self.got[0].index, 3)
 
     def test_taken_file_moves_to_store(self):
-        name = "1000000000000000000_tts_queue_S_ab_s0.wav"
+        name = "1000000000000000000_unknown_tts_queue_S_ab_s0.wav"
         self.drop(name)
         self.inbox.start()
         self.assertFalse((self.inbox_dir / name).exists())
@@ -82,7 +83,7 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(self.got[0].path, self.store_dir / name)
 
     def test_dot_names_are_ignored(self):
-        self.drop(".1000000000000000000_tts_queue_S_ab_s0.wav.part")
+        self.drop(".1000000000000000000_unknown_tts_queue_S_ab_s0.wav.part")
         self.drop(".hidden")
         self.inbox.start()
         self.drop(".other.part")
@@ -99,16 +100,51 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(self.got, [])
 
     def test_fields_parsed_from_name(self):
-        name = "1760000000123456789_tts_queue_sess-ion-42_0a1f_s17.wav"
+        name = "1760000000123456789_9f3c01ab_tts_queue_sess-ion-42_0a1f_s17.wav"
         self.drop(name)
         self.inbox.start()
         self.assertEqual(self.got, [Sentence(
             recv_ns=1760000000123456789,
+            task_id="9f3c01ab",
             session_id="sess-ion-42",
             token="0a1f",
             index=17,
             path=self.store_dir / name,
         )])
+
+    def test_unknown_task_id_parsed(self):
+        self.drop("1760000000123456789_unknown_tts_queue_S_ab_s0.wav")
+        self.inbox.start()
+        self.assertEqual(["unknown"], [s.task_id for s in self.got])
+
+    def test_name_without_task_id_is_taken_as_unknown(self):
+        """Имя прежнего вида (обёртка до id задачи, файл остался в inbox/ после обновления) —
+        предложение с id задачи "unknown"."""
+        name = "1760000000123456789_tts_queue_S_ab_s0.wav"
+        self.drop(name)
+        self.inbox.start()
+        self.assertEqual([("unknown", "S", "ab", 0, self.store_dir / name)],
+                         [(s.task_id, s.session_id, s.token, s.index, s.path) for s in self.got])
+        self.assertFalse((self.inbox_dir / name).exists())
+
+    def test_task_id_not_hex_stays_and_warns(self):
+        name = "1760000000123456789_XYZ_tts_queue_S_ab_s0.wav"
+        self.drop(name)
+        with self.assertLogs("tts_player.inbox", level="WARNING"):
+            self.inbox.start()
+        self.assertTrue((self.inbox_dir / name).exists())
+        self.assertEqual(self.got, [])
+
+    def test_file_from_wrapper_carries_task_id_from_playback_json(self):
+        claude_tts = self.root / ".claude-tts"
+        claude_tts.mkdir()
+        (claude_tts / "playback.json").write_text(
+            '{"current_message": {"id": "0123abcd", "source": "tts-player"}}')
+        self.inbox.start()
+        self.run_paplay("tts_queue_sess-1_ab12_s3.wav")
+        self.spin(until=lambda: self.got)
+        self.assertEqual([("0123abcd", "sess-1", "ab12", 3)],
+                         [(s.task_id, s.session_id, s.token, s.index) for s in self.got])
 
     def test_store_removed_at_runtime_is_recreated(self):
         self.inbox.start()
@@ -119,8 +155,8 @@ class InboxTest(unittest.TestCase):
         self.assertTrue(self.got[0].path.exists())
 
     def test_callback_error_does_not_stop_backlog(self):
-        first = "1000000000000000000_tts_queue_S_ab_s0.wav"
-        second = "2000000000000000000_tts_queue_S_ab_s1.wav"
+        first = "1000000000000000000_unknown_tts_queue_S_ab_s0.wav"
+        second = "2000000000000000000_unknown_tts_queue_S_ab_s1.wav"
         self.drop(first)
         self.drop(second)
 
@@ -137,9 +173,9 @@ class InboxTest(unittest.TestCase):
 
     def test_store_leftovers_deleted_with_warning_before_scan(self):
         self.store_dir.mkdir(parents=True)
-        (self.store_dir / "1000000000000000000_tts_queue_S_aa_s0.wav").write_bytes(b"wav")
-        (self.store_dir / "1000000000000000001_tts_queue_S_aa_s1.wav").write_bytes(b"wav")
-        fresh = "2000000000000000000_tts_queue_S_bb_s0.wav"
+        (self.store_dir / "1000000000000000000_unknown_tts_queue_S_aa_s0.wav").write_bytes(b"wav")
+        (self.store_dir / "1000000000000000001_unknown_tts_queue_S_aa_s1.wav").write_bytes(b"wav")
+        fresh = "2000000000000000000_unknown_tts_queue_S_bb_s0.wav"
         self.drop(fresh)
         with self.assertLogs("tts_player.inbox", level="WARNING") as logs:
             self.inbox.start()
@@ -149,7 +185,7 @@ class InboxTest(unittest.TestCase):
         self.assertEqual([fresh], [s.path.name for s in self.got])
 
     def test_put_back_moves_sentences_to_inbox_under_same_name(self):
-        name = "1000000000000000000_tts_queue_S_ab_s0.wav"
+        name = "1000000000000000000_unknown_tts_queue_S_ab_s0.wav"
         self.drop(name)
         self.inbox.start()
         self.inbox.stop()
@@ -159,7 +195,7 @@ class InboxTest(unittest.TestCase):
 
     def test_directory_in_inbox_is_skipped(self):
         self.inbox_dir.mkdir(parents=True)
-        (self.inbox_dir / "1000000000000000000_tts_queue_S_ab_s0.wav").mkdir()
+        (self.inbox_dir / "1000000000000000000_unknown_tts_queue_S_ab_s0.wav").mkdir()
         self.inbox.start()
         self.assertEqual(self.got, [])
 

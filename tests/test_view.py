@@ -17,7 +17,7 @@ def hms(seconds: float) -> str:
 
 
 def message(token="t", sentences=None, **kw) -> Message:
-    return Message("s", token, sentences or [], **kw)
+    return Message("unknown", "s", token, sentences or [], **kw)
 
 
 def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=(),
@@ -30,7 +30,7 @@ def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=()
 
 
 def sentence(recv_s: float) -> Sentence:
-    return Sentence(int(recv_s * 1e9), "s", "t", 0, Path("/nonexistent.wav"))
+    return Sentence(int(recv_s * 1e9), "unknown", "s", "t", 0, Path("/nonexistent.wav"))
 
 
 class RowsTest(unittest.TestCase):
@@ -65,7 +65,7 @@ class RowsTest(unittest.TestCase):
         self.assertEqual([r.duration for r in result], ["0:04", "0:07…"])
 
     def test_title_time_from_first_sentence(self):
-        s = Sentence(int(CREATED_AT * 1e9), "s", "t", 0, Path("/nonexistent.wav"))
+        s = Sentence(int(CREATED_AT * 1e9), "unknown", "s", "t", 0, Path("/nonexistent.wav"))
         m = message(sentences=[s], project="p")
         self.assertEqual(rows(state(messages=[m]))[0].title, f"{hms(CREATED_AT)}  p")
 

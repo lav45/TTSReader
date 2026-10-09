@@ -33,7 +33,7 @@ if not Gtk.init_check(None)[0]:
 
 
 def message(token: str) -> Message:
-    return Message("s", token, [], created_at=1_700_000_000.0, project="p", duration_s=10.0)
+    return Message("unknown", "s", token, [], created_at=1_700_000_000.0, project="p", duration_s=10.0)
 
 
 def state(status: str, current: Message | None, messages: list[Message],

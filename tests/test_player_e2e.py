@@ -39,7 +39,9 @@ def make_wav(path: Path, seconds: float = SECONDS) -> Path:
 class PlayerProcessCase(unittest.TestCase):
     """Процесс плеера во временном окружении: свой XDG_RUNTIME_DIR, свой XDG_CONFIG_HOME
     (настройки плеера пользователя не читаются), своя история демона, заглушка pactl первой
-    в PATH (громкость настоящих потоков пользователя не меняется ни в одном e2e)."""
+    в PATH (громкость настоящих потоков пользователя не меняется ни в одном e2e), свой HOME
+    (обёртка paplay читает id задачи из временного .claude-tts/playback.json, а не из
+    настоящего; без task() файла нет — id "unknown")."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -48,6 +50,8 @@ class PlayerProcessCase(unittest.TestCase):
         self.runtime = self.tmp / "run"
         self.runtime.mkdir()
         self.config = self.tmp / "config"
+        self.home = self.tmp / "home"
+        self.home.mkdir()
         self.inbox = self.runtime / "tts-player" / "inbox"
         self.store = self.runtime / "tts-player" / "store"
         self.wavs = self.tmp / "wavs"
@@ -74,6 +78,7 @@ class PlayerProcessCase(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
         env["XDG_RUNTIME_DIR"] = str(self.runtime)
         env["XDG_CONFIG_HOME"] = str(self.config)
+        env["HOME"] = str(self.home)
         env["PATH"] = f"{self.pactl_bin}{os.pathsep}{env.get('PATH', '')}"
         env["PACTL_LOG"] = str(self.pactl_log)
         env["PACTL_FIXTURE"] = str(self.pactl_fixture)
@@ -132,6 +137,16 @@ class PlayerProcessCase(unittest.TestCase):
         else:
             path.write_bytes(b"not a wav at all")
         return path
+
+    def task(self, task_id: str) -> None:
+        """Текущая задача демона, как её видит обёртка paplay: current_message.id.
+
+        Демон пишет id только вместе с source задачи (claude_code_tts daemon.py:1499-1501).
+        """
+        claude_tts = self.home / ".claude-tts"
+        claude_tts.mkdir(exist_ok=True)
+        (claude_tts / "playback.json").write_text(json.dumps({"current_message": {
+            "id": task_id, "source": "tts-player", "session_id": "s", "project": "p"}}))
 
     def drop(self, path: Path) -> None:
         subprocess.run([str(PAPLAY), str(path)], env=self.env(), check=True)
@@ -263,6 +278,10 @@ class PlayerE2ETest(PlayerProcessCase):
         settings.write_text(json.dumps({"tail": 5, "autoplay": False}))
         self.start_player("fakesink", None, "--settings-file", str(settings))
         self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0))
+        deadline = time.monotonic() + WAIT  # плеер забрал файл: старт не укладывается в QUIET
+        while not (self.store.is_dir() and any(self.store.iterdir())):
+            self.assertLess(time.monotonic(), deadline, "файл не забран в store/")
+            time.sleep(0.05)
         self.assert_quiet()
         self.assertEqual(1, len(list(self.store.iterdir())))
         self.assertEqual(0, subprocess.run([str(BIN), "play"], env=self.env(),

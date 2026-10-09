@@ -15,10 +15,10 @@ class MessageQueueTest(unittest.TestCase):
         self.dir = Path(self._tmp.name)
         self.queue = MessageQueue(tail=5)
 
-    def sentence(self, recv_ns, token="t1", index=0, session="s1"):
-        path = self.dir / f"{session}-{token}-{index}-{recv_ns}.wav"
+    def sentence(self, recv_ns, token="t1", index=0, session="s1", task="unknown"):
+        path = self.dir / f"{task}-{session}-{token}-{index}-{recv_ns}.wav"
         path.write_bytes(b"wav")
-        return Sentence(recv_ns, session, token, index, path)
+        return Sentence(recv_ns, task, session, token, index, path)
 
     def tokens(self):
         return [m.token for m in self.queue.messages]
@@ -271,7 +271,8 @@ class MessageQueueTest(unittest.TestCase):
         self.assertNotIn("t1", self.tokens())
 
     def test_messages_with_same_fields_are_different_messages(self):
-        self.assertNotEqual(Message("s1", "t1", []), Message("s1", "t1", []))
+        self.assertNotEqual(Message("unknown", "s1", "t1", []),
+                            Message("unknown", "s1", "t1", []))
 
     def test_release_returns_unheard_and_keeps_their_files(self):
         a0, a1 = self.sentence(1, token="ta", index=0), self.sentence(2, token="ta", index=1)
@@ -352,6 +353,86 @@ class MessageQueueTest(unittest.TestCase):
         self.assertEqual([], self.queue.messages)
         self.start_messages(6)
         self.assertEqual(5, len(self.queue.messages))
+
+
+class TaskIdTest(unittest.TestCase):
+    """Ключ сообщения — id задачи демона; id "unknown" — пара (session_id, token)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.queue = MessageQueue(tail=5)
+
+    sentence = MessageQueueTest.sentence
+
+    def test_two_passes_of_one_task_make_one_message_by_recv_ns(self):
+        """Два прохода синтеза одной задачи (новый token) — одно сообщение; token — первого прохода."""
+        a0 = self.sentence(1, token="aa", index=0, task="f00d")
+        a1 = self.sentence(2, token="aa", index=1, task="f00d")
+        b0 = self.sentence(4, token="bb", index=0, task="f00d")
+        b1 = self.sentence(5, token="bb", index=1, task="f00d")
+        for s in (a0, b1, a1, b0):
+            self.queue.add(s)
+        [message] = self.queue.messages
+        self.assertEqual([a0, a1, b0, b1], message.sentences)
+        self.assertEqual(("f00d", "s1", "aa"), (message.task_id, message.session_id, message.token))
+
+    def test_other_task_of_same_session_is_other_message_and_completes_first(self):
+        self.queue.add(self.sentence(1, token="aa", task="f00d"))
+        first = self.queue.messages[0]
+        self.assertFalse(self.queue.is_complete(first))
+        self.queue.add(self.sentence(2, token="aa", task="beef"))
+        self.assertEqual(["f00d", "beef"], [m.task_id for m in self.queue.messages])
+        self.assertTrue(self.queue.is_complete(first))
+        self.assertFalse(self.queue.is_complete(self.queue.messages[1]))
+
+    def test_unknown_task_groups_by_session_and_token(self):
+        self.queue.add(self.sentence(1, token="aa"))
+        self.queue.add(self.sentence(2, token="aa", index=1))
+        self.queue.add(self.sentence(3, token="bb"))
+        self.assertEqual([2, 1], [len(m.sentences) for m in self.queue.messages])
+
+    def test_unknown_task_is_not_merged_with_known(self):
+        self.queue.add(self.sentence(1, token="aa", task="f00d"))
+        self.queue.add(self.sentence(2, token="aa", index=1))
+        self.assertEqual(["f00d", "unknown"], [m.task_id for m in self.queue.messages])
+
+    def test_late_pass_of_evicted_task_is_deleted(self):
+        self.queue.tail = 1
+        self.queue.add(self.sentence(1, token="aa", task="f00d"))
+        self.queue.add(self.sentence(2, token="aa", task="beef"))
+        for message in self.queue.messages:
+            self.queue.start(message)
+        late = self.sentence(3, token="cc", task="f00d")
+        with self.assertLogs("tts_player.queue", "INFO"):
+            self.queue.add(late)
+        self.assertFalse(late.path.exists())
+        self.assertEqual(["beef"], [m.task_id for m in self.queue.messages])
+
+    def test_late_pass_of_cleared_task_is_deleted(self):
+        self.queue.add(self.sentence(1, token="aa", task="f00d"))
+        self.queue.clear()
+        late = self.sentence(2, token="bb", task="f00d")
+        with self.assertLogs("tts_player.queue", "INFO"):
+            self.queue.add(late)
+        self.assertFalse(late.path.exists())
+        self.assertEqual([], self.queue.messages)
+
+    def test_late_pass_of_heard_task_is_deleted(self):
+        self.queue.add(self.sentence(1, token="aa", task="f00d"))
+        self.queue.mark_heard(self.queue.messages[0])
+        late = self.sentence(2, token="bb", task="f00d")
+        with self.assertLogs("tts_player.queue", "INFO"):
+            self.queue.add(late)
+        self.assertFalse(late.path.exists())
+
+    def test_release_returns_both_passes(self):
+        a0 = self.sentence(1, token="aa", task="f00d")
+        b0 = self.sentence(2, token="bb", task="f00d")
+        self.queue.add(a0)
+        self.queue.add(b0)
+        self.assertEqual([a0, b0], self.queue.release(None, 0.0))
 
 
 if __name__ == "__main__":

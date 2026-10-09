@@ -18,6 +18,8 @@ claude-tts daemon -> daemon-bin/paplay (обёртка) -> буфер плеер
 
 ## Установка
 
+Нужен `jq`: им обёртка `daemon-bin/paplay` читает id задачи демона из `~/.claude-tts/playback.json`.
+
 ```bash
 ln -s ~/Programs/TTSReader/bin/tts-player ~/.local/bin/tts-player
 ln -s ~/Programs/TTSReader/bin/tts-player-hook ~/.local/bin/tts-player-hook

@@ -81,6 +81,33 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assertLessEqual(position, 1.0)
         self.assertTrue(self.next_line("playing ").endswith(f"{other}_bbbbbb_s0.wav"))
 
+    def test_two_passes_of_one_task_end_as_one_message(self) -> None:
+        """Обёртка с playback.json (id задачи X) кладёт два прохода синтеза, как у демона:
+        проход 1 (aaaaaa) оборван паузой на s1 без записи истории, проход 2 (bbbbbb) начинает
+        с того же s1; склейка — только прохода 2. Плеер играет все четыре файла одним
+        сообщением по recv_ns; склейка короче сообщения — одна строка ended, без complete."""
+        session = uuid.uuid4().hex
+        sentences = [*self.message(session, "aaaaaa", 2),
+                     self.sentence(session, "bbbbbb", 1, seconds=SECONDS),
+                     self.sentence(session, "bbbbbb", 2, seconds=SECONDS)]
+        self.task("0123456789abcdef")
+        self.start_player()
+        for path in sentences:
+            self.drop(path)
+        played = [self.next_line("playing ") for _ in range(2)]
+        self.daemon_saves(session, sentences[2:])
+        lines = self.lines_until("ended ")
+        self.assertEqual(f"ended {session} aaaaaa", lines[-1])
+        played += [line for line in lines if line.startswith("playing ")]
+        for _ in range(len(sentences) - len(played)):
+            lines += self.lines_until("playing ")
+            played.append(lines[-1])
+        self.assertEqual([f"_0123456789abcdef_{p.name}" for p in sentences],
+                         [line[line.index("_"):] for line in played])
+        self.assertEqual(1, len([line for line in lines if line.startswith("ended ")]), lines)
+        self.assertEqual([], [line for line in lines if line.startswith("complete ")])
+        self.assert_quiet()
+
     def test_joined_file_of_other_length_leaves_sentences(self) -> None:
         session = uuid.uuid4().hex
         sentences = self.message(session, "aaaaaa", 3)
