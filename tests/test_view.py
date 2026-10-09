@@ -52,6 +52,21 @@ class RowsTest(unittest.TestCase):
             m = message(sentences=[sentence(CREATED_AT)], project=project, duration_s=5)
             self.assertEqual(rows(state(messages=[m]))[0].title, f"{hms(CREATED_AT)}  —")
 
+    def test_title_is_first_words_of_text(self):
+        m = message(received_at=CREATED_AT, project="p", text="Готово:  тесты\nпрошли.")
+        self.assertEqual(f"{hms(CREATED_AT)}  Готово: тесты прошли.", rows(state(messages=[m]))[0].title)
+
+    def test_title_text_cut_to_first_words(self):
+        text = "один два три четыре пять шесть семь восемь девять десять"
+        m = message(received_at=CREATED_AT, project="p", text=text)
+        self.assertEqual(f"{hms(CREATED_AT)}  один два три четыре пять шесть семь восемь…",
+                         rows(state(messages=[m]))[0].title)
+
+    def test_title_without_text_is_project(self):
+        for text in (None, "", "  \n"):
+            m = message(received_at=CREATED_AT, project="/home/u/proj", text=text)
+            self.assertEqual(f"{hms(CREATED_AT)}  proj", rows(state(messages=[m]))[0].title)
+
     def test_title_time_is_first_sentence_even_with_created_at(self):
         m = message(sentences=[sentence(CREATED_AT)], created_at=CREATED_AT + 500, project="p")
         before = rows(state(messages=[m]))[0].title

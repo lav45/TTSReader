@@ -9,11 +9,13 @@ from tts_player.text_speaker import SOUNDING_STATUSES, TextState
 
 NO_PROJECT = "—"
 PENDING_MARK = "…"
+TITLE_WORDS = 8
+CUT_MARK = "…"
 
 
 @dataclass(frozen=True)
 class MessageRow:
-    title: str  # "HH:MM:SS  <project>"
+    title: str  # "HH:MM:SS  <первые слова текста>"; без текста — "HH:MM:SS  <project>"
     duration: str  # "M:SS"; пока сообщение растёт (не завершено) "M:SS…"
     current: bool
     heard: bool
@@ -48,6 +50,15 @@ def _project(message: Message) -> str:
     return name or NO_PROJECT
 
 
+def _subject(message: Message) -> str:
+    """Первые TITLE_WORDS слов озвученного текста одной строкой; без текста — проект."""
+    words = (message.text or "").split()
+    if not words:
+        return _project(message)
+    subject = " ".join(words[:TITLE_WORDS])
+    return subject + CUT_MARK if len(words) > TITLE_WORDS else subject
+
+
 def _duration(complete: bool, length_s: float) -> str:
     text = format_seconds(length_s)
     return text if complete else text + PENDING_MARK
@@ -62,7 +73,7 @@ class SessionRow:
 def rows(state: PlayerState) -> list[MessageRow]:
     return [
         MessageRow(
-            title=f"{_start_time(m)}  {_project(m)}",
+            title=f"{_start_time(m)}  {_subject(m)}",
             duration=_duration(complete and not m.deferred, length_s),
             current=m is state.current,
             heard=m.heard,

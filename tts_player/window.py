@@ -519,7 +519,7 @@ class PlayerWindow(Gtk.Window):
 
     @staticmethod
     def _row(item: MessageRow) -> Gtk.Box:
-        title = Gtk.Label(label=item.title, xalign=0.0)
+        title = Gtk.Label(label=item.title, xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
         duration = Gtk.Label(label=item.duration, xalign=1.0)
         line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, margin=4)
         line.pack_start(title, True, True, 0)
