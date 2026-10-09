@@ -32,6 +32,8 @@ class Ducker:
         self._first_seen: dict[tuple, float] = {}
         self._saved: dict[int, dict] = {}
         self._percent: int | None = None
+        self._lowered_once = False
+        self._stalled = False
 
     @property
     def ducked(self) -> bool:
@@ -45,18 +47,31 @@ class Ducker:
         if self.ducked:
             self.refresh()
             return
+        self._percent = percent
+        self._stalled = False
+        self._duck_initial()
+
+    def _duck_initial(self) -> None:
+        """Первый список потоков после duck: все они «старые» и глушатся сразу."""
         inputs = self._list_inputs()
         if inputs is None:
             return
-        self._percent = percent
+        self._lowered_once = True
         foreign = self._foreign(inputs)
         for index, entry in foreign.items():
             self._first_seen[self._key(index, entry)] = float("-inf")
         self._lower(foreign)
 
     def refresh(self) -> None:
-        """Приглушить потоки, появившиеся после duck."""
-        if not self.ducked:
+        """Приглушить потоки, появившиеся после duck.
+
+        После таймаута pactl — ничего, до следующего duck / restore (звуковой сервер завис,
+        каждый вызов блокировал бы главный цикл на PACTL_TIMEOUT). Если первый duck не
+        получил список потоков — повторяет его."""
+        if not self.ducked or self._stalled:
+            return
+        if not self._lowered_once:
+            self._duck_initial()
             return
         inputs = self._list_inputs()
         if inputs is None:
@@ -83,6 +98,8 @@ class Ducker:
         saved = self._saved
         self._saved = {}
         self._percent = None
+        self._lowered_once = False
+        self._stalled = False
         self._first_seen = {}
         if saved:
             self._apply(saved, self._present())
@@ -111,10 +128,18 @@ class Ducker:
         self._remove_state()
 
     @staticmethod
-    def _identity(item: dict) -> tuple[int, str | None, str | None]:
+    def _is_int(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    def _identity(self, item: dict) -> tuple[int, str | None, str | None]:
         """(index, имя приложения, pid) потока; KeyError/TypeError/AttributeError — запись негодна."""
         properties = item["properties"]
-        return item["index"], properties.get("application.name"), properties.get(PID_PROPERTY)
+        index = item["index"]
+        name = properties.get("application.name")
+        pid = properties.get(PID_PROPERTY)
+        if not self._is_int(index) or not all(v is None or isinstance(v, str) for v in (name, pid)):
+            raise TypeError("негодные index / имя / pid")
+        return index, name, pid
 
     def _present(self) -> dict[int, tuple[str | None, str | None]] | None:
         """{index: (имя, pid)} живых потоков; None — список получить не удалось."""
@@ -140,6 +165,8 @@ class Ducker:
                 if pid == str(self._own_pid):
                     continue
                 volumes = [channel["value"] for channel in item["volume"].values()]
+                if not volumes or not all(self._is_int(v) for v in volumes):
+                    raise TypeError("негодная громкость")
             except (KeyError, TypeError, AttributeError):
                 log.warning("Неожиданная запись sink-input: %r", item)
                 continue
@@ -190,6 +217,10 @@ class Ducker:
         try:
             proc = subprocess.run(["pactl", *args], capture_output=True, text=True,
                                   timeout=PACTL_TIMEOUT, env=env)
+        except subprocess.TimeoutExpired as exc:
+            self._stalled = True
+            log.warning("pactl %s: %s", " ".join(args), exc)
+            return None
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("pactl %s: %s", " ".join(args), exc)
             return None

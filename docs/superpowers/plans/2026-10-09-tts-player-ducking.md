@@ -133,7 +133,7 @@ __main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start(
 - [ ] таймер `refresh` есть только в `playing`
 - [ ] e2e процесс плеера получает заглушку `pactl` в `PATH`: после первого сообщения в журнале заглушки есть `set-sink-input-volume`, после конца — возврат исходного значения
 
-**Verify:** `python3 -m unittest tests.test_player_settings tests.test_player tests.test_player_e2e -v` → `OK`
+**Verify:** `python3 -m unittest discover -s tests` → `OK`
 
 **Steps:**
 

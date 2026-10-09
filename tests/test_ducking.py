@@ -141,16 +141,17 @@ class DuckerTest(unittest.TestCase):
         for extra in cases:
             with self.subTest(extra=extra), mock.patch.dict(os.environ, extra):
                 started = time.monotonic()
+                ducker = Ducker(self.state, OWN_PID, clock=lambda: self.now)
                 with self.assertLogs("tts_player.ducking", "WARNING"):
-                    self.ducker.duck(30)
+                    ducker.duck(30)
                 self.assertLess(time.monotonic() - started, 2.8)
-                self.assertFalse(self.ducker.ducked)
+                self.assertEqual(self.set_calls(), [])
 
     def test_no_pactl(self):
         with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
             with self.assertLogs("tts_player.ducking", "WARNING"):
                 self.ducker.duck(30)
-        self.assertFalse(self.ducker.ducked)
+        self.assertEqual(self.set_calls(), [])
 
     def test_restore_malformed_item(self):
         self.ducker.duck(30)
@@ -260,6 +261,38 @@ class DuckerTest(unittest.TestCase):
         self.ducker.refresh()
         self.ducker.restore()
         self.assertEqual(self.ducker._first_seen, {})
+
+    def test_timeout_makes_refresh_noop_until_next_duck(self):
+        self.ducker.duck(50)
+        with mock.patch.dict(os.environ, {"PACTL_SLEEP": "3"}):
+            with self.assertLogs("tts_player.ducking", "WARNING"):
+                self.ducker.refresh()
+        self.clear_log()
+        started = time.monotonic()
+        self.ducker.refresh()
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(self.calls(), [])
+        self.ducker.restore()
+        self.ducker.duck(50)
+        self.assertTrue(self.calls())
+
+    def test_non_numeric_volume_skipped(self):
+        bad = sink_input(8, 800, [1, 2])
+        bad["volume"]["front-left"]["value"] = "loud"
+        flag = sink_input(9, 900, [1])
+        flag["volume"]["mono"]["value"] = True
+        self.set_inputs([bad, flag, sink_input(3, 300, [40000])])
+        with self.assertLogs("tts_player.ducking", "WARNING"):
+            self.ducker.duck(30)
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "3", "12000"]])
+
+    def test_failed_duck_is_retried_by_refresh(self):
+        with mock.patch.dict(os.environ, {"PACTL_EXIT": "1"}):
+            with self.assertLogs("tts_player.ducking", "WARNING"):
+                self.ducker.duck(30)
+        self.assertEqual(self.set_calls(), [])
+        self.ducker.refresh()
+        self.assertEqual(len(self.set_calls()), 2)
 
 
 if __name__ == "__main__":
