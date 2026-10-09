@@ -223,7 +223,11 @@ class Player:
 
     def play_if_stopped(self) -> None:
         """Команда `tts-player play`: stopped и idle — как play/pause (toggle_play_pause);
-        playing, paused и отсутствие сообщений — без изменений."""
+        playing, paused и отсутствие сообщений — без изменений. В удержании (звучит свой
+        текст) — ничего: один звук за раз."""
+        if self._held:
+            log.info("play: звучит свой текст, команда пропущена")
+            return
         if self._status in ("stopped", "idle"):
             self.toggle_play_pause()
 

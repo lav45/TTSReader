@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import signal
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -42,14 +43,17 @@ class _Ready:
 
 class _Synthesis:
     """Один запуск процесса синтеза: текст — в stdin, строки stdout — в on_line, выход — в
-    on_exit(процесс). Чтение неблокирующее, в главном цикле GLib; процесс подбирает
-    Gio.Subprocess. После stop колбэков нет."""
+    on_exit(процесс), нечитаемый stdout — в on_broken(текст). Чтение неблокирующее, в главном
+    цикле GLib; процесс подбирает Gio.Subprocess. После stop колбэков нет."""
+    STOP_TIMEOUT_S = 2.0  # после SIGTERM — столько ждать выхода, затем SIGKILL
 
     def __init__(self, argv: list[str], text: str, on_line: Callable[[str], None],
-                 on_exit: Callable[[Gio.Subprocess], None]) -> None:
+                 on_exit: Callable[[Gio.Subprocess], None],
+                 on_broken: Callable[[str], None]) -> None:
         """GLib.Error — процесс не запустился."""
         self._on_line = on_line
         self._on_exit = on_exit
+        self._on_broken = on_broken
         flags = Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
         self._process = Gio.Subprocess.new(argv, flags)
         self._cancellable = Gio.Cancellable()
@@ -64,10 +68,25 @@ class _Synthesis:
         self._read_next()
 
     def stop(self) -> None:
-        """Колбэки сняты; живой процесс получает SIGTERM, ожидание его выхода — здесь."""
+        """Колбэки сняты; живой процесс получает SIGTERM, выход ждётся здесь не дольше
+        STOP_TIMEOUT_S, затем SIGKILL. Срок отмеряет поток threading.Timer: wait() крутит свой
+        контекст GLib, таймер главного цикла в нём не сработает."""
         self._cancellable.cancel()
-        if self._process.get_identifier() is not None:
-            self._process.send_signal(signal.SIGTERM)
+        if self._process.get_identifier() is None:
+            return
+        self._process.send_signal(signal.SIGTERM)
+        deadline = Gio.Cancellable()
+        timer = threading.Timer(self.STOP_TIMEOUT_S, deadline.cancel)
+        timer.start()
+        try:
+            self._process.wait(deadline)
+            return
+        except GLib.Error:
+            log.warning("процесс синтеза не вышел за %.1f с после SIGTERM, SIGKILL",
+                        self.STOP_TIMEOUT_S)
+        finally:
+            timer.cancel()
+        self._process.force_exit()
         self._process.wait(None)
 
     def _written(self, stream: Gio.OutputStream, result: Gio.AsyncResult) -> None:
@@ -83,10 +102,9 @@ class _Synthesis:
         try:
             line, _ = stream.read_line_finish_utf8(result)
         except GLib.Error as error:
-            if self._cancellable.is_cancelled():
-                return
-            log.warning("вывод процесса синтеза не прочитан: %s", error.message)
-            line = None
+            if not self._cancellable.is_cancelled():
+                self._on_broken(f"вывод процесса синтеза не прочитан: {error.message}")
+            return
         if line is None:
             self._process.wait_async(self._cancellable, self._exited)
             return
@@ -186,7 +204,10 @@ class TextSpeaker:
         self._changed()
 
     def shutdown(self) -> None:
-        """Выход: синтез отменён, звук стоп, каталог удалён, главный плеер отпущен."""
+        """Выход: синтез отменён, звук стоп, каталог удалён, главный плеер отпущен.
+
+        Вызывается до Player.shutdown(): release() после него прошёл бы через Player._changed
+        уже остановленного плеера — таймер сирот и on_change окна."""
         self._discard()
         self._status = self._rest_status()
         self._holding = False
@@ -217,7 +238,8 @@ class TextSpeaker:
             return
         self._dir = out_dir
         try:
-            self._run = _Synthesis(argv, self._text, self._on_line, self._on_exit)
+            self._run = _Synthesis(argv, self._text, self._on_line, self._on_exit,
+                                   self._on_broken)
         except GLib.Error as error:
             self._fail(f"процесс синтеза не запустился: {error.message}")
             return
@@ -235,6 +257,12 @@ class TextSpeaker:
             self._complete = True
         elif "error" in message:
             self._fail(str(message["error"]))
+        self._changed()
+
+    def _on_broken(self, text: str) -> None:
+        """stdout процесса не читается: как непонятная строка — процесс остановлен, error."""
+        self._stop_run()
+        self._fail(text)
         self._changed()
 
     def _parse(self, line: str) -> dict | None:

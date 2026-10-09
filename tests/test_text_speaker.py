@@ -288,6 +288,23 @@ class TextSpeakerCancelTest(TextSpeakerCase):
         speaker.set_text("")
         self.assertEqual("empty", self.status())
 
+    def test_set_text_kills_worker_ignoring_sigterm(self) -> None:
+        speaker = self.make([])
+        self.worker.write_text(
+            'import signal, sys, time\n'
+            'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+            'sys.stdin.read()\n'
+            f'open({str(self.log)!r}, "a").write("start упрямый 1\\n")\n'
+            'time.sleep(60)\n')
+        speaker.set_text("Раз.")
+        speaker.toggle_play_pause()
+        self.run_until(lambda: len(self.starts()) == 1)
+        started = time.monotonic()
+        speaker.set_text("Два.")
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertFalse((self.text_dir / "1").exists())
+        self.assertEqual("stopped", self.status())
+
     def test_shutdown_kills_process_removes_dir_and_releases(self) -> None:
         speaker = self.make([["count", 2], ["sleep", 30]])
         speaker.set_text("Раз. Два.")
@@ -388,6 +405,17 @@ class TextSpeakerErrorTest(TextSpeakerCase):
         self.assertEqual("error", state.status)
         self.assertNotEqual("", state.error)
         self.assertEqual([], self.player.calls)  # звучать нечему — главный плеер не тронут
+
+    def test_undecodable_output_is_error(self) -> None:
+        speaker = self.make([])
+        self.worker.write_text('import sys, time\nsys.stdin.read()\n'
+                               'sys.stdout.buffer.write(b"\\xff\\xfe\\n")\n'
+                               'sys.stdout.flush()\ntime.sleep(30)\n')
+        speaker.set_text("Раз.")
+        speaker.toggle_play_pause()
+        self.run_until(lambda: self.status() == "error")
+        self.assertNotEqual("", speaker.state().error)
+        self.assertIsNone(speaker._run)
 
     def test_garbage_line_is_error(self) -> None:
         speaker = self.make([["count", 1], ["sleep", 30]])

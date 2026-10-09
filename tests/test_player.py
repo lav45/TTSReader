@@ -1375,6 +1375,16 @@ class PlayerHoldTest(PlayerCase):
         self.arrive(A0)
         self.assertEqual("playing", self.state().status)
 
+    def test_play_command_does_nothing_while_held(self) -> None:
+        self.start_with(A0, B0)
+        self.player.stop_playback()
+        self.player.hold()
+        self.player.play_if_stopped()
+        self.assertEqual("stopped", self.state().status)
+        self.player.release()
+        self.player.play_if_stopped()
+        self.assertEqual("playing", self.state().status)
+
     def test_user_commands_work_while_held(self) -> None:
         self.start_with(A0, B0)
         self.player.hold()
