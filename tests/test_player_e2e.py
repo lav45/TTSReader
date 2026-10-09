@@ -581,6 +581,19 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertTrue(self.next_line("playing ").endswith(
             f"_{task['id']}_tts_queue_{session}_aaaaaa_s0.wav"))
 
+    def test_hook_home_links_follow_tts_config_dir(self) -> None:
+        """--tts-config-dir задаёт и ссылки hook-home: хук читает тот же config.json, что и
+        плеер."""
+        tts_dir = self.tmp / "tts-config"
+        tts_dir.mkdir()
+        self.start_player("fakesink", None, "--tts-config-dir", str(tts_dir))
+        link = self.runtime / "tts-player" / "hook-home" / ".claude-tts" / "config.json"
+        deadline = time.monotonic() + WAIT
+        while not link.is_symlink():
+            self.assertLess(time.monotonic(), deadline, "нет ссылки config.json в hook-home")
+            time.sleep(0.02)
+        self.assertEqual(tts_dir / "config.json", Path(os.readlink(link)))
+
     def test_hook_task_is_taken_and_logged(self) -> None:
         claude_tts = self.home / ".claude-tts"
         (claude_tts / "daemon.heartbeat").write_text(str(time.time()))

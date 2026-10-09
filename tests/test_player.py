@@ -1691,6 +1691,32 @@ class PlayerRevoiceTest(PlayerCase):
         self.assertEqual(self.revoice_fields("q", 1.0, "bb"), self.daemon.puts[-1])
         self.assertEqual(("playing", "ff"), (self.state().status, self.task()))
 
+    def test_silent_message_is_skipped_by_autoplay_and_voiced_on_user_play(self) -> None:
+        """Задача A не дала звука, первое предложение B пришло в idle: автозапуск не ставит
+        A в демон заново — A прослушано, играет B; play пользователя на A переозвучивает."""
+        self.player.start()
+        self.announce("aa")
+        self.announce("bb")
+        self.daemon.ids.append("ee")
+        self.arrive(B0)
+        a, b = self.state().messages
+        self.assertEqual((["text aa", "text bb"], b, [B0], True),
+                         ([p["text"] for p in self.daemon.puts], self.state().current,
+                          self.playback.played, a.heard))
+        self.player.prev()
+        self.assertEqual(self.revoice_fields("p", 1.0), self.daemon.puts[-1])
+        self.assertEqual((a, "ee", False), (self.state().current, self.task(), a.heard))
+
+    def test_silent_next_message_is_skipped_at_autoplay_transition(self) -> None:
+        self.start_with(A0)
+        self.announce("bb")
+        self.announce("cc")
+        self.arrive(C0)
+        self.finish()
+        self.assertEqual([A0, C0], self.playback.played)
+        self.assertEqual(3, len(self.daemon.puts))
+        self.assertTrue(self.state().messages[1].heard)
+
     def test_not_sent_message_is_voiced_on_play(self) -> None:
         self.player.start()
         self.player.apply_prefs(Prefs(autoplay=False))

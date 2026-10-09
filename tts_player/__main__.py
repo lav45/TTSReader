@@ -102,11 +102,11 @@ def main(argv: list[str] | None = None) -> int:
                     Path(runtime) / "tts-player" / "duck-orphans.json")
     ducker.recover()  # остаток после падения — до первого duck в player.start()
     # подменённый HOME хука: его queue/ плеер забирает, heartbeat держит HookHome
-    hook_home = HookHome(Path(runtime) / "tts-player", Path("~/.claude-tts").expanduser())
+    tts_config_dir = Path(args.tts_config_dir).expanduser()
+    hook_home = HookHome(Path(runtime) / "tts-player", tts_config_dir)
     hook_home.start()  # до player.start(): к первой задаче хука hook-home уже готов
     # голос и скорость: экран настроек и переозвучка сообщений с устаревшим кэшем;
-    # очередь демона — в том же каталоге claude-tts, чтобы они не разошлись
-    tts_config_dir = Path(args.tts_config_dir).expanduser()
+    # очередь демона и ссылки hook-home — в том же каталоге claude-tts, чтобы не разошлись
     settings = DaemonSettings(tts_config_dir)
     try:
         player = Player(Path(runtime), args.audio_sink,

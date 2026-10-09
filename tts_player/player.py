@@ -63,8 +63,9 @@ class Player:
     сообщение с её текстом — в список, ещё без звука; предложения приходят по id задачи
     демона (контракты (12), (13)). Начало проигрывания (_start: play/pause, автопереход,
     next/prev) сообщения, которое демон уже не озвучивает, сверяет его голос с текущим из
-    config.json: устарел или звука нет — кэш удаляется и текст уходит в демон заново
-    (переозвучка), сообщение играет по мере прихода предложений, как растущее.
+    config.json: устарел — кэш удаляется и текст уходит в демон заново (переозвучка),
+    сообщение играет по мере прихода предложений, как растущее. Сообщение без звука
+    переозвучивает только команда пользователя; автозапуск его пропускает (прослушано).
 
     Склейка играющего по предложениям сообщения подменяет их с той же позиции. Пока
     вывод недоступен, звука нет — повтор начнёт склейку с позиции, с которой запускался
@@ -186,7 +187,7 @@ class Player:
         if self._status == "idle" and self._starts_by_itself():
             message = self._queue.first_unheard()
             if message is not None:
-                self._begin(message)
+                self._begin(message, requested=False)
         self._changed()
 
     def _store_files(self) -> frozenset[Path]:
@@ -258,11 +259,11 @@ class Player:
             if following is None:
                 self._resume()
             else:
-                self._begin(following)
+                self._begin(following, requested=True)
         else:
             message = self._queue.first_unheard()
             if message is not None:
-                self._begin(message)
+                self._begin(message, requested=True)
         self._changed()
 
     def _following_finished(self) -> Message | None:
@@ -278,7 +279,7 @@ class Player:
         position = self._position
         if position >= self._queue.length(self._current):
             position = 0.0
-        self._start(self._current, position)
+        self._start(self._current, position, requested=True)
 
     def stop_playback(self) -> None:
         """Идемпотентный stop (команда `tts-player stop`): играет или на паузе — звук стоп,
@@ -307,7 +308,7 @@ class Player:
         following = None if current is None else self._queue.following(current)
         if following is not None:
             self._leave(current)
-            self._begin(following)
+            self._begin(following, requested=True)
         self._changed()
 
     def prev(self) -> None:
@@ -315,7 +316,7 @@ class Player:
         preceding = None if current is None else self._queue.preceding(current)
         if preceding is not None:
             self._leave(current)
-            self._begin(preceding)
+            self._begin(preceding, requested=True)
         self._changed()
 
     def play_message(self, message: Message) -> None:
@@ -365,7 +366,7 @@ class Player:
         if self._status == "idle" and self._starts_by_itself():
             message = self._queue.first_unheard()
             if message is not None:
-                self._begin(message)
+                self._begin(message, requested=False)
         elif self._waiting():
             following = self._next_sentence()
             if following is not None:
@@ -455,7 +456,7 @@ class Player:
         if upcoming is None:
             self._status = "idle"
             return
-        self._begin(upcoming)
+        self._begin(upcoming, requested=False)
 
     def _starts_by_itself(self) -> bool:
         """Плеер сам начинает следующее и новое: автовоспроизведение включено и нет удержания."""
@@ -480,30 +481,34 @@ class Player:
         if self._queue.is_started(message) and self._queue.is_complete(message):
             self._queue.mark_heard(message)
 
-    def _begin(self, message: Message) -> None:
-        self._start(message, 0.0)
+    def _begin(self, message: Message, requested: bool) -> None:
+        self._start(message, 0.0, requested)
 
-    def _start(self, message: Message, position: float) -> None:
+    def _start(self, message: Message, position: float, requested: bool) -> None:
         """Начало проигрывания — одно место для play/pause, автоперехода и next/prev:
-        сообщение входит в хвост; кэш устарел или звука нет — переозвучка с начала."""
+        сообщение входит в хвост; кэш устарел — переозвучка с начала. requested — команда
+        пользователя (play/pause, next/prev); только она переозвучивает сообщение без звука,
+        автозапуск его пропускает (_play_at: прослушано, дальше следующее)."""
         self._queue.start(message)
         self._current = message
         self._status = "playing"
-        if self._revoice_if_stale(message):
+        if self._revoice_if_stale(message, requested):
             position = 0.0
         self._play_at(position)
 
-    def _revoice_if_stale(self, message: Message) -> bool:
+    def _revoice_if_stale(self, message: Message, requested: bool) -> bool:
         """Сообщение, которое демон уже не озвучивает (is_complete), с голосом, отличным от
-        текущего, или без звука: файлы удалены, текст — в демон текущим голосом. True —
-        переозвучка начата (и при сбое записи задачи: старого звука уже нет). Сбой чтения
-        config.json — кэш считается актуальным, строка в журнал."""
+        текущего, или без звука (только requested): файлы удалены, текст — в демон текущим
+        голосом. True — переозвучка начата (и при сбое записи задачи: старого звука уже нет).
+        Сбой чтения config.json — кэш считается актуальным, строка в журнал."""
         if not self._queue.is_complete(message):
+            return False
+        silent = not message.sentences and message.audio is None
+        if silent and not requested:
             return False
         voice = self._active_voice()
         if voice is None:
             return False
-        silent = not message.sentences and message.audio is None
         if not silent and (message.persona, message.speed) == (voice.persona, voice.speed):
             return False
         log.info("revoice %s %s: %s %s -> %s %s", message.session_id,
