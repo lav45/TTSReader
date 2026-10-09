@@ -37,7 +37,7 @@ def state(status: str, current: Message | None, messages: list[Message],
           position_s: float = 0.0) -> PlayerState:
     length = 0.0 if current is None else 10.0
     return PlayerState(status, current, position_s, length, messages, False,
-                       [10.0] * len(messages), [True] * len(messages))
+                       [10.0] * len(messages), [True] * len(messages), True)
 
 
 class FakePlayer:

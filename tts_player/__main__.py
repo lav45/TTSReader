@@ -2,7 +2,8 @@
 
 Запуск: python3 -m tts_player [--audio-sink NAME] [--history-dir DIR] [--history-db FILE]
                               [--tts-config-dir DIR] [--tts-flag FILE]
-                              [--tts-off-hook FILE] [--no-gui] [--show] [--tray]
+                              [--tts-off-hook FILE] [--settings-file FILE]
+                              [--no-gui] [--show] [--tray]
        python3 -m tts_player stop    (SIGUSR1 запущенному плееру: остановить текущее)
        python3 -m tts_player play    (SIGUSR2: продолжить остановленное, играющее не трогать)
 Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window); нет графической сессии —
@@ -24,6 +25,7 @@ from gi.repository import GLib  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
+from tts_player.player_settings import PlayerSettings  # noqa: E402
 from tts_player.voicing import Voicing  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -47,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="флаг озвучки: в нём ID озвучиваемой сессии (кнопка выключения)")
     parser.add_argument("--tts-off-hook", default="~/.claude/hooks/tts-toggle.sh",
                         help="хук, который кнопка выключения зовёт как `<хук> off`")
+    parser.add_argument("--settings-file",
+                        default=str(PlayerSettings.default_path(os.environ)),
+                        help="файл настроек плеера: хвост и автовоспроизведение")
     parser.add_argument("--no-gui", action="store_true",
                         help="без окна и трея: только плеер в цикле GLib")
     parser.add_argument("--show", action="store_true", help="показать окно сразу при запуске")
@@ -82,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
 
     player = Player(Path(runtime), args.audio_sink,
                     Path(args.history_dir).expanduser(), Path(args.history_db).expanduser())
+    prefs = PlayerSettings(Path(args.settings_file).expanduser())
+    player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
     if args.no_gui:
         loop = GLib.MainLoop()
         run(player, loop.run, loop.quit)

@@ -15,7 +15,7 @@ log = logging.getLogger("tts_player.queue")
 
 
 class MessageQueue:
-    """Сообщения по первому recv_ns; хвост из TAIL начатых сообщений.
+    """Сообщения по первому recv_ns; хвост из tail начатых сообщений.
 
     Очередь не знает, что играет: текущее сообщение и позицию держит Player. Очередь
     отвечает на вопросы о порядке (following/preceding/first_unheard), длине и
@@ -24,11 +24,14 @@ class MessageQueue:
 
     following/preceding/is_complete принимают только живые сообщения — из messages;
     сообщение, вытесненное или забытое после release()/clear(), им не передаётся.
+
+    tail задаёт снаружи Player (настройки плеера) и может меняться на ходу: start()
+    подгоняет хвост к нему постепенно (см. start).
     """
-    TAIL = 5
     DURATION_TOLERANCE_S = 0.05
 
-    def __init__(self) -> None:
+    def __init__(self, tail: int = 5) -> None:
+        self.tail = tail
         self._forget()
 
     def _forget(self) -> None:
@@ -71,15 +74,21 @@ class MessageQueue:
         return next((m for m in self._messages if not m.heard), None)
 
     def start(self, message: Message) -> None:
-        """Сообщение начато: входит в хвост; при TAIL+1 начатых удаляется самое старое."""
+        """Сообщение начато: входит в хвост; лишние начатые удаляются, самые старые первыми.
+
+        Хвост больше tail (tail уменьшили) сокращается постепенно: за один start начатых
+        становится не больше чем на одно меньше, чем было до него. Пока хвост не больше
+        tail, новое начатое вытесняет самое старое только сверх tail.
+        """
         if message not in self._messages:
             log.debug("сообщение %s/%s уже не в очереди, не начинается",
                       message.session_id, message.token)
             return
         if message in self._started:
             return
+        limit = max(self.tail, len(self._started) - 1)
         self._started.append(message)
-        while len(self._started) > self.TAIL:
+        while len(self._started) > limit:
             self._drop(self._started.pop(0))
 
     def mark_heard(self, message: Message) -> None:

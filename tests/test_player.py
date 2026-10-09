@@ -18,6 +18,7 @@ from tts_player.history import HistoryEntry  # noqa: E402
 from tts_player.inbox import NAME_PATTERN  # noqa: E402
 from tts_player.model import Sentence  # noqa: E402
 from tts_player.player import Player, PlayerState  # noqa: E402
+from tts_player.player_settings import Prefs  # noqa: E402
 
 A0 = "1000000000000000001_tts_queue_S_aa_s0.wav"
 A1 = "1000000000000000002_tts_queue_S_aa_s1.wav"
@@ -815,6 +816,140 @@ class PlayerButtonsTest(PlayerCase):
             count = len(self.states)
             command()
             self.assertEqual(count + 1, len(self.states), command)
+            self.assertEqual(self.state(), self.states[-1])
+
+
+class PlayerPrefsTest(PlayerCase):
+    """Настройки плеера (контракт (6)): хвост, автовоспроизведение, команда play/pause."""
+
+    def tokens(self) -> list[str]:
+        return [m.token for m in self.state().messages]
+
+    def manual(self, tail: int = 5) -> None:
+        self.player.apply_prefs(Prefs(tail=tail, autoplay=False))
+
+    def test_autoplay_is_on_by_default(self) -> None:
+        self.assertTrue(self.state().autoplay)
+        self.assertEqual(5, self.player._queue.tail)
+
+    def test_apply_prefs_sets_tail_and_autoplay_and_notifies(self) -> None:
+        self.player.start()
+        count = len(self.states)
+        self.player.apply_prefs(Prefs(tail=2, autoplay=False))
+        self.assertEqual(2, self.player._queue.tail)
+        self.assertFalse(self.state().autoplay)
+        self.assertEqual(count + 1, len(self.states))
+        self.assertFalse(self.states[-1].autoplay)
+
+    def test_play_pause_when_playing_pauses_at_position(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.at = 0.2
+        self.player.toggle_play_pause()
+        state = self.state()
+        self.assertEqual("paused", state.status)
+        self.assertAlmostEqual(0.2, state.position_s)
+        self.assertIsNone(self.playback.playing)
+
+    def test_play_pause_when_paused_resumes_from_position(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.at = 0.2
+        self.player.toggle_play_pause()
+        self.player.toggle_play_pause()
+        self.assertEqual("playing", self.state().status)
+        name, start = self.playback.starts[-1]
+        self.assertEqual(A0, name)
+        self.assertAlmostEqual(0.2, start)
+
+    def test_play_pause_when_stopped_plays_current_from_cursor(self) -> None:
+        self.start_with(A0, B0)
+        self.player.stop_playback()
+        self.player.seek(0.3)
+        self.player.toggle_play_pause()
+        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        name, start = self.playback.starts[-1]
+        self.assertEqual(A0, name)
+        self.assertAlmostEqual(0.3, start)
+
+    def test_play_pause_when_idle_at_end_plays_current_from_start(self) -> None:
+        self.start_with(A0, A1)
+        self.finish()
+        self.finish()
+        self.player._on_entry(self.joined())
+        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        self.player.toggle_play_pause()
+        self.assertEqual("playing", self.state().status)
+        self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+
+    def test_play_pause_without_current_plays_first_unheard(self) -> None:
+        self.manual()
+        self.start_with(A0, B0)
+        self.player.toggle_play_pause()
+        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual([(A0, 0.0)], self.playback.starts)
+
+    def test_play_pause_without_messages_does_nothing(self) -> None:
+        self.player.start()
+        self.player.toggle_play_pause()
+        self.assertEqual(("idle", None), (self.state().status, self.state().current))
+        self.assertEqual([], self.playback.starts)
+
+    def test_manual_end_of_message_stops_on_following_at_start(self) -> None:
+        self.manual()
+        self.start_with(A0, B0)
+        self.player.toggle_play_pause()
+        self.finish()
+        state = self.state()
+        self.assertEqual(("stopped", "bb", 0.0), (state.status, self.token(), state.position_s))
+        self.assertTrue(state.messages[0].heard)
+        self.assertEqual([A0], self.playback.played)
+        self.assertIsNone(self.playback.playing)
+        self.player.toggle_play_pause()
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
+
+    def test_manual_end_of_last_message_keeps_it_at_its_end(self) -> None:
+        self.manual()
+        self.start_with(A0, A1)
+        self.player.toggle_play_pause()
+        self.finish()
+        self.finish()
+        self.player._on_entry(self.joined())
+        state = self.state()
+        self.assertEqual(("stopped", "aa"), (state.status, self.token()))
+        self.assertAlmostEqual(state.length_s, state.position_s)
+        self.assertTrue(state.current.heard)
+        self.assertEqual([A0, A1], self.playback.played)
+
+    def test_manual_new_message_in_idle_only_appears_in_list(self) -> None:
+        self.manual()
+        self.player.start()
+        self.arrive(A0)
+        state = self.state()
+        self.assertEqual(("idle", None), (state.status, state.current))
+        self.assertEqual(["aa"], self.tokens())
+        self.assertEqual([], self.playback.played)
+
+    def test_manual_play_of_following_enters_tail(self) -> None:
+        self.manual(tail=1)
+        self.start_with(A0, B0)
+        self.player.toggle_play_pause()
+        self.finish()
+        self.assertEqual(["aa", "bb"], self.tokens())
+        self.player.toggle_play_pause()
+        self.assertEqual(["bb"], self.tokens())
+
+    def test_play_if_stopped_in_silence_plays_first_unheard(self) -> None:
+        self.manual()
+        self.start_with(A0, B0)
+        self.player.play_if_stopped()
+        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual([(A0, 0.0)], self.playback.starts)
+
+    def test_on_change_after_play_pause(self) -> None:
+        self.start_with(A0, B0)
+        for _ in range(3):
+            count = len(self.states)
+            self.player.toggle_play_pause()
+            self.assertEqual(count + 1, len(self.states))
             self.assertEqual(self.state(), self.states[-1])
 
 

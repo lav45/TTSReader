@@ -13,6 +13,7 @@ from tts_player.history import History, HistoryEntry  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
 from tts_player.model import Message, Sentence  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
+from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.queue import MessageQueue  # noqa: E402
 
 log = logging.getLogger("tts_player.player")
@@ -31,6 +32,7 @@ class PlayerState:
     output_down: bool
     lengths: list[float]  # queue.length(m) для каждого из messages, в том же порядке
     completes: list[bool]  # queue.is_complete(m) для каждого из messages, в том же порядке
+    autoplay: bool  # плеер сам начинает следующее и новое сообщение (контракт (6))
 
 
 class Player:
@@ -40,6 +42,8 @@ class Player:
     предложением сообщения. Сообщение кончилось и завершено (queue.is_complete) —
     прослушано, дальше следующее или первое непрослушанное; не завершено — статус
     playing без звука, пока не придёт предложение. На паузе и после stop автоперехода нет.
+    Без автовоспроизведения (apply_prefs) плеер сам ничего не начинает: конец сообщения —
+    stopped на следующем по порядку, новое сообщение в тишине только попадает в список.
 
     Ошибка файла — пропуск. Отказ вывода звука — тот же файл с той же позиции через
     RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор. Отказ кончается,
@@ -76,6 +80,13 @@ class Player:
         self._sentence: Sentence | None = None
         self._output_down = False
         self._retry_id = 0
+        self._autoplay = Prefs().autoplay
+
+    def apply_prefs(self, prefs: Prefs) -> None:
+        """Настройки плеера: хвост очереди и автовоспроизведение; играющее не трогается."""
+        self._queue.tail = prefs.tail
+        self._autoplay = prefs.autoplay
+        self._changed()
 
     def start(self) -> None:
         """История — раньше inbox/: накопленное в inbox/ начинает играть уже в start(),
@@ -107,7 +118,36 @@ class Player:
         lengths = [self._queue.length(m) for m in messages]
         completes = [self._queue.is_complete(m) for m in messages]
         return PlayerState(self._status, current, self._now(), length,
-                           messages, self._output_down, lengths, completes)
+                           messages, self._output_down, lengths, completes, self._autoplay)
+
+    def toggle_play_pause(self) -> None:
+        """Кнопка play/pause: playing — пауза с запомненной позицией; paused — с неё дальше;
+        stopped и idle — текущее с курсора (курсор в конце — с начала); без текущего —
+        первое непрослушанное с начала, нет его — ничего."""
+        if self._status == "playing":
+            self._position = self._now()
+            self._halt()
+            self._status = "paused"
+        elif self._status == "paused":
+            self._status = "playing"
+            self._play_at(self._position)
+        elif self._current is not None:
+            self._resume()
+        else:
+            message = self._queue.first_unheard()
+            if message is not None:
+                self._begin(message)
+        self._changed()
+
+    def _resume(self) -> None:
+        """Текущее с курсора после stop или конца; курсор в конце — с начала. Текущее,
+        ставшее им без звука (конец сообщения без автовоспроизведения), входит в хвост здесь."""
+        position = self._position
+        if position >= self._queue.length(self._current):
+            position = 0.0
+        self._queue.start(self._current)
+        self._status = "playing"
+        self._play_at(position)
 
     def toggle_pause(self) -> None:
         if self._status == "playing":
@@ -127,10 +167,10 @@ class Player:
             self._changed()
 
     def play_if_stopped(self) -> None:
-        """Команда `tts-player play`: stopped и idle с текущим сообщением — как play кнопки
-        play|stop; playing, paused и отсутствие сообщения — без изменений."""
-        if self._status in ("stopped", "idle") and self._current is not None:
-            self.toggle_play_stop()
+        """Команда `tts-player play`: stopped и idle — как play/pause (toggle_play_pause);
+        playing, paused и отсутствие сообщений — без изменений."""
+        if self._status in ("stopped", "idle"):
+            self.toggle_play_pause()
 
     def _stop(self) -> None:
         self._halt()
@@ -143,11 +183,7 @@ class Player:
         if self._status in ("playing", "paused"):
             self._stop()
         elif self._current is not None:
-            position = self._position
-            if position >= self._queue.length(self._current):
-                position = 0.0
-            self._status = "playing"
-            self._play_at(position)
+            self._resume()
         self._changed()
 
     def next(self) -> None:
@@ -205,7 +241,7 @@ class Player:
 
     def _on_sentence(self, sentence: Sentence) -> None:
         self._queue.add(sentence)
-        if self._status == "idle":
+        if self._status == "idle" and self._autoplay:
             message = self._queue.first_unheard()
             if message is not None:
                 self._begin(message)
@@ -289,11 +325,25 @@ class Player:
         if not self._queue.is_complete(current):
             return  # ждём предложение: статус playing, звук молчит
         self._queue.mark_heard(current)
+        if not self._autoplay:
+            self._stop_after(current)
+            return
         upcoming = self._queue.following(current) or self._queue.first_unheard()
         if upcoming is None:
             self._status = "idle"
             return
         self._begin(upcoming)
+
+    def _stop_after(self, message: Message) -> None:
+        """Конец сообщения без автовоспроизведения: stopped; текущим становится следующее
+        по порядку с позиции 0, нет его — сообщение остаётся текущим с позицией в конце."""
+        self._status = "stopped"
+        following = self._queue.following(message)
+        if following is None:
+            return
+        self._current = following
+        self._sentence = None
+        self._position = 0.0
 
     def _leave(self, message: Message) -> None:
         """Сообщение покинуто по next/prev: звук стоп; прослушанным считается только

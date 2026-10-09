@@ -189,7 +189,7 @@ class QueueHistoryTest(unittest.TestCase):
         return message
 
     def test_unstarted_audio_message_not_evicted(self):
-        for i in range(MessageQueue.TAIL + 1):
+        for i in range(self.queue.tail + 1):
             self.add((i + 1) * 1_000_000_000, 0.1, token=f"m{i}")
         for message in self.queue.messages:
             self.queue.start(message)
@@ -293,7 +293,7 @@ class QueueHistoryTest(unittest.TestCase):
     def test_eviction_deletes_audio(self):
         self.add(1_000_000_000, 1.0, token="m0")
         message = self.queue.attach(self.entry(1.0), self.store)
-        for i in range(1, MessageQueue.TAIL + 1):
+        for i in range(1, self.queue.tail + 1):
             self.add((i + 1) * 1_000_000_000, 0.1, token=f"m{i}")
         for item in self.queue.messages:
             self.queue.start(item)

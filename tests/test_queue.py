@@ -1,4 +1,4 @@
-"""Тесты MessageQueue: группировка в сообщения, порядок, навигация, хвост из 5 сообщений."""
+"""Тесты MessageQueue: группировка в сообщения, порядок, навигация, хвост начатых (tail, по умолчанию 5)."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -150,6 +150,47 @@ class MessageQueueTest(unittest.TestCase):
         self.assertFalse(sentences[0].path.exists())
         self.assertTrue(all(s.path.exists() for s in sentences[1:]))
         self.assertEqual(messages[1:], self.queue.messages)
+
+    def start_token(self, token):
+        self.queue.start(next(m for m in self.queue.messages if m.token == token))
+
+    def test_default_tail_is_five(self):
+        self.assertEqual(5, self.queue.tail)
+
+    def test_smaller_tail_shrinks_by_one_per_start(self):
+        """tail 5 → 2 при пяти начатых: каждый start уменьшает хвост на одно сообщение,
+        а не обрезает сразу до двух; через три новых начатых их 2."""
+        self.start_messages(5)
+        self.queue.tail = 2
+        for n in range(6, 9):
+            self.queue.add(self.sentence(n, token=f"t{n}"))
+        self.start_token("t6")
+        self.assertEqual(["t3", "t4", "t5", "t6", "t7", "t8"], self.tokens())
+        self.start_token("t7")
+        self.assertEqual(["t5", "t6", "t7", "t8"], self.tokens())
+        self.start_token("t8")
+        self.assertEqual(["t7", "t8"], self.tokens())
+
+    def test_shrunk_tail_then_holds_its_size(self):
+        self.start_messages(5)
+        self.queue.tail = 2
+        for n in range(6, 10):
+            self.queue.add(self.sentence(n, token=f"t{n}"))
+            self.queue.start(self.queue.messages[-1])
+        self.assertEqual(["t8", "t9"], self.tokens())
+
+    def test_larger_tail_stops_evicting_until_new_limit(self):
+        """tail 2 → 5: новые начатые не вытесняют, пока их меньше 5."""
+        self.queue.tail = 2
+        self.start_messages(2)
+        self.queue.tail = 5
+        for n in range(3, 6):
+            self.queue.add(self.sentence(n, token=f"t{n}"))
+            self.queue.start(self.queue.messages[-1])
+        self.assertEqual(["t1", "t2", "t3", "t4", "t5"], self.tokens())
+        self.queue.add(self.sentence(6, token="t6"))
+        self.queue.start(self.queue.messages[-1])
+        self.assertEqual(["t2", "t3", "t4", "t5", "t6"], self.tokens())
 
     def test_restarting_started_message_does_not_evict(self):
         sentences = self.start_messages(5)

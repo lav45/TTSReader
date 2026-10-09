@@ -65,6 +65,19 @@ ln -s ~/Programs/TTSReader/bin/tts-player-hook ~/.local/bin/tts-player-hook
 - `--tts-flag FILE` - флаг озвучки (по умолчанию `/tmp/claude-tts.on`);
 - `--tts-off-hook FILE` - хук выключения (по умолчанию `~/.claude/hooks/tts-toggle.sh`).
 
+## Настройки плеера
+
+Файл `$XDG_CONFIG_HOME/tts-player/settings.json` (без `XDG_CONFIG_HOME` -
+`~/.config/tts-player/settings.json`), читается при старте:
+`{"tail": <1-20>, "autoplay": <true|false>}`. Нет файла - хвост 5, автовоспроизведение включено.
+
+- `tail` - сколько последних начатых сообщений держит очередь; после уменьшения лишние уходят
+  постепенно, с каждым новым начатым хвост становится на одно сообщение короче;
+- `autoplay: false` - плеер сам не начинает ни следующее сообщение, ни новое, пришедшее в
+  тишине: после конца сообщения он останавливается на следующем, играет по `tts-player play`.
+
+Другой файл задаёт `--settings-file FILE`.
+
 ## Тесты
 
 ```bash
