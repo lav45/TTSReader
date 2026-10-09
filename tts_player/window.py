@@ -15,11 +15,12 @@ from tts_player.daemon_settings import DaemonSettings, Voice  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import PlayerSettings, Prefs  # noqa: E402
+from tts_player.sessions import Session  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.text_speaker import SOUNDING_STATUSES, TextSpeaker, TextState  # noqa: E402
-from tts_player.voicing import Voicing  # noqa: E402
-from tts_player.view import (MessageRow, next_enabled, play_pause_enabled,  # noqa: E402
-                             play_pause_label, position_label, prev_enabled, rows,
+from tts_player.view import (MessageRow, SessionRow, next_enabled,  # noqa: E402
+                             play_pause_enabled, play_pause_label, position_label,
+                             prev_enabled, rows, session_buttons_enabled, session_rows,
                              text_play_enabled, text_play_pause_label, text_position_label)
 
 log = logging.getLogger(__name__)
@@ -91,10 +92,10 @@ class SeekSlider:
 class PlayerWindow(Gtk.Window):
     """Три экрана в одном Gtk.Stack.
 
-    "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить буфер»,
-    «Выключить озвучку» (активен, пока озвучка включена; состояние читается при показе окна
-    и на тике таймера) и «Озвучить свой текст», справа выключатель автовоспроизведения; список
-    сообщений; ползунок позиции; ряд со временем слева и prev / play-pause / next справа.
+    "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить сообщения
+    активной сессии», «Завершить активную сессию» (оба активны, пока есть активная сессия) и
+    «Озвучить свой текст», справа выключатель автовоспроизведения; список сессий (клик выбирает
+    сессию, активная жирная); список сообщений; ползунок позиции; ряд со временем слева и prev / play-pause / next справа.
     "settings": хвост очереди и приглушение (PlayerSettings), голос и скорость claude-tts
     (DaemonSettings); «Сохранить» пишет их и остаётся на экране, итог — в блоке внизу; стрелка
     назад возвращает без записи. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
@@ -110,12 +111,11 @@ class PlayerWindow(Gtk.Window):
     SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
 
     def __init__(self, player, settings: DaemonSettings, prefs: PlayerSettings,
-                 voicing: Voicing, text_speaker: TextSpeaker) -> None:
+                 text_speaker: TextSpeaker) -> None:
         super().__init__(title="TTS Player")
         self._player = player
         self._settings = settings
         self._prefs = prefs
-        self._voicing = voicing
         self._text_speaker = text_speaker
         self._voice_loaded = False  # голос и скорость прочитаны при открытии настроек
         self._refresh_id = 0
@@ -123,6 +123,10 @@ class PlayerWindow(Gtk.Window):
         # сообщения последнего состояния: строки равны по тексту, а объекты Message могут быть
         # новыми, поэтому снимок обновляется на каждом состоянии, а не только при перестройке
         self._shown_messages: list[Message] = []
+        # то же для списка сессий: клик берёт id из сессий состояния, построившего строки
+        self._active_session: str | None = None
+        self._shown_session_rows: list[SessionRow] | None = None
+        self._shown_sessions: list[Session] = []
         self.set_default_size(420, 360)
 
         self.slider = SeekSlider(player.seek)
@@ -132,12 +136,13 @@ class PlayerWindow(Gtk.Window):
         self.prev_button = self._button(PREV_LABEL, player.prev)
         self.play_pause_button = self._button("", self._toggle_main)
         self.next_button = self._button(NEXT_LABEL, player.next)
-        self.clear_button = self._icon_button("user-trash-symbolic", "Очистить буфер",
+        self.clear_button = self._icon_button("user-trash-symbolic", "Очистить сообщения активной сессии",
                                               player.clear)
         self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
                                                  self._open_settings)
-        self.voicing_off_button = self._icon_button(
-            "system-shutdown-symbolic", "Выключить озвучку (/tts-off)", self._turn_voicing_off)
+        self.end_session_button = self._icon_button(
+            "system-shutdown-symbolic", "Завершить активную сессию (/tts-off)",
+            self._end_active_session)
         self.text_button = self._icon_button("document-edit-symbolic", "Озвучить свой текст",
                                              self._open_text)
         self.autoplay_button = Gtk.ToggleButton(image=Gtk.Image.new_from_icon_name(
@@ -158,15 +163,23 @@ class PlayerWindow(Gtk.Window):
         scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.add(self.message_list)
 
+        # короткий список сессий в своём контейнере: высоту берёт по строкам, не отнимая у сообщений
+        self.session_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.session_list.set_activate_on_single_click(True)
+        self.session_list.connect("row-activated", self._on_session_activated)
+        sessions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        sessions.pack_start(self.session_list, False, False, 0)
+
         # ряд служебных значков наверху: команды слева, выключатели справа
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        for button in (self.settings_button, self.clear_button, self.voicing_off_button,
+        for button in (self.settings_button, self.clear_button, self.end_session_button,
                        self.text_button):
             tools.pack_start(button, False, False, 0)
         tools.pack_end(self.autoplay_button, False, False, 0)
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         main.pack_start(tools, False, False, 0)
+        main.pack_start(sessions, False, False, 0)
         main.pack_start(scrolled, True, True, 0)
         main.pack_start(self.scale, False, False, 0)
         main.pack_start(buttons, False, False, 0)
@@ -186,7 +199,6 @@ class PlayerWindow(Gtk.Window):
         text_speaker.on_change = self._show_text
         self._show_state(player.state())
         self._show_text(text_speaker.state())
-        self._show_voicing()
 
     @staticmethod
     def _button(label: str, command) -> Gtk.Button:
@@ -429,8 +441,44 @@ class PlayerWindow(Gtk.Window):
         self.next_button.set_sensitive(next_enabled(state))
         self.scale.set_sensitive(state.current is not None)
         self.slider.show(state.position_s, state.length_s)
+        enabled = session_buttons_enabled(state)
+        self.clear_button.set_sensitive(enabled)
+        self.end_session_button.set_sensitive(enabled)
+        self._active_session = state.active
+        self._shown_sessions = state.sessions
+        self._show_session_rows(session_rows(state))
         self._shown_messages = state.messages
         self._show_rows(rows(state))
+
+    def _on_session_activated(self, _list, row: Gtk.ListBoxRow) -> None:
+        """Клик по строке: сессия i-й строки выбирается (что делать с активной, решает плеер)."""
+        self._player.select_session(self._shown_sessions[row.get_index()].id)
+
+    def _end_active_session(self) -> None:
+        if self._active_session is not None:
+            self._player.remove_session(self._active_session)
+
+    def _show_session_rows(self, items: list[SessionRow]) -> None:
+        """Как _show_rows: перестройка только при изменении строк."""
+        if items == self._shown_session_rows:
+            return
+        self._shown_session_rows = items
+        for child in self.session_list.get_children():
+            self.session_list.remove(child)
+        for item in items:
+            self.session_list.add(self._session_row(item))
+        self.session_list.show_all()
+
+    @staticmethod
+    def _session_row(item: SessionRow) -> Gtk.Box:
+        title = Gtk.Label(label=item.title, xalign=0.0)
+        if item.active:
+            attributes = Pango.AttrList()
+            attributes.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
+            title.set_attributes(attributes)
+        line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, margin=4)
+        line.pack_start(title, True, True, 0)
+        return line
 
     def _on_row_activated(self, _list, row: Gtk.ListBoxRow) -> None:
         """Клик по строке: сообщение i-й строки выбирается (играет по play/pause)."""
@@ -488,7 +536,6 @@ class PlayerWindow(Gtk.Window):
     def _on_show(self, _window) -> None:
         self._show_state(self._player.state())
         self._show_text(self._text_speaker.state())
-        self._show_voicing()
         if not self._refresh_id:
             self._refresh_id = GLib.timeout_add(self.REFRESH_MS, self._refresh)
 
@@ -502,17 +549,7 @@ class PlayerWindow(Gtk.Window):
     def _refresh(self) -> bool:
         self._show_state(self._player.state())
         self._show_text(self._text_speaker.state())
-        self._show_voicing()
         return GLib.SOURCE_CONTINUE
-
-    def _turn_voicing_off(self) -> None:
-        self._voicing.turn_off()
-        # гасим сразу: двойной клик не запускает второй хук; если флаг остался, тик вернёт кнопку
-        self.voicing_off_button.set_sensitive(False)
-
-    def _show_voicing(self) -> None:
-        """Флаг озвучки читается с диска, поэтому не на каждое событие плеера, а на показ и тик."""
-        self.voicing_off_button.set_sensitive(self._voicing.is_on())
 
 
 def tray_menu(quit_app: Callable[[], None]) -> Gtk.Menu:
