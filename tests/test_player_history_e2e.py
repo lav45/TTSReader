@@ -63,11 +63,13 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         return [self.sentence(session, token, i, seconds=seconds) for i in range(count)]
 
     def test_playing_message_switches_to_joined_file_at_position(self) -> None:
-        session, other = uuid.uuid4().hex, uuid.uuid4().hex
+        """Следующее сообщение той же сессии приходит после склейки: склейка его не берёт
+        (в демон уходят задачи только активной сессии — второй сессии здесь нет)."""
+        session = uuid.uuid4().hex
         sentences = self.message(session, "aaaaaa", 3)
-        follower = self.sentence(other, "bbbbbb", 0)
+        follower = self.sentence(session, "bbbbbb", 0)
         self.start_player()
-        for path in [*sentences, follower]:
+        for path in sentences:
             self.drop(path)
         self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s0.wav"))
         self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s1.wav"))
@@ -80,7 +82,8 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         position = float(switched.removeprefix(prefix))
         self.assertGreaterEqual(position, 0.5)
         self.assertLessEqual(position, 1.0)
-        self.assertTrue(self.next_line("playing ").endswith(f"{other}_bbbbbb_s0.wav"))
+        self.drop(follower)
+        self.assertTrue(self.next_line("playing ").endswith(f"{session}_bbbbbb_s0.wav"))
 
     def test_two_passes_of_one_task_end_as_one_message(self) -> None:
         """Обёртка с playback.json (id задачи X) кладёт два прохода синтеза, как у демона:
@@ -124,15 +127,15 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assertTrue(lines[-1].endswith("aaaaaa_s2.wav"), lines)
 
     def test_joined_file_of_queued_message_plays_from_start(self) -> None:
-        first, queued = uuid.uuid4().hex, uuid.uuid4().hex
-        long = self.sentence(first, "aaaaaa", 0, seconds=3.0)
-        sentences = self.message(queued, "bbbbbb", 2)
+        session = uuid.uuid4().hex  # одна сессия: в демон уходят задачи только активной
+        long = self.sentence(session, "aaaaaa", 0, seconds=3.0)
+        sentences = self.message(session, "bbbbbb", 2)
         self.start_player()
         for path in [long, *sentences]:
             self.drop(path)
         self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s0.wav"))
-        name = self.daemon_saves(queued, sentences)
-        self.assertEqual(f"complete {queued} {self.task_ids['bbbbbb']} 1.00s",
+        name = self.daemon_saves(session, sentences)
+        self.assertEqual(f"complete {session} {self.task_ids['bbbbbb']} 1.00s",
                          self.next_line("complete "))
         lines = self.lines_until("playing ")
         self.assertEqual([], [line for line in lines if line.startswith("switched ")])

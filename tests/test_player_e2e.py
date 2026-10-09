@@ -46,7 +46,10 @@ class PlayerProcessCase(unittest.TestCase):
 
     drop() кладёт предложение, как демон: первое предложение нового token — сначала задача
     хука в hook-home (hook_task), id задачи демона — из файла, который плеер записал в
-    .claude-tts/queue; его ставит task() перед обёрткой."""
+    .claude-tts/queue; его ставит task() перед обёрткой. Сессию задачи hook_task до первой
+    её задачи регистрирует запросом add в control/ (register), как `/tts-on`: задачи сессии
+    не из списка плеер удаляет. Первая зарегистрированная сессия активна — в демон уходят
+    только её задачи, поэтому тесты с задачами в демон держат одну сессию."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -82,6 +85,7 @@ class PlayerProcessCase(unittest.TestCase):
         self.daemon_queue.mkdir(parents=True)
         self.hook_queue = self.runtime / "tts-player" / "hook-home" / ".claude-tts" / "queue"
         self.task_ids: dict[str, str] = {}  # token предложений → id задачи демона
+        self.registered: set[str] = set()  # сессии, для которых положен запрос add
         self.hook_id = ""  # id последней задачи хука из hook_task()
 
     def env(self) -> dict[str, str]:
@@ -158,10 +162,24 @@ class PlayerProcessCase(unittest.TestCase):
         (claude_tts / "playback.json").write_text(json.dumps({"current_message": {
             "id": task_id, "source": "tts-player", "session_id": "s", "project": "p"}}))
 
+    def register(self, session: str) -> None:
+        """Запрос `session add` в control/, как его пишет CLI (.tmp, затем rename): плеер
+        забирает его до задачи хука, запущен он или ещё нет."""
+        control = self.runtime / "tts-player" / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        name = f"{time.time_ns()}"
+        tmp = control / f"{name}.tmp"
+        tmp.write_text(json.dumps({"op": "add", "session": session, "cwd": "/w/proj"}))
+        tmp.rename(control / f"{name}.json")
+        self.registered.add(session)
+
     def hook_task(self, session: str, text: str) -> dict:
         """Задача хука в hook-home (как claude-tts: .tmp, затем rename); возвращает задачу,
-        которую плеер записал в очередь демона. Стартующий плеер чистит queue/ (HookHome
-        prepare) — задача, пропавшая без задачи демона, пишется заново."""
+        которую плеер записал в очередь демона. Сессия не зарегистрирована — сначала register.
+        Стартующий плеер чистит queue/ (HookHome prepare) — задача, пропавшая без задачи
+        демона, пишется заново."""
+        if session not in self.registered:
+            self.register(session)
         hook_id = self.hook_id = uuid.uuid4().hex[:16]
         task = {"id": hook_id, "timestamp": time.time(), "session_id": session,
                 "project": "/w/proj", "text": text, "persona": "p", "speed": 1.0}
@@ -471,13 +489,14 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(kept, sorted(p.name for p in self.store.iterdir()))
 
     def test_lock_is_free_after_exit_and_new_start_passes(self) -> None:
+        session = uuid.uuid4().hex
         self.start_player()
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=3.0))
+        self.drop(self.sentence(session, "aaaaaa", 0, seconds=3.0))
         self.played(1)
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
         self.start_player()
-        self.drop(self.sentence(uuid.uuid4().hex, "bbbbbb", 0))
+        self.drop(self.sentence(session, "bbbbbb", 0))
         names = self.played(2)  # недоигранное aaaaaa сохранено при выходе и играет снова
         self.assertTrue(names[0].endswith("aaaaaa_s0.wav") and names[1].endswith("bbbbbb_s0.wav"))
 
@@ -592,6 +611,7 @@ class SingleInstanceTest(PlayerProcessCase):
         while not queue_dir.is_dir():
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)
+        self.register("sess")
         tmp = queue_dir / "1.tmp"
         tmp.write_text(json.dumps({"id": "abc", "session_id": "sess", "text": "Привет"}))
         tmp.rename(queue_dir / "1.json")

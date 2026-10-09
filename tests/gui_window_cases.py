@@ -40,7 +40,7 @@ def state(status: str, current: Message | None, messages: list[Message],
           position_s: float = 0.0, autoplay: bool = True) -> PlayerState:
     length = 0.0 if current is None else 10.0
     return PlayerState(status, current, position_s, length, messages, False,
-                       [10.0] * len(messages), [True] * len(messages), autoplay)
+                       [10.0] * len(messages), [True] * len(messages), autoplay, [], None)
 
 
 class FakePlayer:
@@ -67,7 +67,8 @@ class FakePlayer:
         snapshot = self.snapshot
         self.change(PlayerState(snapshot.status, snapshot.current, snapshot.position_s,
                                 snapshot.length_s, snapshot.messages, snapshot.output_down,
-                                snapshot.lengths, snapshot.completes, prefs.autoplay))
+                                snapshot.lengths, snapshot.completes, prefs.autoplay,
+                                snapshot.sessions, snapshot.active))
 
     def next(self) -> None:
         self.calls.append(("next",))
