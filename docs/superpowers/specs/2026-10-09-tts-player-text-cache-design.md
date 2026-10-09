@@ -92,8 +92,9 @@ hook-home = $XDG_RUNTIME_DIR/tts-player/hook-home        создаёт и чи�
                                  (свежий ~/.claude-tts/daemon.heartbeat ≤ 30 с или живой PID
                                  из ~/.claude-tts/daemon.pid); демон не жив → файл удаляется
   .claude-tts/queue/<ts>_<id>.json   пишет хук (сначала .tmp, затем rename)
-гейт tts-gate.sh: при совпадении сессии — HOME=<hook-home> exec <скрипт хука>
-                  (speak-response.sh, speak-intermediate.sh; voice-context.sh — без подмены)
+HOME=<hook-home> ставят сами скрипты speak-response.sh и speak-intermediate.sh (их зовут и
+                  гейт, и tts-command.sh при /tts-on); voice-context.sh — без подмены (уточнено при
+                  планировании (12) — моё решение)
 задача (формат claude-tts 9.20.1, audio.py:670):
   {"id","timestamp","session_id","project","text","persona","speed","speed_method",
    "voice_kokoro","voice_kokoro_blend","voice_sherpa","speaker_sherpa","voice_mlx",
