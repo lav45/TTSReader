@@ -44,7 +44,14 @@ def main(argv: list[str]) -> int:
     emit({"count": len(sentences)})
     if sentences:
         out_dir.mkdir(parents=True, exist_ok=True)
-        persona = load_raw_config()["active_persona"]
+        try:
+            persona = load_raw_config()["active_persona"]
+        except Exception as error:
+            emit({"error": f"голос не определён: {error!r}"})
+            return EXIT_SYNTH_FAILED
+        if not persona:
+            emit({"error": "голос не определён: active_persona пуст"})
+            return EXIT_SYNTH_FAILED
         for index, sentence in enumerate(sentences):
             path = out_dir / f"{index}.wav"
             try:

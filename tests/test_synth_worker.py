@@ -16,7 +16,19 @@ def split_sentences(text):
 '''
 
 FAKE_CONFIG = '''
+import os
+
+
 def load_raw_config():
+    mode = os.environ.get("FAKE_CONFIG_MODE", "")
+    if mode == "raise":
+        raise OSError("config broken")
+    if mode == "missing":
+        return {}
+    if mode == "empty":
+        return {"active_persona": ""}
+    if mode == "list":
+        return []
     return {"active_persona": "fake-persona"}
 '''
 
@@ -111,6 +123,14 @@ class SynthWorkerTest(unittest.TestCase):
         code, lines = self.run_worker("Раз. Два.", FAKE_FAIL_AT="Раз.", FAKE_FAIL_MODE="raise")
         self.assertEqual(code, 1)
         self.assertIn("boom", lines[-1]["error"])
+
+    def test_persona_resolution_failures(self):
+        for mode in ("raise", "missing", "empty", "list"):
+            with self.subTest(mode=mode):
+                code, lines = self.run_worker("Раз.", FAKE_CONFIG_MODE=mode)
+                self.assertEqual(code, 1)
+                self.assertIn("error", lines[-1])
+                self.assertFalse(any(line.get("done") for line in lines))
 
     def test_missing_package(self):
         code, lines = self.run_worker("Раз.", with_package=False)
