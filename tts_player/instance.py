@@ -1,7 +1,8 @@
 """Единственный экземпляр плеера: flock на $XDG_RUNTIME_DIR/tts-player/player.lock.
 
 Блокировку держит процесс плеера, пока жив (дескриптор открыт); в файле — его PID.
-`tts-player stop` читает PID и шлёт SIGUSR1 (плеер отвечает stop_playback()).
+`tts-player stop` читает PID и шлёт SIGUSR1 (плеер отвечает stop_playback()),
+`tts-player play` — SIGUSR2 (play_if_stopped()).
 """
 import fcntl
 import os
@@ -82,13 +83,22 @@ def is_locked(runtime_dir: Path) -> bool:
 
 def send_stop(runtime_dir: Path, marker: str = "tts_player") -> bool:
     """Блокировка свободна или владелец не опознан как плеер — False; иначе SIGUSR1 и True."""
+    return send_signal(runtime_dir, signal.SIGUSR1, marker)
+
+
+def send_play(runtime_dir: Path, marker: str = "tts_player") -> bool:
+    """То же, что send_stop, но SIGUSR2: плеер отвечает play_if_stopped()."""
+    return send_signal(runtime_dir, signal.SIGUSR2, marker)
+
+
+def send_signal(runtime_dir: Path, signum: int, marker: str) -> bool:
     if not is_locked(runtime_dir):
         return False
     pid = Instance.holder_pid(runtime_dir, marker=marker)
     if pid is None:
         return False
     try:
-        os.kill(pid, signal.SIGUSR1)
+        os.kill(pid, signum)
     except ProcessLookupError:
         return False
     return True

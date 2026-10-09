@@ -628,6 +628,30 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual(stops, self.playback.stops)
         self.assertEqual(count, len(self.states))
 
+    def test_play_if_stopped_plays_current_after_stop(self) -> None:
+        self.start_with(A0, B0)
+        self.player.stop_playback()
+        self.player.play_if_stopped()
+        state = self.state()
+        self.assertEqual(("playing", 0.0), (state.status, state.position_s))
+        self.assertEqual(A0, self.playback.starts[-1][0])
+
+    def test_play_if_stopped_when_playing_or_paused_changes_nothing(self) -> None:
+        self.start_with(A0, B0)
+        count, starts = len(self.states), len(self.playback.starts)
+        self.player.play_if_stopped()
+        self.assertEqual((count, starts), (len(self.states), len(self.playback.starts)))
+        self.player.toggle_pause()
+        count = len(self.states)
+        self.player.play_if_stopped()
+        self.assertEqual("paused", self.state().status)
+        self.assertEqual(count, len(self.states))
+
+    def test_play_if_stopped_without_message_changes_nothing(self) -> None:
+        self.player.start()
+        self.player.play_if_stopped()
+        self.assertEqual("idle", self.state().status)
+
     def test_state_completes_per_message(self) -> None:
         self.start_with(A0, A1, B0)
         state = self.state()

@@ -11,9 +11,11 @@
 #      claude-tts daemon restart (до ~15 с, а у хука 5 с, поэтому отвязан через setsid,
 #      вывод в $XDG_RUNTIME_DIR/tts-player/daemon-restart.log);
 #      демон жив с daemon-bin первым -> не трогать.
-#      Затем tts-player --tray отвязанным процессом (вывод в player.log); второй
-#      экземпляр плеер не пускает сам, пробой player.lock без записи хук лишь выбирает
-#      сообщение. Хук не ждёт плеер.
+#      PID из файла принимается, только если в /proc/<pid>/cmdline есть claude-tts или
+#      claude_code_tts, иначе демона нет (старт, не перезапуск).
+#      Затем плеер: не запущен -> tts-player --tray отвязанным процессом (вывод в
+#      player.log); уже запущен (проба player.lock без записи) -> tts-player play,
+#      продолжает остановленное /tts-off. Хук не ждёт плеер.
 # off: tts-player stop - останавливает текущий звук, сам плеер остаётся.
 #
 # Вызов: tts-player-hook on|off. Код 0; 1 - нет claude-tts или tts-player в PATH,
@@ -43,13 +45,18 @@ player_running() {
     [ -e "$LOCK" ] && ! flock -n -s "$LOCK" true 2> /dev/null
 }
 
-# Живой PID демона или пусто.
+# Живой PID демона или пусто: PID из файла принимается, только если в
+# /proc/<pid>/cmdline (разделитель NUL) есть claude-tts или claude_code_tts;
+# иначе PID чужой (процесс прошлого демона умер, номер занят) - демона нет.
 daemon_pid() {
     local pid
     [ -f "$PID_FILE" ] || return 0
     pid="$(< "$PID_FILE")"
     [[ "$pid" =~ ^[0-9]+$ ]] || return 0
-    [ -d "$PROC/$pid" ] && echo "$pid"
+    [ -d "$PROC/$pid" ] || return 0
+    case "$(tr '\0' ' ' < "$PROC/$pid/cmdline" 2> /dev/null)" in
+        *claude-tts* | *claude_code_tts*) echo "$pid" ;;
+    esac
     return 0
 }
 
@@ -71,7 +78,7 @@ on() {
     command -v claude-tts > /dev/null || fail "claude-tts не найден в PATH"
     mkdir -p "$STATE" || fail "не удалось создать $STATE"
 
-    local pid first
+    local pid first restarted=0
     pid="$(daemon_pid)"
     if [ -z "$pid" ]; then
         PATH="$DAEMON_BIN:$PATH" claude-tts daemon start < /dev/null > /dev/null 2>&1
@@ -87,15 +94,20 @@ on() {
         else
             PATH="$DAEMON_BIN:$PATH" setsid claude-tts daemon restart \
                 < /dev/null >> "$STATE/daemon-restart.log" 2>&1 &
+            restarted=1
             echo "перезапуск демона с обёрткой запущен"
         fi
     fi
 
     if player_running; then
-        echo "плеер уже запущен"
+        tts-player play < /dev/null > /dev/null 2>&1
+        echo "плеер уже запущен, воспроизведение продолжено"
     else
         setsid tts-player --tray < /dev/null >> "$STATE/player.log" 2>&1 &
-        echo "плеер запущен"
+        echo "запуск плеера отдан (ошибки - $STATE/player.log)"
+    fi
+    if [ "$restarted" = 1 ]; then
+        echo "первый ответ после перезапуска может прозвучать мимо плеера - повторите /tts-on через несколько секунд"
     fi
 }
 

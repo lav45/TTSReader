@@ -126,6 +126,12 @@ class Player:
             self._stop()
             self._changed()
 
+    def play_if_stopped(self) -> None:
+        """Команда `tts-player play`: stopped и idle с текущим сообщением — как play кнопки
+        play|stop; playing, paused и отсутствие сообщения — без изменений."""
+        if self._status in ("stopped", "idle") and self._current is not None:
+            self.toggle_play_stop()
+
     def _stop(self) -> None:
         self._halt()
         self._status = "stopped"

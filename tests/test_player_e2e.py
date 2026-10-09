@@ -277,6 +277,38 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assert_quiet()
         self.assertIsNone(self.proc.poll())
 
+    def test_play_without_player_exits_0_silently(self) -> None:
+        result = self.run_bin("play")
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+
+    def test_stop_then_play_resumes_and_play_while_playing_changes_nothing(self) -> None:
+        session = uuid.uuid4().hex
+        self.start_player()
+        self.drop(self.sentence(session, "aaaaaa", 0, seconds=5.0))
+        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
+        self.assertEqual(0, self.run_bin("play").returncode)
+        self.next_line("play requested")
+        self.assert_quiet()
+        self.assertEqual(0, self.run_bin("stop").returncode)
+        self.next_line("stop requested")
+        self.assertEqual(0, self.run_bin("play").returncode)
+        self.next_line("play requested")
+        self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
+        self.assertIsNone(self.proc.poll())
+
+    def test_sigusr2_before_player_is_up_does_not_kill(self) -> None:
+        self.start_player()
+        lock = self.runtime / "tts-player" / "player.lock"
+        deadline = time.monotonic() + WAIT
+        while not (lock.exists() and lock.read_text().strip()):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.001)
+        self.proc.send_signal(signal.SIGUSR2)
+        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=5.0))
+        self.played(1)
+        self.assertIsNone(self.proc.poll())
+
     def test_bin_works_from_other_cwd_and_through_symlink(self) -> None:
         link = self.tmp / "tts-player-link"
         link.symlink_to(BIN)

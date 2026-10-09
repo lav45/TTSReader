@@ -3,6 +3,7 @@
 Запуск: python3 -m tts_player [--audio-sink NAME] [--history-dir DIR] [--history-db FILE]
                               [--no-gui] [--show] [--tray]
        python3 -m tts_player stop    (SIGUSR1 запущенному плееру: остановить текущее)
+       python3 -m tts_player play    (SIGUSR2: продолжить остановленное, играющее не трогать)
 Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window); нет графической сессии —
 выход 1. С --no-gui — GLib.MainLoop без Gtk и XApp (e2e).
 """
@@ -19,7 +20,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
-from tts_player.instance import Instance, is_locked, send_stop  # noqa: E402
+from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv == ["stop"]:
         return stop_command()
+    if argv == ["play"]:
+        return play_command()
     parser = argparse.ArgumentParser(prog="tts_player")
     parser.add_argument("--audio-sink", default=None, help="элемент GStreamer для вывода звука")
     parser.add_argument("--history-dir", default="~/.claude-tts/speech_history",
@@ -55,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     # stop может прийти, как только блокировка видна, а обработчик ставит run() позже;
     # без этого SIGUSR1 по умолчанию завершил бы плеер
     signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+    signal.signal(signal.SIGUSR2, signal.SIG_IGN)
     instance = Instance.acquire(Path(runtime))  # до Player(): второй экземпляр store/ не трогает
     if instance is None:
         pid = Instance.holder_pid(Path(runtime))
@@ -83,6 +87,16 @@ def stop_command() -> int:
         print("плеер не запущен", file=sys.stderr)
         return 0
     if not send_stop(Path(runtime)) and is_locked(Path(runtime)):
+        print("плеер не запущен или ещё стартует", file=sys.stderr)
+    return 0
+
+
+def play_command() -> int:
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime:
+        print("плеер не запущен", file=sys.stderr)
+        return 0
+    if not send_play(Path(runtime)) and is_locked(Path(runtime)):
         print("плеер не запущен или ещё стартует", file=sys.stderr)
     return 0
 
@@ -122,6 +136,12 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
         return GLib.SOURCE_CONTINUE
 
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR1, on_stop)
+    def on_play() -> bool:
+        log.info("play requested")
+        player.play_if_stopped()
+        return GLib.SOURCE_CONTINUE
+
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR2, on_play)
     player.start()
     try:
         main_loop()
