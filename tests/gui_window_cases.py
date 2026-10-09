@@ -222,7 +222,7 @@ class PlayerWindowTest(unittest.TestCase):
         button = w.end_session_button
         self.assertFalse(button.get_label())
         self.assertEqual("system-shutdown-symbolic", icon_name(button))
-        self.assertEqual("Завершить активную сессию (/tts-off)", button.get_tooltip_text())
+        self.assertEqual("Завершить активную сессию", button.get_tooltip_text())
         self.assertEqual("Очистить сообщения активной сессии", w.clear_button.get_tooltip_text())
         row = w.clear_button.get_parent()
         self.assertEqual([w.settings_button, w.clear_button, button], row.get_children()[:3])
