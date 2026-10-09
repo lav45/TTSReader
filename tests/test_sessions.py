@@ -32,24 +32,15 @@ class PathTest(unittest.TestCase):
 class AddTest(SessionsCase):
     def test_first_add_writes_contract_file(self):
         self.assertTrue(self.sessions.add("u1", "/home/u/Programs/TTSReader/"))
-        self.assertEqual(self.file_data(), {"active": "u1", "sessions": [{"id": "u1", "project": "TTSReader"}]})
+        self.assertEqual(self.file_data(), {"active": None, "sessions": [{"id": "u1", "project": "TTSReader"}]})
 
     def test_second_add_appends_and_keeps_active(self):
         self.sessions.add("u1", "/a/one")
+        self.sessions.select("u1")
         self.sessions.add("u2", "/a/two")
         self.assertEqual(self.sessions.sessions, [Session("u1", "one"), Session("u2", "two")])
         self.assertEqual(self.sessions.active, "u1")
         self.assertEqual(self.file_data()["active"], "u1")
-
-    def test_add_after_active_removed_keeps_no_active_while_list_not_empty(self):
-        """Активной становится только первая в пустом списке; завершённую активную заменяет
-        выбор пользователя, а не следующий add."""
-        self.sessions.add("u1", "/a/one")
-        self.sessions.add("u2", "/a/two")
-        self.sessions.remove("u1")
-        self.sessions.add("u3", "/a/three")
-        self.assertIsNone(self.sessions.active)
-        self.assertIsNone(self.file_data()["active"])
 
     def test_repeated_add_returns_false_and_does_not_rewrite(self):
         self.sessions.add("u1", "/a/one")
@@ -73,6 +64,7 @@ class AddTest(SessionsCase):
 class RemoveTest(SessionsCase):
     def test_remove_active_resets_active(self):
         self.sessions.add("u1", "/a/one")
+        self.sessions.select("u1")
         self.assertTrue(self.sessions.remove("u1"))
         self.assertEqual(self.sessions.sessions, [])
         self.assertIsNone(self.sessions.active)
@@ -80,6 +72,7 @@ class RemoveTest(SessionsCase):
 
     def test_remove_inactive_keeps_active(self):
         self.sessions.add("u1", "/a/one")
+        self.sessions.select("u1")
         self.sessions.add("u2", "/a/two")
         self.assertTrue(self.sessions.remove("u2"))
         self.assertEqual(self.sessions.sessions, [Session("u1", "one")])
@@ -108,10 +101,25 @@ class SelectTest(SessionsCase):
 
     def test_select_active_or_unknown_returns_false_and_does_not_rewrite(self):
         self.sessions.add("u1", "/a/one")
+        self.sessions.select("u1")
         os.utime(self.path, (1, 1))
         self.assertFalse(self.sessions.select("u1"))
         self.assertFalse(self.sessions.select("nope"))
         self.assertEqual(self.sessions.active, "u1")
+        self.assertEqual(self.path.stat().st_mtime, 1)
+
+    def test_deselect_leaves_no_active_in_file(self):
+        self.sessions.add("u1", "/a/one")
+        self.sessions.select("u1")
+        self.assertTrue(self.sessions.deselect())
+        self.assertIsNone(self.sessions.active)
+        self.assertEqual(self.file_data(), {"active": None, "sessions": [
+            {"id": "u1", "project": "one"}]})
+
+    def test_deselect_without_active_returns_false_and_does_not_rewrite(self):
+        self.sessions.add("u1", "/a/one")
+        os.utime(self.path, (1, 1))
+        self.assertFalse(self.sessions.deselect())
         self.assertEqual(self.path.stat().st_mtime, 1)
 
 
@@ -119,6 +127,7 @@ class LoadTest(SessionsCase):
     def test_load_after_other_instance_wrote(self):
         self.sessions.add("u1", "/a/one")
         self.sessions.add("u2", "/a/two")
+        self.sessions.select("u1")
         other = Sessions(self.path)
         other.load()
         self.assertEqual(other.sessions, [Session("u1", "one"), Session("u2", "two")])
@@ -152,7 +161,6 @@ class WriteFailureTest(SessionsCase):
         with self.assertLogs("tts_player.sessions", "WARNING"):
             self.assertTrue(self.sessions.add("u1", "/a/one"))
         self.assertEqual(self.sessions.sessions, [Session("u1", "one")])
-        self.assertEqual(self.sessions.active, "u1")
 
 
 class ReadSessionsTest(SessionsCase):

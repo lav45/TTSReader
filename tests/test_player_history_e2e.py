@@ -65,7 +65,7 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
     def test_playing_message_switches_to_joined_file_at_position(self) -> None:
         """Следующее сообщение той же сессии приходит после склейки: склейка его не берёт
         (в демон уходят задачи только активной сессии — второй сессии здесь нет)."""
-        session = uuid.uuid4().hex
+        session = self.session
         sentences = self.message(session, "aaaaaa", 3)
         follower = self.sentence(session, "bbbbbb", 0)
         self.start_player()
@@ -90,7 +90,7 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         проход 1 (aaaaaa) оборван паузой на s1 без записи истории, проход 2 (bbbbbb) начинает
         с того же s1; склейка — только прохода 2. Плеер играет все четыре файла одним
         сообщением по recv_ns; склейка короче сообщения — одна строка ended, без complete."""
-        session = uuid.uuid4().hex
+        session = self.session
         sentences = [*self.message(session, "aaaaaa", 2),
                      self.sentence(session, "bbbbbb", 1, seconds=SECONDS),
                      self.sentence(session, "bbbbbb", 2, seconds=SECONDS)]
@@ -113,7 +113,7 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assert_quiet()
 
     def test_joined_file_of_other_length_leaves_sentences(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         sentences = self.message(session, "aaaaaa", 3)
         self.start_player()
         for path in sentences:
@@ -127,7 +127,7 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assertTrue(lines[-1].endswith("aaaaaa_s2.wav"), lines)
 
     def test_joined_file_of_queued_message_plays_from_start(self) -> None:
-        session = uuid.uuid4().hex  # одна сессия: в демон уходят задачи только активной
+        session = self.session
         long = self.sentence(session, "aaaaaa", 0, seconds=3.0)
         sentences = self.message(session, "bbbbbb", 2)
         self.start_player()
@@ -143,7 +143,7 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.assert_quiet()
 
     def test_history_written_before_start_gives_no_lines(self) -> None:
-        session = uuid.uuid4().hex
+        session = self.session
         sentence = self.sentence(session, "aaaaaa", 0)
         self.daemon_saves(session, [sentence])
         self.start_player()
@@ -157,7 +157,7 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.start_player(history=self.tmp / "missing")
         warning = self.next_line("история ")
         self.assertIn(str(self.tmp / "missing"), warning)
-        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0))
+        self.drop(self.sentence(self.session, "aaaaaa", 0))
         self.assertTrue(self.next_line("playing ").endswith("aaaaaa_s0.wav"))
         self.assertIsNone(self.proc.poll())
 

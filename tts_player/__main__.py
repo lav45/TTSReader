@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
                              " переозвучка), очередь демона queue/")
     parser.add_argument("--settings-file",
                         default=str(PlayerSettings.default_path(os.environ)),
-                        help="файл настроек плеера: хвост, автовоспроизведение, приглушение")
+                        help="файл настроек плеера: хвост, приглушение")
     parser.add_argument("--tts-python",
                         default="~/.local/share/uv/tools/claude-code-tts/bin/python",
                         help="интерпретатор окружения claude-tts: синтез своего текста")

@@ -1,7 +1,6 @@
 """Окно плеера и значок в трее. Что показывать — решает tts_player.view над player.state();
 команды уходят в Player только через его методы."""
 import logging
-from dataclasses import replace
 from typing import Callable
 
 import gi
@@ -15,18 +14,21 @@ from tts_player.daemon_settings import DaemonSettings, Voice  # noqa: E402
 from tts_player.model import Message  # noqa: E402
 from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import PlayerSettings, Prefs  # noqa: E402
-from tts_player.sessions import Session  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.text_speaker import SOUNDING_STATUSES, TextSpeaker, TextState  # noqa: E402
 from tts_player.view import (MessageRow, SessionRow, next_enabled,  # noqa: E402
                              play_pause_enabled, play_pause_label, position_label,
-                             prev_enabled, rows, session_buttons_enabled, session_rows,
-                             text_play_enabled, text_play_pause_label, text_position_label)
+                             prev_enabled, session_buttons_enabled, text_play_enabled,
+                             text_play_pause_label, text_position_label, tree_rows)
 
 log = logging.getLogger(__name__)
 
 PREV_LABEL = "⏮"
 NEXT_LABEL = "⏭"
+FOLDER_OPEN_ARROW = "▾"
+FOLDER_CLOSED_ARROW = "▸"
+FOLDER_OPEN_ICON = "folder-open-symbolic"
+FOLDER_CLOSED_ICON = "folder-symbolic"
 SAVED_TEXT = "Настройки сохранены"
 STATUS_SUCCESS = "success"
 STATUS_ERROR = "error"
@@ -94,9 +96,9 @@ class PlayerWindow(Gtk.Window):
 
     "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить сообщения
     активной сессии», «Завершить активную сессию» (оба активны, пока есть активная сессия) и
-    «Озвучить свой текст», справа выключатель автовоспроизведения; список сессий (клик выбирает
-    сессию, активная жирная); список сообщений; ползунок позиции; ряд со временем слева и
-    prev / play-pause / next справа.
+    «Озвучить свой текст»; дерево сессий — папки (открыта одна или ни одной: открытая —
+    активная), дорожки открытой — под её заголовком с отступом; ползунок позиции; ряд со
+    временем слева и prev / play-pause / next справа.
     "settings": хвост очереди и приглушение (PlayerSettings), голос и скорость claude-tts
     (DaemonSettings); «Сохранить» пишет их и остаётся на экране, итог — в блоке внизу; стрелка
     назад возвращает без записи. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
@@ -107,6 +109,7 @@ class PlayerWindow(Gtk.Window):
     REFRESH_MS — позиция играющего файла сама on_change не вызывает. Закрытие прячет окно в трей.
     """
     REFRESH_MS = 250
+    TRACK_INDENT = 28  # отступ дорожки от левого края: под значком папки
     SPEED_STEP = 0.1
     DUCK_STEP = 5
     SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
@@ -120,14 +123,11 @@ class PlayerWindow(Gtk.Window):
         self._text_speaker = text_speaker
         self._voice_loaded = False  # голос и скорость прочитаны при открытии настроек
         self._refresh_id = 0
-        self._shown_rows: list[MessageRow] | None = None
+        self._shown_rows: list[SessionRow | MessageRow] | None = None
         # сообщения последнего состояния: строки равны по тексту, а объекты Message могут быть
         # новыми, поэтому снимок обновляется на каждом состоянии, а не только при перестройке
         self._shown_messages: list[Message] = []
-        # то же для списка сессий: клик берёт id из сессий состояния, построившего строки
         self._active_session: str | None = None
-        self._shown_session_rows: list[SessionRow] | None = None
-        self._shown_sessions: list[Session] = []
         self.set_default_size(420, 360)
 
         self.slider = SeekSlider(player.seek)
@@ -146,11 +146,6 @@ class PlayerWindow(Gtk.Window):
             self._end_active_session)
         self.text_button = self._icon_button("document-edit-symbolic", "Озвучить свой текст",
                                              self._open_text)
-        self.autoplay_button = Gtk.ToggleButton(image=Gtk.Image.new_from_icon_name(
-            "media-playlist-consecutive-symbolic", Gtk.IconSize.BUTTON))
-        self.autoplay_button.set_relief(Gtk.ReliefStyle.NONE)
-        self.autoplay_button.set_tooltip_text("Автовоспроизведение")
-        self._autoplay_handler = self.autoplay_button.connect("toggled", self._on_autoplay_toggled)
 
         # время слева, кнопки справа: pack_end выкладывает от правого края, поэтому next первым
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -158,29 +153,20 @@ class PlayerWindow(Gtk.Window):
         for button in (self.next_button, self.play_pause_button, self.prev_button):
             buttons.pack_end(button, False, False, 0)
 
-        self.message_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.message_list.set_activate_on_single_click(True)
-        self.message_list.connect("row-activated", self._on_row_activated)
+        self.tree = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.tree.set_activate_on_single_click(True)
+        self.tree.connect("row-activated", self._on_row_activated)
         scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
-        scrolled.add(self.message_list)
+        scrolled.add(self.tree)
 
-        # короткий список сессий в своём контейнере: высоту берёт по строкам, не отнимая у сообщений
-        self.session_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.session_list.set_activate_on_single_click(True)
-        self.session_list.connect("row-activated", self._on_session_activated)
-        sessions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        sessions.pack_start(self.session_list, False, False, 0)
-
-        # ряд служебных значков наверху: команды слева, выключатели справа
+        # ряд служебных значков наверху
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         for button in (self.settings_button, self.clear_button, self.end_session_button,
                        self.text_button):
             tools.pack_start(button, False, False, 0)
-        tools.pack_end(self.autoplay_button, False, False, 0)
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         main.pack_start(tools, False, False, 0)
-        main.pack_start(sessions, False, False, 0)
         main.pack_start(scrolled, True, True, 0)
         main.pack_start(self.scale, False, False, 0)
         main.pack_start(buttons, False, False, 0)
@@ -373,15 +359,12 @@ class PlayerWindow(Gtk.Window):
             widget.set_sensitive(enabled)
 
     def _save_settings(self) -> None:
-        """Сначала хвост и приглушение (с текущим автовоспроизведением) в файл плеера и в плеер, затем
+        """Сначала хвост и приглушение в файл плеера и в плеер, затем
         голос и скорость, если они прочитались. Экран остаётся, итог — в блоке внизу."""
         try:
             self.tail_spin.update()  # набранный текст без потери фокуса
             self.duck_spin.update()
-            # autoplay здесь не правится: берём текущее значение плеера (его же показывает
-            # кнопка), хвост и приглушение — из спинов
             prefs = Prefs(tail=self.tail_spin.get_value_as_int(),
-                          autoplay=self._player.state().autoplay,
                           duck=self.duck_spin.get_value_as_int())
             self._prefs.save(prefs)
             self._player.apply_prefs(prefs)
@@ -411,25 +394,6 @@ class PlayerWindow(Gtk.Window):
         self.settings_status.set_text("")
         self.settings_status.hide()
 
-    def _on_autoplay_toggled(self, button: Gtk.ToggleButton) -> None:
-        """Переключение пользователем: остальные ключи — из файла плеера, autoplay — новое
-        значение. Сбой записи — в лог, кнопка возвращается к состоянию плеера."""
-        # хвост и приглушение здесь не правятся: берём сохранённые в файле (спин мог быть
-        # набран, но не сохранён), autoplay — из кнопки
-        prefs = replace(self._prefs.load(), autoplay=button.get_active())
-        try:
-            self._prefs.save(prefs)
-        except SettingsError as e:
-            log.warning("автовоспроизведение не сохранено: %s", e)
-            self._show_autoplay(self._player.state().autoplay)
-            return
-        self._player.apply_prefs(prefs)
-
-    def _show_autoplay(self, autoplay: bool) -> None:
-        """Кнопка следует за состоянием, не вызывая сохранения."""
-        with self.autoplay_button.handler_block(self._autoplay_handler):
-            self.autoplay_button.set_active(autoplay)
-
     def _show_main(self) -> None:
         self.stack.set_visible_child_name("main")
 
@@ -437,7 +401,6 @@ class PlayerWindow(Gtk.Window):
         self.position_label_widget.set_text(position_label(state))
         self.play_pause_button.set_label(play_pause_label(state))
         self.play_pause_button.set_sensitive(play_pause_enabled(state))
-        self._show_autoplay(state.autoplay)
         self.prev_button.set_sensitive(prev_enabled(state))
         self.next_button.set_sensitive(next_enabled(state))
         self.scale.set_sensitive(state.current is not None)
@@ -446,89 +409,85 @@ class PlayerWindow(Gtk.Window):
         self.clear_button.set_sensitive(enabled)
         self.end_session_button.set_sensitive(enabled)
         self._active_session = state.active
-        self._shown_sessions = state.sessions
-        self._show_session_rows(session_rows(state))
         self._shown_messages = state.messages
-        self._show_rows(rows(state))
-
-    def _on_session_activated(self, _list, row: Gtk.ListBoxRow) -> None:
-        """Клик по строке: сессия i-й строки выбирается (что делать с активной, решает плеер)."""
-        self._player.select_session(self._shown_sessions[row.get_index()].id)
+        self._show_rows(tree_rows(state))
 
     def _end_active_session(self) -> None:
         # без активной сессии кнопка неактивна; состояние и клик идут в одном потоке Gtk
         self._player.remove_session(self._active_session)
 
-    def _show_session_rows(self, items: list[SessionRow]) -> None:
-        """Как _show_rows: перестройка только при изменении строк, фокус клавиатуры сохраняется;
-        без сессий контейнер скрыт, чтобы не оставлять зазор."""
-        if items == self._shown_session_rows:
-            return
-        self._shown_session_rows = items
-        focused = self.session_list.get_focus_child()
-        focused_index = None if focused is None else focused.get_index()
-        for child in self.session_list.get_children():
-            self.session_list.remove(child)
-        for item in items:
-            self.session_list.add(self._session_row(item))
-        self.session_list.show_all()
-        self.session_list.get_parent().set_visible(bool(items))
-        if focused_index is not None and items:
-            active = [index for index, item in enumerate(items) if item.active]
-            index = active[0] if active else min(focused_index, len(items) - 1)
-            self.session_list.get_row_at_index(index).grab_focus()
-
-    @staticmethod
-    def _session_row(item: SessionRow) -> Gtk.Box:
-        title = Gtk.Label(label=item.title, xalign=0.0)
-        if item.active:
-            attributes = Pango.AttrList()
-            attributes.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
-            title.set_attributes(attributes)
-        line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, margin=4)
-        line.pack_start(title, True, True, 0)
-        return line
-
     def _on_row_activated(self, _list, row: Gtk.ListBoxRow) -> None:
-        """Клик по строке: сообщение i-й строки выбирается (играет по play/pause)."""
-        self._player.play_message(self._shown_messages[row.get_index()])
+        """Клик по заголовку закрытой папки открывает её сессию, открытой — закрывает; клик по
+        дорожке выбирает сообщение (играет по play/pause)."""
+        item = self._shown_rows[row.get_index()]
+        if isinstance(item, MessageRow):
+            self._player.play_message(self._shown_messages[item.index])
+        elif item.open:
+            self._player.close_session()
+        else:
+            self._player.select_session(item.id)
 
-    def _show_rows(self, items: list[MessageRow]) -> None:
-        """Список перестраивается, только когда строки изменились, а не на каждый тик."""
+    def _show_rows(self, items: list[SessionRow | MessageRow]) -> None:
+        """Дерево перестраивается, только когда строки изменились, а не на каждый тик."""
         if items == self._shown_rows:
             return
         self._shown_rows = items
-        focused = self.message_list.get_focus_child()  # строка с фокусом клавиатуры или None
+        focused = self.tree.get_focus_child()  # строка с фокусом клавиатуры или None
         focused_index = None if focused is None else focused.get_index()
-        for child in self.message_list.get_children():
-            self.message_list.remove(child)
+        for child in self.tree.get_children():
+            self.tree.remove(child)
         for item in items:
-            self.message_list.add(self._row(item))
-        self.message_list.show_all()
-        if focused_index is not None:
+            line = self._message_row(item) if isinstance(item, MessageRow) else self._folder_row(item)
+            self.tree.add(line)
+        self.tree.show_all()
+        if focused_index is not None and items:
             self._restore_focus(items, focused_index)
 
-    def _restore_focus(self, items: list[MessageRow], focused_index: int) -> None:
-        """Перестройка уничтожила строку с фокусом: фокус — на строку текущего сообщения,
-        без текущего — на ту же позицию (не дальше последней), чтобы стрелки и Enter работали."""
-        current = [index for index, item in enumerate(items) if item.current]
-        index = current[0] if current else min(focused_index, len(items) - 1)
-        row = self.message_list.get_row_at_index(index)
-        if row is not None:
-            row.grab_focus()
+    def _restore_focus(self, items: list[SessionRow | MessageRow], focused_index: int) -> None:
+        """Перестройка уничтожила строку с фокусом: фокус — на строку текущего сообщения, без
+        него — на заголовок открытой папки, без неё — на ту же позицию (не дальше последней),
+        чтобы стрелки и Enter работали."""
+        current = [i for i, item in enumerate(items) if isinstance(item, MessageRow) and item.current]
+        opened = [i for i, item in enumerate(items) if isinstance(item, SessionRow) and item.open]
+        index = (current or opened or [min(focused_index, len(items) - 1)])[0]
+        self.tree.get_row_at_index(index).grab_focus()
 
     @staticmethod
-    def _row(item: MessageRow) -> Gtk.Box:
+    def _bold(label: Gtk.Label) -> None:
+        attributes = Pango.AttrList()
+        attributes.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
+        label.set_attributes(attributes)
+
+    def _folder_row(self, item: SessionRow) -> Gtk.Box:
+        """▾/▸, значок папки, «проект · id» (открытая — жирным), справа число дорожек."""
+        arrow = Gtk.Label(label=FOLDER_OPEN_ARROW if item.open else FOLDER_CLOSED_ARROW)
+        icon = Gtk.Image.new_from_icon_name(
+            FOLDER_OPEN_ICON if item.open else FOLDER_CLOSED_ICON, Gtk.IconSize.MENU)
         title = Gtk.Label(label=item.title, xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
+        if item.open:
+            self._bold(title)
+        count = Gtk.Label(label=item.count, xalign=1.0)
+        count.get_style_context().add_class(Gtk.STYLE_CLASS_DIM_LABEL)
+        line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, margin=4)
+        line.pack_start(arrow, False, False, 0)
+        line.pack_start(icon, False, False, 0)
+        line.pack_start(title, True, True, 0)
+        line.pack_end(count, False, False, 0)
+        return line
+
+    def _message_row(self, item: MessageRow) -> Gtk.Box:
+        """С отступом под заголовком папки: первые слова, справа время и длительность."""
+        title = Gtk.Label(label=item.title, xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
+        time_label = Gtk.Label(label=item.time, xalign=1.0)
         duration = Gtk.Label(label=item.duration, xalign=1.0)
-        line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, margin=4)
+        line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, margin=4,
+                       margin_start=self.TRACK_INDENT)
         line.pack_start(title, True, True, 0)
         line.pack_end(duration, False, False, 0)
-        for label in (title, duration):
+        line.pack_end(time_label, False, False, 0)
+        for label in (title, time_label, duration):
             if item.current:
-                attributes = Pango.AttrList()
-                attributes.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
-                label.set_attributes(attributes)
+                self._bold(label)
             if item.heard:
                 label.get_style_context().add_class(Gtk.STYLE_CLASS_DIM_LABEL)
         return line
