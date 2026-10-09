@@ -966,6 +966,44 @@ class PlayerPrefsTest(PlayerCase):
         self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
+    def test_click_in_idle_without_current_selects_without_playing(self) -> None:
+        self.manual()
+        self.start_with()
+        self.arrive(A0)
+        self.arrive(B0)
+        self.assertEqual("idle", self.state().status)
+        self.assertIsNone(self.state().current)
+        self.player.play_message(self.player._queue.messages[1])
+        bb = self.state().messages[1]
+        self.assertEqual(("stopped", "bb", 0.0), (self.state().status, self.token(),
+                                                  self.player._position))
+        self.assertEqual([], self.playback.starts)
+        self.assertFalse(self.player._queue.is_started(bb))
+        self.player.toggle_play_pause()
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
+        self.assertTrue(self.player._queue.is_started(bb))
+
+    def test_click_in_idle_with_finished_current_selects_other(self) -> None:
+        self.start_with(A0, A1)
+        self.finish()
+        self.finish()
+        self.player._on_entry(self.joined())
+        self.manual()
+        self.arrive(B0)
+        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        starts = list(self.playback.starts)
+        self.player.play_message(self.player._queue.messages[1])
+        bb = self.state().messages[1]
+        self.assertEqual(("stopped", "bb", 0.0), (self.state().status, self.token(),
+                                                  self.player._position))
+        self.assertEqual(starts, self.playback.starts)
+        self.assertFalse(self.player._queue.is_started(bb))
+        # покинутое aa доиграно и начато: прослушано
+        self.assertTrue(self.state().messages[0].heard)
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertEqual(("stopped", "aa"), (self.state().status, self.token()))
+        self.assertEqual(starts, self.playback.starts)
+
     def stop_on_bb_manually(self, tail: int = 5) -> None:
         """Без автовоспроизведения доиграно aa: текущее — bb, не начатое (stopped на 0)."""
         self.manual(tail)

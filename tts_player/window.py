@@ -293,7 +293,7 @@ class PlayerWindow(Gtk.Window):
         self._show_rows(rows(state))
 
     def _on_row_activated(self, _list, row: Gtk.ListBoxRow) -> None:
-        """Клик по строке: сообщение i-й строки играет с начала."""
+        """Клик по строке: сообщение i-й строки выбирается (играет по play/pause)."""
         self._player.play_message(self._shown_messages[row.get_index()])
 
     def _show_rows(self, items: list[MessageRow]) -> None:
