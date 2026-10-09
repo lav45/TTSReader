@@ -34,6 +34,13 @@
   `speed`, `session_id`, `project`, …). Хук пишет в неё только при живом демоне.
 - Звук демона идёт через обёртку `paplay` в буфер главного экрана — сообщение, озвученное
   повторно через демон, придёт туда как новое, если его не пометить.
+- Проба 2026-10-09: `claude-tts speak --from-hook --hook-type stop` с HOME=<каталог>, где лежат
+  копии `config.json` и `sessions.d/` и свежий `daemon.heartbeat`, пишет задачу в
+  `<каталог>/.claude-tts/queue/` (отфильтрованный текст, `persona`, `speed`, `voice_sherpa`,
+  `speaker_sherpa`, `session_id`); настоящая очередь не тронута. Сессия берётся из
+  `transcript_path` (`/projects/<проект>/`). Хук пишет в `<каталог>/.claude-tts/`: `debug.log`,
+  `active/`, `queue/`; водяной знак «уже сказано» — в `/tmp/claude_tts_spoken_<uuid>.state`
+  (не зависит от HOME).
 - Синтез в файл в обход очереди — `daemon_generate_speech` (срез (10), процесс синтеза
   `tts_player/synth_worker.py`).
 
