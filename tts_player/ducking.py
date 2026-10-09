@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from tts_player.atomic_json import write_json
@@ -21,9 +23,13 @@ PID_PROPERTY = "application.process.id"
 class Ducker:
     """Снижает и возвращает громкость чужих потоков (все, кроме процесса own_pid)."""
 
-    def __init__(self, state_file: Path, own_pid: int) -> None:
+    MIN_AGE_S = 5.0
+
+    def __init__(self, state_file: Path, own_pid: int, clock: Callable[[], float] = time.monotonic) -> None:
         self._state_file = state_file
         self._own_pid = own_pid
+        self._clock = clock
+        self._first_seen: dict[tuple, float] = {}
         self._saved: dict[int, dict] = {}
         self._percent: int | None = None
 
@@ -43,7 +49,10 @@ class Ducker:
         if inputs is None:
             return
         self._percent = percent
-        self._lower(self._foreign(inputs))
+        foreign = self._foreign(inputs)
+        for index, entry in foreign.items():
+            self._first_seen[self._key(index, entry)] = float("-inf")
+        self._lower(foreign)
 
     def refresh(self) -> None:
         """Приглушить потоки, появившиеся после duck."""
@@ -52,12 +61,18 @@ class Ducker:
         inputs = self._list_inputs()
         if inputs is None:
             return
-        fresh = {
-            index: entry
-            for index, entry in self._foreign(inputs).items()
-            if index not in self._saved or self._saved[index]["name"] != entry["name"]
-            or self._saved[index]["pid"] != entry["pid"]
-        }
+        now = self._clock()
+        foreign = self._foreign(inputs)
+        keys = {self._key(index, entry) for index, entry in foreign.items()}
+        self._first_seen = {key: seen for key, seen in self._first_seen.items() if key in keys}
+        fresh = {}
+        for index, entry in foreign.items():
+            saved = self._saved.get(index)
+            if saved is not None and saved["name"] == entry["name"] and saved["pid"] == entry["pid"]:
+                continue
+            first_seen = self._first_seen.setdefault(self._key(index, entry), now)
+            if now - first_seen >= self.MIN_AGE_S:
+                fresh[index] = entry
         self._lower(fresh)
 
     def restore(self) -> None:
@@ -68,6 +83,7 @@ class Ducker:
         saved = self._saved
         self._saved = {}
         self._percent = None
+        self._first_seen = {}
         if saved:
             self._apply(saved, self._present())
         self._remove_state()
@@ -129,6 +145,11 @@ class Ducker:
                 continue
             result[index] = {"volumes": volumes, "name": name, "pid": pid}
         return result
+
+    @staticmethod
+    def _key(index: int, entry: dict) -> tuple:
+        """Идентичность потока для учёта возраста: index + имя + pid."""
+        return index, entry["name"], entry["pid"]
 
     def _lower(self, streams: dict[int, dict]) -> None:
         """Запомнить потоки в state_file и снизить их на self._percent."""

@@ -53,7 +53,8 @@ class DuckerTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.set_inputs([sink_input(1, 200, [60000, 50000]), sink_input(2, OWN_PID, [65536, 65536]),
                          sink_input(3, 300, [40000])])
-        self.ducker = Ducker(self.state, OWN_PID)
+        self.now = 1000.0
+        self.ducker = Ducker(self.state, OWN_PID, clock=lambda: self.now)
 
     def set_inputs(self, inputs):
         self.fixture.write_text(json.dumps(inputs))
@@ -97,6 +98,8 @@ class DuckerTest(unittest.TestCase):
         self.set_inputs([sink_input(1, 200, [30000, 25000]), sink_input(4, 400, [20000, 20000])])
         self.clear_log()
         self.ducker.refresh()
+        self.now += Ducker.MIN_AGE_S
+        self.ducker.refresh()
         self.assertEqual(self.set_calls(), [["set-sink-input-volume", "4", "10000", "10000"]])
         saved = json.loads(self.state.read_text())
         self.assertIn("4", saved["inputs"])
@@ -105,6 +108,8 @@ class DuckerTest(unittest.TestCase):
     def test_duck_twice_acts_as_refresh(self):
         self.ducker.duck(50)
         self.set_inputs([sink_input(1, 200, [30000, 25000]), sink_input(5, 500, [10000])])
+        self.ducker.duck(50)
+        self.now += Ducker.MIN_AGE_S
         self.clear_log()
         self.ducker.duck(50)
         self.assertEqual(self.set_calls(), [["set-sink-input-volume", "5", "5000"]])
@@ -209,10 +214,52 @@ class DuckerTest(unittest.TestCase):
     def test_refresh_treats_reused_index_as_new(self):
         self.ducker.duck(50)
         self.set_inputs([sink_input(1, 999, [20000, 20000]), sink_input(3, 300, [20000])])
+        self.ducker.refresh()
+        self.now += Ducker.MIN_AGE_S
         self.clear_log()
         self.ducker.refresh()
         self.assertEqual(self.set_calls(), [["set-sink-input-volume", "1", "10000", "10000"]])
         self.assertEqual(json.loads(self.state.read_text())["inputs"]["1"]["volumes"], [20000, 20000])
+
+    def test_new_stream_ducked_only_after_min_age(self):
+        self.ducker.duck(50)
+        self.set_inputs([sink_input(1, 200, [30000, 25000]), sink_input(9, 900, [20000])])
+        self.ducker.refresh()
+        self.now += 4.9
+        self.clear_log()
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [])
+        self.assertNotIn("9", json.loads(self.state.read_text())["inputs"])
+        self.set_inputs([sink_input(1, 200, [30000, 25000]), sink_input(9, 900, [24000])])
+        self.now += 0.1
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "9", "12000"]])
+        self.assertEqual(json.loads(self.state.read_text())["inputs"]["9"]["volumes"], [24000])
+
+    def test_short_stream_leaves_no_trace(self):
+        self.ducker.duck(50)
+        self.set_inputs([sink_input(1, 200, [30000, 25000]), sink_input(9, 900, [20000])])
+        self.ducker.refresh()
+        self.now += 3
+        self.set_inputs([sink_input(1, 200, [30000, 25000])])
+        self.clear_log()
+        self.ducker.refresh()
+        self.now += 10
+        self.set_inputs([sink_input(1, 200, [30000, 25000]), sink_input(9, 900, [20000])])
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [])
+        self.assertNotIn("9", json.loads(self.state.read_text())["inputs"])
+
+    def test_preexisting_streams_ducked_immediately(self):
+        self.ducker.duck(30)
+        self.assertEqual(len(self.set_calls()), 2)
+
+    def test_restore_clears_first_seen(self):
+        self.ducker.duck(50)
+        self.set_inputs([sink_input(9, 900, [20000])])
+        self.ducker.refresh()
+        self.ducker.restore()
+        self.assertEqual(self.ducker._first_seen, {})
 
 
 if __name__ == "__main__":
