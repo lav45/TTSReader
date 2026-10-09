@@ -218,11 +218,24 @@ class PlayerWindow(Gtk.Window):
         if items == self._shown_rows:
             return
         self._shown_rows = items
+        focused = self.message_list.get_focus_child()  # строка с фокусом клавиатуры или None
+        focused_index = None if focused is None else focused.get_index()
         for child in self.message_list.get_children():
             self.message_list.remove(child)
         for item in items:
             self.message_list.add(self._row(item))
         self.message_list.show_all()
+        if focused_index is not None:
+            self._restore_focus(items, focused_index)
+
+    def _restore_focus(self, items: list[MessageRow], focused_index: int) -> None:
+        """Перестройка уничтожила строку с фокусом: фокус — на строку текущего сообщения,
+        без текущего — на ту же позицию (не дальше последней), чтобы стрелки и Enter работали."""
+        current = [index for index, item in enumerate(items) if item.current]
+        index = current[0] if current else min(focused_index, len(items) - 1)
+        row = self.message_list.get_row_at_index(index)
+        if row is not None:
+            row.grab_focus()
 
     @staticmethod
     def _row(item: MessageRow) -> Gtk.Box:

@@ -168,15 +168,14 @@ class Player:
 
     def play_message(self, message: Message) -> None:
         """Клик по строке списка: сообщение становится текущим и играет с начала, из любого
-        статуса. Покинутое прослушано, только если завершено (как у next/prev); текущее
-        играет заново и прослушанным не отмечается; вытесненного из очереди нет — без
-        изменений."""
+        статуса. Покинутое прослушано, только если завершено (как у next/prev); клик по
+        текущему и по вытесненному из очереди сообщению ничего не меняет."""
         if not any(message is queued for queued in self._queue.messages):
             return
         current = self._current
         if message is current:
-            self._halt()
-        elif current is not None:
+            return
+        if current is not None:
             self._leave(current)
         self._begin(message)
         self._changed()
