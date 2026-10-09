@@ -4,18 +4,18 @@
     {
       "id": 0,
       "subject": "Task 1: Строки списка сессий в модели отображения",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** `view.session_rows(state)` даёт строки списка сессий и признак доступности кнопок\nактивной сессии.\n\n**Files:**\n- Modify: `tts_player/view.py`\n- Test: `tests/test_view.py`\n\n**Contract:** модель отображения, которую читает окно\n\n```\n@dataclass(frozen=True)\nclass SessionRow:\n    title: str      # \"<project> · <id[:8]>\"; project пуст — NO_PROJECT\n    active: bool\n\ndef session_rows(state: PlayerState) -> list[SessionRow]     # в порядке state.sessions\ndef session_buttons_enabled(state: PlayerState) -> bool      # state.active is not None\n\nrows(state): MessageRow.duration для m.deferred — с PENDING_MARK (текст ещё не отдан демону)\n```\n\n**Acceptance Criteria:**\n- [ ] сессии `Session(\"1dd2b064-b8fd-…\", \"TTSReader\")` и `Session(\"abcdef12-…\", \"\")`, активна первая → `[SessionRow(\"TTSReader · 1dd2b064\", True), SessionRow(\"— · abcdef12\", False)]`\n- [ ] `active None` → все `active False`; `session_buttons_enabled` → `False`\n- [ ] пустой список → `[]`\n- [ ] строка сообщения с `deferred=True` показывает длительность с меткой ожидания (`0:00…`), а не как завершённое тихое сообщение (`rows`)\n\n**Verify:** `python3 -m unittest tests.test_view -v` → `OK`\n\n```json:metadata\n{\"files\": [\"tts_player/view.py\", \"tests/test_view.py\"], \"verifyCommand\": \"python3 -m unittest tests.test_view -v\", \"modelTier\": \"standard\"}\n```"
     },
     {
       "id": 1,
       "subject": "Task 2: Окно — список сессий, мусорка и [stop] активной сессии",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** окно показывает список сессий и управляет активной сессией; `Voicing` удалён.\n\n**Files:**\n- Modify: `tts_player/window.py`, `tts_player/__main__.py`, `README.md`\n- Delete: `tts_player/voicing.py`, `tests/test_voicing.py`\n- Test: `tests/gui_window_cases.py`\n\n**Contract:** что окно зовёт у плеера и чем отвечает на клик\n\n```\nPlayerWindow(player, settings, prefs, text_speaker)        # без voicing\n  session_list: Gtk.ListBox      между рядом служебных кнопок и списком сообщений;\n                                 строки — view.session_rows(state); активная жирная\n  row-activated(i)    → player.select_session(state.sessions[i].id)   (активная — ничего; это решает плеер)\n  clear_button        → player.clear()                     tooltip «Очистить сообщения активной сессии»\n  end_session_button  → player.remove_session(state.active) tooltip «Завершить активную сессию (/tts-off)»\n  clear_button, end_session_button: sensitive = view.session_buttons_enabled(state)\n\npython3 -m tts_player … --tts-flag / --tts-off-hook   → неизвестные аргументы (argparse, exit 2)\n```\n\n**Acceptance Criteria:**\n- [ ] список сессий стоит в контейнере главного экрана между рядом служебных кнопок и прокручиваемым списком сообщений\n- [ ] две сессии в состоянии → две строки с текстами `session_rows`; у активной — жирный шрифт\n- [ ] активация строки неактивной сессии → `select_session` с её id; строки активной → `select_session` с её id (плеер ничего не меняет — проверено его тестами)\n- [ ] мусорка → `player.clear()`; [stop] → `player.remove_session(<активная>)`, ровно один вызов\n- [ ] без активной сессии мусорка и [stop] неактивны\n- [ ] список перестраивается, только когда строки изменились (как `_show_rows` сообщений)\n- [ ] `grep -rn \"Voicing\\|voicing\\|tts-flag\\|tts_flag\\|tts-off-hook\\|claude-tts.on\" tts_player tests README.md` пуст\n- [ ] README: главный экран — список сессий, клик, мусорка, [stop]\n\n**Verify:** `python3 -m unittest tests.test_window_gui tests.test_view -v` → `OK`\n\n```json:metadata\n{\"files\": [\"tts_player/window.py\", \"tts_player/__main__.py\", \"README.md\", \"tests/gui_window_cases.py\"], \"verifyCommand\": \"python3 -m unittest tests.test_window_gui tests.test_view -v\", \"modelTier\": \"standard\"}\n```",
       "blockedBy": [
         0
       ]
     }
   ],
-  "lastUpdated": "2026-10-09T21:39:11"
+  "lastUpdated": "2026-10-09T21:57:41"
 }
