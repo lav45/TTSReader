@@ -74,7 +74,7 @@ class PaplayWrapperTest(unittest.TestCase):
         self.assertRegex(names[0], rf"^\d{{19}}_{expected_id}_tts_queue_S_tok_s0\.wav$")
 
     def test_task_id_from_playback_json(self):
-        self.write_playback('{"paused": false, "current_message": {"id": "a1b2c3d4e5f60718", "x": 1}}')
+        self.write_playback('{"paused": false, "current_message": {"id": "a1b2c3d4e5f60718", "source": "tts-player"}}')
         self.assert_single_name("a1b2c3d4e5f60718")
 
     def test_unknown_without_playback_json(self):
@@ -101,6 +101,19 @@ class PaplayWrapperTest(unittest.TestCase):
                 self.write_playback(text)
                 self.inbox_clear()
                 self.assert_single_name("unknown")
+
+    def test_without_jq_logs_warning_and_names_unknown(self):
+        """jq не найден (заглушка с кодом 127, как у bash без команды): предупреждение в
+        journal, файл всё равно в буфере с id "unknown"."""
+        jq = self.stubs / "jq"
+        jq.write_text("#!/bin/bash\nexit 127\n")
+        jq.chmod(0o755)
+        self.write_playback('{"current_message": {"id": "a1b2c3d4e5f60718", "source": "x"}}')
+        self.assert_single_name("unknown")
+        self.assertTrue(self.logged.exists(), "logger не вызван")
+        line = self.logged.read_text().strip()
+        self.assertTrue(line.startswith("-t tts-player-paplay "), line)
+        self.assertIn("jq", line)
 
     def inbox_clear(self):
         for p in self.inbox.glob("*") if self.inbox.exists() else []:

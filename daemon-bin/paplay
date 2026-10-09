@@ -10,7 +10,8 @@
 # Файл:  {recv_ns}_{id}_{имя WAV}, recv_ns = date +%s%N, поэтому порядок имён по строке
 #        совпадает с порядком вызовов. id - текущая задача демона: current_message.id
 #        из $HOME/.claude-tts/playback.json, если это [0-9a-f]{1,64}; нет файла, поля,
-#        jq или другой вид - "unknown" (копия от этого не падает).
+#        jq или другой вид - "unknown" (копия от этого не падает). Нет jq - ещё и
+#        предупреждение в journal (logger -t tts-player-paplay).
 # Запись атомарная: сначала cp в .{имя}.part, затем mv, плеер .part не видит.
 #
 # Вызов: paplay [опции] <wav>. Опции игнорируются, <wav> - последний аргумент.
@@ -42,6 +43,9 @@ mkdir -p "$INBOX" || fail "не удалось создать буфер $INBOX"
 
 TASK_ID="$(jq -r '.current_message.id | select(type == "string")' \
     "$HOME/.claude-tts/playback.json" 2>/dev/null)"
+# 127 - jq не найден: без него каждый файл получает "unknown", и плеер не склеит проходы
+# одной задачи. Это не сбой копии, поэтому только предупреждение в journal.
+[ $? -eq 127 ] && logger -t tts-player-paplay "jq не найден, id задачи - unknown"
 [[ "$TASK_ID" =~ ^[0-9a-f]{1,64}$ ]] || TASK_ID="unknown"
 
 FILE="$(date +%s%N)_${TASK_ID}_$NAME"

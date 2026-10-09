@@ -98,23 +98,15 @@ class PlayerHistoryE2ETest(e2e.PlayerProcessCase):
         self.daemon_saves(session, sentences[2:])
         lines = self.lines_until("ended ")
         self.assertEqual(f"ended {session} aaaaaa", lines[-1])
-        lines += self.lines_for(e2e.QUIET + 2 * SECONDS)
         played += [line for line in lines if line.startswith("playing ")]
+        for _ in range(len(sentences) - len(played)):
+            lines += self.lines_until("playing ")
+            played.append(lines[-1])
         self.assertEqual([f"_0123456789abcdef_{p.name}" for p in sentences],
                          [line[line.index("_"):] for line in played])
         self.assertEqual(1, len([line for line in lines if line.startswith("ended ")]), lines)
         self.assertEqual([], [line for line in lines if line.startswith("complete ")])
-
-    def lines_for(self, seconds: float) -> list[str]:
-        """Все строки за seconds."""
-        lines = []
-        deadline = time.monotonic() + seconds
-        while (left := deadline - time.monotonic()) > 0:
-            try:
-                lines.append(self.lines.get(timeout=left))
-            except queue.Empty:
-                break
-        return lines
+        self.assert_quiet()
 
     def test_joined_file_of_other_length_leaves_sentences(self) -> None:
         session = uuid.uuid4().hex

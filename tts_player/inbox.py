@@ -15,9 +15,10 @@ from tts_player.model import UNKNOWN_TASK, Sentence  # noqa: E402
 log = logging.getLogger("tts_player.inbox")
 
 # Имя файла от обёртки paplay (контракт (13)): <recv_ns>_<task_id>_<имя WAV демона>.
+# Без <task_id>_ — имя обёртки прежнего вида (файл пережил обновление в inbox/): id "unknown".
 NAME_PATTERN = re.compile(
-    r"^(?P<recv_ns>\d{19})_(?P<task_id>[0-9a-f]{1,64}|" + UNKNOWN_TASK + r")"
-    r"_tts_queue_(?P<session_id>.+)_(?P<token>[0-9a-f]+)_s(?P<index>\d+)\.wav$"
+    r"^(?P<recv_ns>\d{19})_(?:(?P<task_id>[0-9a-f]{1,64}|" + UNKNOWN_TASK + r")_)?"
+    r"tts_queue_(?P<session_id>.+)_(?P<token>[0-9a-f]+)_s(?P<index>\d+)\.wav$"
 )
 
 
@@ -25,8 +26,8 @@ class Inbox:
     """Следит за inbox/ и отдаёт предложения в on_sentence по порядку приёма.
 
     Файл переносится в store/ (rename на одной tmpfs) под тем же именем.
-    Имена с точкой в начале (.part обёртки) не читаются; имя не по NAME_PATTERN (в том
-    числе прежнего вида, без id задачи) остаётся в inbox/ с WARNING.
+    Имена с точкой в начале (.part обёртки) не читаются; имя не по NAME_PATTERN остаётся
+    в inbox/ с WARNING. Имя прежнего вида, без id задачи, забирается с id "unknown".
 
     store/ принадлежит одному запуску плеера: start() удаляет остатки прошлого (после
     падения), штатный выход возвращает незаконченное в inbox/ через put_back().
@@ -133,7 +134,7 @@ class Inbox:
             return
         sentence = Sentence(
             recv_ns=int(match["recv_ns"]),
-            task_id=match["task_id"],
+            task_id=match["task_id"] or UNKNOWN_TASK,
             session_id=match["session_id"],
             token=match["token"],
             index=int(match["index"]),

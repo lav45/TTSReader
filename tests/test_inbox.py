@@ -117,15 +117,15 @@ class InboxTest(unittest.TestCase):
         self.inbox.start()
         self.assertEqual(["unknown"], [s.task_id for s in self.got])
 
-    def test_name_without_task_id_stays_and_warns(self):
-        """Имя прежнего вида (до id задачи в обёртке) — не предложение: WARNING, файл в inbox."""
+    def test_name_without_task_id_is_taken_as_unknown(self):
+        """Имя прежнего вида (обёртка до id задачи, файл остался в inbox/ после обновления) —
+        предложение с id задачи "unknown"."""
         name = "1760000000123456789_tts_queue_S_ab_s0.wav"
         self.drop(name)
-        with self.assertLogs("tts_player.inbox", level="WARNING") as logs:
-            self.inbox.start()
-        self.assertTrue(any(name in line for line in logs.output))
-        self.assertTrue((self.inbox_dir / name).exists())
-        self.assertEqual(self.got, [])
+        self.inbox.start()
+        self.assertEqual([("unknown", "S", "ab", 0, self.store_dir / name)],
+                         [(s.task_id, s.session_id, s.token, s.index, s.path) for s in self.got])
+        self.assertFalse((self.inbox_dir / name).exists())
 
     def test_task_id_not_hex_stays_and_warns(self):
         name = "1760000000123456789_XYZ_tts_queue_S_ab_s0.wav"
@@ -138,7 +138,8 @@ class InboxTest(unittest.TestCase):
     def test_file_from_wrapper_carries_task_id_from_playback_json(self):
         claude_tts = self.root / ".claude-tts"
         claude_tts.mkdir()
-        (claude_tts / "playback.json").write_text('{"current_message": {"id": "0123abcd"}}')
+        (claude_tts / "playback.json").write_text(
+            '{"current_message": {"id": "0123abcd", "source": "tts-player"}}')
         self.inbox.start()
         self.run_paplay("tts_queue_sess-1_ab12_s3.wav")
         self.spin(until=lambda: self.got)
