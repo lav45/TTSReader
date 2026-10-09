@@ -101,7 +101,7 @@ class Ducker:
         foreign = self._foreign(inputs)
         keys = {self._key(index, entry) for index, entry in foreign.items()}
         self._first_seen = {key: seen for key, seen in self._first_seen.items() if key in keys}
-        self._orphan_gone(foreign)
+        self._orphan_gone(foreign, set(self._first_seen))
         unsaved = {index: entry for index, entry in foreign.items() if not self._is_saved(index, entry)}
         matches = self._claim(unsaved)
         fresh = {}
@@ -134,7 +134,7 @@ class Ducker:
 
         Нечего возвращать — pactl не зовём. Не удалось получить список потоков —
         set пробуем вслепую для каждого запомненного."""
-        saved, percent = self._saved, self._percent
+        saved, percent, seen = self._saved, self._percent, set(self._first_seen)
         self._saved = {}
         self._percent = None
         self._lowered_once = False
@@ -144,7 +144,7 @@ class Ducker:
             present = self._present()
             self._apply(saved, present)
             if present is not None and percent is not None:
-                self._add_orphans(saved, present, percent)
+                self._add_orphans(saved, present, percent, seen)
         self._remove_state()
 
     def recover(self) -> None:
@@ -174,7 +174,7 @@ class Ducker:
         saved = self._saved.get(index)
         return saved is not None and saved["name"] == entry["name"] and saved["pid"] == entry["pid"]
 
-    def _orphan_gone(self, foreign: dict[int, dict]) -> None:
+    def _orphan_gone(self, foreign: dict[int, dict], seen: set) -> None:
         """Запомненные потоки, которых нет в списке, — сироты; из запомненных они уходят."""
         present = {index: (entry["name"], entry["pid"]) for index, entry in foreign.items()}
         gone = {index: entry for index, entry in self._saved.items()
@@ -184,18 +184,20 @@ class Ducker:
         for index in gone:
             del self._saved[index]
         self._write_state()
-        self._add_orphans(gone, present, self._percent)
+        self._add_orphans(gone, present, self._percent, seen)
 
-    def _add_orphans(self, saved: dict[int, dict], present: dict, percent: int) -> None:
+    def _add_orphans(self, saved: dict[int, dict], present: dict, percent: int, seen: set) -> None:
         """Сироты из saved — запомненных потоков, которых (с тем же именем и pid) нет среди present.
 
-        known — потоки приложения, звучащие в этот момент: сирота их не трогает."""
+        known — потоки приложения, уже виденные в прежних проходах (seen — их ключи
+        index+имя+pid): сирота их не трогает. Появившийся в этом же проходе (перезапущенный
+        трек браузера) — кандидат."""
         added = False
         for index, entry in saved.items():
             name = entry["name"]
             if present.get(index) == (name, entry["pid"]) or name is None:
                 continue
-            known = [[i, pid] for i, (n, pid) in present.items() if n == name]
+            known = [[i, pid] for i, (n, pid) in present.items() if n == name and (i, n, pid) in seen]
             ducked = [round(v * percent / 100) for v in entry["volumes"]]
             self._orphans[name] = {"original": entry["volumes"], "ducked": ducked, "known": known}
             added = True

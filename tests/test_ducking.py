@@ -492,6 +492,26 @@ class DuckerTest(unittest.TestCase):
         self.assertEqual(self.set_calls(), [])
         self.assertFalse(self.ducker.has_orphans)
 
+    def test_recreated_stream_in_same_pass_is_repaired(self):
+        self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [20000, 20000])])
+        self.ducker.duck(30)
+        self.set_inputs([self.tab(5, 200, [6000, 6000]), self.tab(8, 200, [18000, 18000])])
+        self.clear_log()
+        self.ducker.refresh()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "8", "18000", "18000"]])
+        self.assertEqual(json.loads(self.state.read_text())["inputs"]["8"]["volumes"], [60000, 60000])
+        self.assertFalse(self.ducker.has_orphans)
+
+    def test_recreated_stream_in_same_pass_returned_after_speech(self):
+        self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [20000, 20000])])
+        self.ducker.duck(30)
+        self.set_inputs([self.tab(5, 200, [6000, 6000]), self.tab(8, 200, [18000, 18000])])
+        self.ducker.restore()
+        self.assertEqual(self.orphans_data()["Firefox"]["known"], [[5, "200"]])
+        self.clear_log()
+        self.ducker.watch()
+        self.assertEqual(self.set_calls(), [["set-sink-input-volume", "8", "60000", "60000"]])
+
     def test_muted_preexisting_stream_not_raised_with_duck_zero(self):
         self.set_inputs([self.tab(1, 200, [60000, 60000]), self.tab(5, 200, [0, 0])])
         self.ducker.duck(0)
