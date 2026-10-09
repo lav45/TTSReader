@@ -69,3 +69,26 @@ def play_stop_label(state: PlayerState) -> str:
 
 def pause_label(state: PlayerState) -> str:
     return "⏵" if state.status == "paused" else "⏸"
+
+
+def current_title(state: PlayerState) -> str:
+    """Заголовок окна: строка текущего сообщения; без текущего — пусто."""
+    return next((row.title for row in rows(state) if row.current), "")
+
+
+def pause_enabled(state: PlayerState) -> bool:
+    return state.status in ("playing", "paused")
+
+
+def _current_index(state: PlayerState) -> int | None:
+    return next((i for i, m in enumerate(state.messages) if m is state.current), None)
+
+
+def prev_enabled(state: PlayerState) -> bool:
+    index = _current_index(state)
+    return index is not None and index > 0
+
+
+def next_enabled(state: PlayerState) -> bool:
+    index = _current_index(state)
+    return index is not None and index < len(state.messages) - 1

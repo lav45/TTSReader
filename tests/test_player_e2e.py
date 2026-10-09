@@ -61,11 +61,16 @@ class PlayerProcessCase(unittest.TestCase):
         env["XDG_RUNTIME_DIR"] = str(self.runtime)
         return env
 
+    @staticmethod
+    def command(*args: str) -> list[str]:
+        """Процесс плеера без окна и трея: e2e не открывают ничего на экране пользователя."""
+        return [sys.executable, "-m", "tts_player", "--no-gui", *args]
+
     def start_player(self, sink: str = "fakesink", history: Path | None = None) -> None:
         history = self.history if history is None else history
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "tts_player", "--audio-sink", sink,
-             "--history-dir", str(history), "--history-db", str(self.db)],
+            self.command("--audio-sink", sink,
+                         "--history-dir", str(history), "--history-db", str(self.db)),
             cwd=ROOT, env=self.env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
@@ -198,10 +203,21 @@ class PlayerE2ETest(PlayerProcessCase):
     def test_without_runtime_dir_exits_1_with_message(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
         result = subprocess.run(
-            [sys.executable, "-m", "tts_player", "--audio-sink", "fakesink"],
+            self.command("--audio-sink", "fakesink"),
             cwd=ROOT, env=env, capture_output=True, text=True, timeout=WAIT)
         self.assertEqual(1, result.returncode)
         self.assertIn("XDG_RUNTIME_DIR", result.stderr)
+
+    def test_gui_without_display_exits_1_with_message(self) -> None:
+        """Без --no-gui и без графической сессии: окно открыть негде — выход 1."""
+        env = {k: v for k, v in self.env().items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+        result = subprocess.run(
+            [sys.executable, "-m", "tts_player", "--audio-sink", "fakesink",
+             "--history-dir", str(self.history), "--history-db", str(self.db)],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=WAIT)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("графическ", result.stderr)
+        self.assertFalse(self.inbox.exists())
 
     def test_sigterm_exits_0(self) -> None:
         self.start_player()

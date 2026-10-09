@@ -4,7 +4,8 @@ from pathlib import Path
 
 from tts_player.model import Message, Sentence
 from tts_player.player import PlayerState
-from tts_player.view import play_stop_label, pause_label, position_label, rows
+from tts_player.view import (current_title, next_enabled, pause_enabled, play_stop_label,
+                             pause_label, position_label, prev_enabled, rows)
 
 CREATED_AT = 1_700_000_000.0
 
@@ -83,6 +84,35 @@ class LabelsTest(unittest.TestCase):
         for status, (play, pause) in expected.items():
             st = state(status, m)
             self.assertEqual((play_stop_label(st), pause_label(st)), (play, pause), status)
+
+
+class ControlsTest(unittest.TestCase):
+    def test_pause_only_while_playing_or_paused(self):
+        m = message()
+        expected = {"playing": True, "paused": True, "stopped": False, "idle": False}
+        for status, enabled in expected.items():
+            self.assertEqual(pause_enabled(state(status, m, messages=[m])), enabled, status)
+
+    def test_prev_next_at_edges(self):
+        a, b, c = message("a"), message("b"), message("c")
+        cases = {a: (False, True), b: (True, True), c: (True, False)}
+        for current, (prev, following) in cases.items():
+            st = state("playing", current, messages=[a, b, c])
+            self.assertEqual((prev_enabled(st), next_enabled(st)), (prev, following),
+                             current.token)
+
+    def test_prev_next_without_current(self):
+        st = state(messages=[message("a"), message("b")])
+        self.assertEqual((prev_enabled(st), next_enabled(st)), (False, False))
+
+    def test_current_title(self):
+        a = message("a", created_at=CREATED_AT, project="p")
+        b = message("b", created_at=CREATED_AT + 1, project="q")
+        self.assertEqual(current_title(state("playing", b, messages=[a, b])),
+                         f"{hms(CREATED_AT + 1)}  q")
+
+    def test_current_title_without_current(self):
+        self.assertEqual(current_title(state(messages=[message("a")])), "")
 
 
 if __name__ == "__main__":
