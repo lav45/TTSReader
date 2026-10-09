@@ -41,9 +41,15 @@ import wave
 def daemon_generate_speech(text, persona, output_file):
     with open(os.environ["FAKE_LOG"], "a") as log:
         log.write(persona + "|" + text + "\\n")
+    if os.environ.get("FAKE_NOISE"):
+        print("noise")
     time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
     fail_at = os.environ.get("FAKE_FAIL_AT", "")
+    if os.environ.get("FAKE_BAD_WAV"):
+        output_file.write_bytes(b"not a wav")
+        return True
     if fail_at and text == fail_at:
+        output_file.write_bytes(b"partial")
         if os.environ.get("FAKE_FAIL_MODE") == "raise":
             raise RuntimeError("boom")
         return False
@@ -79,7 +85,7 @@ class SynthWorkerTest(unittest.TestCase):
         env.update(extra)
         return env
 
-    def start(self, text, **kwargs):
+    def start(self, **kwargs):
         return subprocess.Popen(
             [sys.executable, str(WORKER), str(self.out)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -87,7 +93,7 @@ class SynthWorkerTest(unittest.TestCase):
         )
 
     def run_worker(self, text, **kwargs):
-        proc = self.start(text, **kwargs)
+        proc = self.start(**kwargs)
         stdout, _ = proc.communicate(text, timeout=30)
         lines = [json.loads(line) for line in stdout.splitlines()]
         return proc.returncode, lines
@@ -132,6 +138,40 @@ class SynthWorkerTest(unittest.TestCase):
                 self.assertIn("error", lines[-1])
                 self.assertFalse(any(line.get("done") for line in lines))
 
+    def test_stdout_is_pure_protocol(self):
+        proc = self.start(FAKE_NOISE="1")
+        stdout, stderr = proc.communicate("Раз. Два.", timeout=30)
+        self.assertEqual(proc.returncode, 0)
+        lines = [json.loads(line) for line in stdout.splitlines()]
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(stderr.count("noise"), 2)
+
+    def test_tmp_name_never_in_stdout_and_failure_leaves_no_wav(self):
+        code, lines = self.run_worker("Раз. Два.", FAKE_FAIL_AT="Два.")
+        self.assertEqual(code, 1)
+        self.assertNotIn(".tmp", json.dumps(lines))
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["0.wav"])
+
+    def test_bad_wav_gives_error_line(self):
+        code, lines = self.run_worker("Раз.", FAKE_BAD_WAV="1")
+        self.assertEqual(code, 1)
+        self.assertIn("error", lines[-1])
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_unwritable_out_dir_gives_error_line(self):
+        blocker = Path(self.tmp.name) / "blocker"
+        blocker.write_text("file")
+        self.out = blocker / "sub"
+        code, lines = self.run_worker("Раз.")
+        self.assertEqual(code, 1)
+        self.assertIn("error", lines[-1])
+
+    def test_import_crash_gives_exit_2(self):
+        (Path(self.fake_path) / "claude_code_tts" / "bridge.py").write_text("raise RuntimeError('x')")
+        code, lines = self.run_worker("Раз.")
+        self.assertEqual(code, 2)
+        self.assertIn("error", lines[0])
+
     def test_missing_package(self):
         code, lines = self.run_worker("Раз.", with_package=False)
         self.assertEqual(code, 2)
@@ -147,7 +187,7 @@ class SynthWorkerTest(unittest.TestCase):
 
     def test_first_path_arrives_before_last_synthesized(self):
         delay = 0.6
-        proc = self.start("Раз. Два. Три.", FAKE_DELAY=str(delay))
+        proc = self.start(FAKE_DELAY=str(delay))
         proc.stdin.write("Раз. Два. Три.")
         proc.stdin.close()
         started = time.monotonic()

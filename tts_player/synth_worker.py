@@ -17,9 +17,13 @@ EXIT_SYNTH_FAILED = 1
 EXIT_IMPORT_FAILED = 2
 
 
+PROTOCOL_STREAM = sys.stdout
+
+
 def emit(message: dict) -> None:
-    """Печатает одну строку JSON и сразу сбрасывает буфер."""
-    print(json.dumps(message, ensure_ascii=False), flush=True)
+    """Печатает одну строку JSON в поток протокола и сразу сбрасывает буфер."""
+    PROTOCOL_STREAM.write(json.dumps(message, ensure_ascii=False) + "\n")
+    PROTOCOL_STREAM.flush()
 
 
 def wav_duration(path: Path) -> float:
@@ -28,23 +32,41 @@ def wav_duration(path: Path) -> float:
         return wav.getnframes() / wav.getframerate()
 
 
+def synthesize(sentence: str, persona: str, path: Path, synthesize_speech) -> float:
+    """Пишет предложение в `<path>.tmp`, переименовывает в path после успеха; возвращает длительность.
+
+    Недописанный файл (убитый процесс) остаётся под именем .tmp и не выглядит готовым.
+    """
+    partial = path.with_name(path.name + ".tmp")
+    try:
+        if not synthesize_speech(sentence, persona, partial):
+            raise RuntimeError("синтез не удался")
+        duration = wav_duration(partial)
+        partial.replace(path)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return duration
+
+
 def main(argv: list[str]) -> int:
     """Синтезирует предложения текста из stdin в WAV-файлы каталога argv[1]."""
+    sys.stdout = sys.stderr  # посторонние print из claude_code_tts не должны попасть в протокол
     out_dir = Path(argv[1])
     try:
         from claude_code_tts.bridge import split_sentences
         from claude_code_tts.config import load_raw_config
         from claude_code_tts.daemon import daemon_generate_speech
-    except ImportError as error:
-        emit({"error": f"import claude_code_tts: {error}"})
+    except Exception as error:
+        emit({"error": f"import claude_code_tts: {error!r}"})
         return EXIT_IMPORT_FAILED
 
     text = sys.stdin.read()
     sentences = split_sentences(text) if text.strip() else []
     emit({"count": len(sentences)})
     if sentences:
-        out_dir.mkdir(parents=True, exist_ok=True)
         try:
+            out_dir.mkdir(parents=True, exist_ok=True)
             persona = load_raw_config()["active_persona"]
         except Exception as error:
             emit({"error": f"голос не определён: {error!r}"})
@@ -55,14 +77,11 @@ def main(argv: list[str]) -> int:
         for index, sentence in enumerate(sentences):
             path = out_dir / f"{index}.wav"
             try:
-                ok = daemon_generate_speech(sentence, persona, path)
+                duration = synthesize(sentence, persona, path, daemon_generate_speech)
             except Exception as error:
                 emit({"error": f"предложение {index}: {error}"})
                 return EXIT_SYNTH_FAILED
-            if not ok:
-                emit({"error": f"предложение {index}: синтез не удался"})
-                return EXIT_SYNTH_FAILED
-            emit({"index": index, "path": str(path), "duration": wav_duration(path)})
+            emit({"index": index, "path": str(path), "duration": duration})
     emit({"done": True})
     return EXIT_OK
 
