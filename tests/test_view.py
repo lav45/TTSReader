@@ -6,9 +6,9 @@ from tts_player.model import Message, Sentence
 from tts_player.player import PlayerState
 from tts_player.sessions import Session
 from tts_player.text_speaker import TextState
-from tts_player.view import (MessageRow, SessionRow, next_enabled, play_pause_enabled,
-                             play_pause_label, position_label, prev_enabled, rows,
-                             session_buttons_enabled, session_rows, text_play_enabled,
+from tts_player.view import (MessageRow, SessionRow, clear_enabled, next_enabled,
+                             play_pause_enabled, play_pause_label, position_label,
+                             prev_enabled, rows, session_rows, text_play_enabled,
                              text_play_pause_label, text_position_label, tree_rows)
 
 CREATED_AT = 1_700_000_000.0
@@ -110,13 +110,13 @@ class SessionRowsTest(unittest.TestCase):
         self.assertEqual(result, [
             SessionRow("TTSReader · 1dd2b064", "3", True, self.SESSIONS[0].id),
             SessionRow("— · abcdef12", "12", False, self.SESSIONS[1].id)])
-        self.assertTrue(session_buttons_enabled(
+        self.assertTrue(clear_enabled(
             state(sessions=self.SESSIONS, active=self.SESSIONS[0].id)))
 
     def test_none_open(self):
         current = state(sessions=self.SESSIONS)
         self.assertEqual([r.open for r in session_rows(current)], [False, False])
-        self.assertFalse(session_buttons_enabled(current))
+        self.assertFalse(clear_enabled(current))
 
     def test_empty(self):
         self.assertEqual(session_rows(state()), [])

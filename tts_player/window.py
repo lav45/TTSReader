@@ -16,9 +16,9 @@ from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import PlayerSettings, Prefs  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.text_speaker import SOUNDING_STATUSES, TextSpeaker, TextState  # noqa: E402
-from tts_player.view import (MessageRow, SessionRow, next_enabled,  # noqa: E402
+from tts_player.view import (MessageRow, SessionRow, clear_enabled, next_enabled,  # noqa: E402
                              play_pause_enabled, play_pause_label, position_label,
-                             prev_enabled, session_buttons_enabled, text_play_enabled,
+                             prev_enabled, text_play_enabled,
                              text_play_pause_label, text_position_label, tree_rows)
 
 log = logging.getLogger(__name__)
@@ -95,8 +95,7 @@ class PlayerWindow(Gtk.Window):
     """Три экрана в одном Gtk.Stack.
 
     "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить сообщения
-    активной сессии», «Завершить активную сессию» (оба активны, пока есть активная сессия),
-    справа «Озвучить свой текст»; дерево сессий — папки (открыта одна или ни одной: открытая —
+    активной сессии» (активна, пока есть активная сессия), справа «Озвучить свой текст»; дерево сессий — папки (открыта одна или ни одной: открытая —
     активная), дорожки открытой — под её заголовком с отступом; ползунок позиции; ряд со
     временем слева и prev / play-pause / next справа.
     "settings": хвост очереди и приглушение (PlayerSettings), голос и скорость claude-tts
@@ -127,7 +126,6 @@ class PlayerWindow(Gtk.Window):
         # сообщения последнего состояния: строки равны по тексту, а объекты Message могут быть
         # новыми, поэтому снимок обновляется на каждом состоянии, а не только при перестройке
         self._shown_messages: list[Message] = []
-        self._active_session: str | None = None
         self.set_default_size(420, 360)
 
         self.slider = SeekSlider(player.seek)
@@ -141,9 +139,6 @@ class PlayerWindow(Gtk.Window):
             "user-trash-symbolic", "Очистить сообщения активной сессии", player.clear)
         self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
                                                  self._open_settings)
-        self.end_session_button = self._icon_button(
-            "system-shutdown-symbolic", "Завершить активную сессию",
-            self._end_active_session)
         self.text_button = self._icon_button("audio-volume-high-symbolic", "Озвучить свой текст",
                                              self._open_text)
 
@@ -161,7 +156,7 @@ class PlayerWindow(Gtk.Window):
 
         # ряд служебных значков наверху: «Свой текст» прижат к правому краю
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        for button in (self.settings_button, self.clear_button, self.end_session_button):
+        for button in (self.settings_button, self.clear_button):
             tools.pack_start(button, False, False, 0)
         tools.pack_end(self.text_button, False, False, 0)
 
@@ -405,16 +400,9 @@ class PlayerWindow(Gtk.Window):
         self.next_button.set_sensitive(next_enabled(state))
         self.scale.set_sensitive(state.current is not None)
         self.slider.show(state.position_s, state.length_s)
-        enabled = session_buttons_enabled(state)
-        self.clear_button.set_sensitive(enabled)
-        self.end_session_button.set_sensitive(enabled)
-        self._active_session = state.active
+        self.clear_button.set_sensitive(clear_enabled(state))
         self._shown_messages = state.messages
         self._show_rows(tree_rows(state))
-
-    def _end_active_session(self) -> None:
-        # без активной сессии кнопка неактивна; состояние и клик идут в одном потоке Gtk
-        self._player.remove_session(self._active_session)
 
     def _on_row_activated(self, _list, row: Gtk.ListBoxRow) -> None:
         """Клик по заголовку закрытой папки открывает её сессию, открытой — закрывает; клик по

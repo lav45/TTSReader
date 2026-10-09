@@ -222,29 +222,19 @@ class PlayerWindowTest(unittest.TestCase):
             button.clicked()
             self.assertEqual([(call,)], self.player.calls, call)
 
-    def test_end_session_button_is_third_icon_without_text(self) -> None:
+    def test_top_row_has_settings_and_clear_only_no_end_session(self) -> None:
         w = self.window
-        button = w.end_session_button
-        self.assertFalse(button.get_label())
-        self.assertEqual("system-shutdown-symbolic", icon_name(button))
-        self.assertEqual("Завершить активную сессию", button.get_tooltip_text())
         self.assertEqual("Очистить сообщения активной сессии", w.clear_button.get_tooltip_text())
         row = w.clear_button.get_parent()
-        self.assertEqual([w.settings_button, w.clear_button, button], row.get_children()[:3])
+        self.assertEqual([w.settings_button, w.clear_button, w.text_button], row.get_children())
+        self.assertFalse(hasattr(w, "end_session_button"))
 
-    def test_end_session_button_removes_active_session_once(self) -> None:
-        self.player.calls.clear()
-        self.window.end_session_button.clicked()
-        self.assertEqual([("remove_session", SESSIONS[0].id)], self.player.calls)
-
-    def test_session_buttons_follow_active_session(self) -> None:
+    def test_clear_button_follows_active_session(self) -> None:
         w = self.window
         self.assertTrue(w.clear_button.get_sensitive())
-        self.assertTrue(w.end_session_button.get_sensitive())
         self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
                                  sessions=SESSIONS))
         self.assertFalse(w.clear_button.get_sensitive())
-        self.assertFalse(w.end_session_button.get_sensitive())
 
     def row_box(self, index: int) -> Gtk.Box:
         return self.window.tree.get_row_at_index(index).get_child()
@@ -292,20 +282,17 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual(["▸", "▸"], [self.texts(i)[0] for i in (0, 1)])
         self.assertEqual(2, len(self.window.tree.get_children()))
 
-    def test_session_buttons_follow_active_session(self) -> None:
+    def test_clear_button_follows_active_session(self) -> None:
         w = self.window
         self.assertTrue(w.clear_button.get_sensitive())
-        self.assertTrue(w.end_session_button.get_sensitive())
         self.player.change(state("idle", None, [], sessions=SESSIONS))
         self.assertFalse(w.clear_button.get_sensitive())
-        self.assertFalse(w.end_session_button.get_sensitive())
 
     def test_no_sessions_empty_tree_and_disabled_buttons(self) -> None:
         w = self.window
         self.player.change(state("idle", None, []))
         self.assertEqual([], w.tree.get_children())
         self.assertFalse(w.clear_button.get_sensitive())
-        self.assertFalse(w.end_session_button.get_sensitive())
 
     def test_tree_rebuilds_only_on_change(self) -> None:
         w = self.window
@@ -770,15 +757,14 @@ class TextScreenTest(unittest.TestCase):
     def calls(self, name: str) -> list[tuple]:
         return [call for call in self.text.calls if call[0] == name]
 
-    def test_text_button_icon_tooltip_after_end_session(self) -> None:
+    def test_text_button_icon_tooltip_after_clear(self) -> None:
         w = self.window
         button = w.text_button
         self.assertFalse(button.get_label())
         self.assertEqual("audio-volume-high-symbolic", icon_name(button))
         self.assertEqual("Озвучить свой текст", button.get_tooltip_text())
         row = w.clear_button.get_parent()
-        self.assertEqual([w.settings_button, w.clear_button, w.end_session_button, button],
-                         row.get_children()[:4])
+        self.assertEqual([w.settings_button, w.clear_button, button], row.get_children())
         self.assertEqual(Gtk.PackType.END, row.child_get_property(button, "pack-type"))
 
     def test_click_opens_text_screen(self) -> None:

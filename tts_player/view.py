@@ -107,8 +107,8 @@ def tree_rows(state: PlayerState) -> list[SessionRow | MessageRow]:
     return tree
 
 
-def session_buttons_enabled(state: PlayerState) -> bool:
-    """Мусорка и [stop] действуют на активную сессию: без неё им нечего делать."""
+def clear_enabled(state: PlayerState) -> bool:
+    """Мусорка очищает активную сессию: без неё ей нечего делать."""
     return state.active is not None
 
 
