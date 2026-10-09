@@ -89,6 +89,23 @@ class DaemonSettingsTest(unittest.TestCase):
         self.write_config(data)
         self.assert_load_error()
 
+    def test_load_speed_out_of_range(self):
+        for speed in (0.4, 4.1):
+            data = make_config()
+            data["personas"]["supertonic-3"]["speed"] = speed
+            self.write_config(data)
+            with self.assertRaises(SettingsError) as ctx:
+                self.settings.load()
+            self.assertIn("supertonic-3", str(ctx.exception))
+            self.assertIn(str(speed), str(ctx.exception))
+
+    def test_load_boundary_speeds(self):
+        for speed in (0.5, 4.0):
+            data = make_config()
+            data["personas"]["supertonic-3"]["speed"] = speed
+            self.write_config(data)
+            self.assertEqual(speed, self.settings.load().speed)
+
     def assert_load_error(self):
         with self.assertRaises(SettingsError) as ctx:
             self.settings.load()

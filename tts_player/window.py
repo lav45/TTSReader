@@ -31,7 +31,7 @@ class PlayerWindow(Gtk.Window):
     """
     REFRESH_MS = 250
     SPEED_STEP = 0.1
-    SPEED_DIGITS = 1
+    SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
 
     def __init__(self, player, settings: DaemonSettings) -> None:
         super().__init__(title="TTS Player")

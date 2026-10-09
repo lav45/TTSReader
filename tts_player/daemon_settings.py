@@ -58,6 +58,12 @@ class DaemonSettings:
         speed = personas[active].get("speed")
         if isinstance(speed, bool) or not isinstance(speed, (int, float)):
             raise SettingsError(f"В {self._config} у персоны {active!r} нет числовой скорости")
+        if not self.SPEED_MIN <= speed <= self.SPEED_MAX:
+            # спин прижал бы её к границе, и «Сохранить» молча записал бы другую скорость
+            raise SettingsError(
+                f"В {self._config} у персоны {active!r} скорость {speed}"
+                f" вне диапазона {self.SPEED_MIN}–{self.SPEED_MAX}"
+            )
         return VoiceSettings(voices=voices, active=active, speed=float(speed))
 
     def save(self, persona: str, speed: float) -> None:

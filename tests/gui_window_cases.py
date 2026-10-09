@@ -237,7 +237,15 @@ class SettingsScreenTest(unittest.TestCase):
         spin = self.window.speed_spin
         self.assertEqual((0.5, 4.0), tuple(spin.get_range()))
         self.assertEqual(0.1, round(spin.get_increments()[0], 6))
-        self.assertEqual(1, spin.get_digits())
+        self.assertEqual(2, spin.get_digits())
+
+    def test_save_keeps_two_decimal_speed_untouched(self) -> None:
+        w = self.window
+        self.settings.loaded = VoiceSettings(voices=[Voice("bob", "")], active="bob", speed=1.25)
+        w.settings_button.clicked()
+        w.speed_spin.update()  # то же, что потеря фокуса: значение заново из текста
+        w.save_button.clicked()
+        self.assertEqual(("save", "bob", 1.25), self.settings.calls[-1])
 
     def test_reopen_reloads_without_duplicating_voices(self) -> None:
         w = self.window

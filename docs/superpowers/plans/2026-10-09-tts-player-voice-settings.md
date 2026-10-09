@@ -101,6 +101,7 @@ load:  voices — в порядке ключей personas; active = active_perso
        speed = personas[active].speed
        нет файла / не JSON / нет или пустой personas / active не в personas
              → SettingsError
+       personas[active].speed вне 0.5–4.0 → SettingsError (персона и значение в тексте)
 save:  config.json перечитывается; persona не в personas или speed вне 0.5–4.0
              → SettingsError, ни один файл не изменён
        config.json: active_persona ← persona; personas[*].speed ← speed;
@@ -147,7 +148,7 @@ PlayerWindow(player, settings: DaemonSettings)
   settings_button → settings.load(); стек на экран "settings"
   экран "settings": back_button (go-previous-symbolic) · voice_combo (Gtk.ComboBoxText,
                     id = Voice.name, текст «name — description» или «name»)
-                    · speed_spin (Gtk.SpinButton 0.5–4.0, шаг 0.1, 1 знак)
+                    · speed_spin (Gtk.SpinButton 0.5–4.0, шаг 0.1, 2 знака)
                     · save_button «Сохранить» · settings_error (Gtk.Label)
   load() → SettingsError: voice_combo и speed_spin неактивны, save_button неактивна,
                           settings_error = str(ошибки)
