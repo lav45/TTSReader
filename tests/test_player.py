@@ -562,6 +562,54 @@ class PlayerButtonsTest(PlayerCase):
         self.assertFalse(bb.heard)
         self.assertTrue(all(s.path.exists() for s in bb.sentences))
 
+    def test_play_message_from_each_status_plays_it_from_start(self) -> None:
+        for prepare in (lambda: None, self.player.toggle_pause, self.player.toggle_play_stop):
+            with self.subTest(prepare=getattr(prepare, "__name__", "playing")):
+                self.setUp()
+                self.start_with(A0, A1, B0)
+                prepare()
+                self.player.play_message(self.player._queue.messages[1])
+                self.assertEqual(("playing", "bb", 0.0), (self.state().status, self.token(),
+                                                          self.player._position))
+                self.assertEqual((B0, 0.0), self.playback.starts[-1])
+                self.assertTrue(self.states)
+
+    def test_play_message_marks_left_complete_heard_and_growing_not(self) -> None:
+        self.start_with(A0, A1, B0)
+        self.player.play_message(self.player._queue.messages[1])
+        self.assertTrue(self.state().messages[0].heard)
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertFalse(self.state().messages[1].heard)
+
+    def test_play_message_current_restarts_without_marking_heard(self) -> None:
+        self.start_with(A0, A1)
+        self.playback.at = 0.3
+        current = self.player._queue.messages[0]
+        self.player.play_message(current)
+        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
+        self.assertFalse(self.state().messages[0].heard)
+
+    def test_play_message_not_in_queue_changes_nothing(self) -> None:
+        self.start_with(A0, B0)
+        stale = self.player._queue.messages[1]
+        self.player.clear()
+        self.arrive(C0)
+        starts = list(self.playback.starts)
+        token = self.token()
+        self.player.play_message(stale)
+        self.assertEqual(starts, self.playback.starts)
+        self.assertEqual(token, self.token())
+
+    def test_play_message_from_idle_without_current_plays_it(self) -> None:
+        self.start_with(A0)
+        self.player.clear()
+        self.arrive(B0)
+        self.player._status = "idle"
+        self.player._current = None
+        self.player.play_message(self.player._queue.messages[0])
+        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+
     def test_next_on_last_does_nothing(self) -> None:
         self.start_with(A0, B0)
         self.player.next()
