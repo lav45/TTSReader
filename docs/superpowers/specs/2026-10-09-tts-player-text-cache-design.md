@@ -106,7 +106,10 @@ hook-home = $XDG_RUNTIME_DIR/tts-player/hook-home        создаёт и чи�
 
 ```
 ~/.claude-tts/queue/<time:.6f>_<id>.json     пишет только плеер; .tmp + rename
-поля — как в (11); id — новый id плеера (16 hex); timestamp — время записи
+поля — как в (11); id — новый id плеера (16 hex); timestamp — время записи;
+"source": "tts-player" — обязательно: демон пишет id в current_message только для задач с
+source (`daemon.py:1447, 1499–1501`); цена — демон заводит запись в JOBS, а `/stop` моста
+с этим source отменил бы задачу (мост выключен)
 новое сообщение: поля задачи хука как есть, id заменён
 переозвучка: text сообщения; persona = active_persona; speed, speed_method и voice_*/speaker_*
              — из этой персоны в config.json; session_id и project — сообщения
@@ -118,6 +121,8 @@ hook-home = $XDG_RUNTIME_DIR/tts-player/hook-home        создаёт и чи�
 ```
 daemon-bin/paplay <опции> <wav>
   id = current_message.id из ~/.claude-tts/playback.json; нет файла / поля / не JSON → "unknown"
+  (поле id есть только у задач с source — до (12) задачи хука source не несут, и id всегда
+  "unknown"; найдено ревью 2026-10-09)
   inbox/<recv_ns>_<id>_<basename(wav)>       атомарно: .<имя>.part, затем mv (как сейчас)
   сбой → stderr и logger -t tts-player-paplay (как сейчас)
 плеер: id → сообщение, для которого задача поставлена; "unknown" или чужой id →
