@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tts_player.daemon_settings import DaemonSettings, Voice
+from tts_player.daemon_settings import ActiveVoice, DaemonSettings, Voice
 from tts_player.settings_error import SettingsError
 
 NAMES = [
@@ -271,6 +271,47 @@ class DaemonSettingsTest(unittest.TestCase):
         self.assertTrue(str(ctx.exception))
         self.assertEqual(self.read_config()["active_persona"], "ru-denis")  # без отката
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"speed": 2.0})
+
+
+class ActiveVoiceTest(unittest.TestCase):
+    """active_voice: текущая персона и поля задачи демона из неё, как их пишет хук."""
+
+    setUp = DaemonSettingsTest.setUp
+    write_config = DaemonSettingsTest.write_config
+
+    def test_fields_of_active_persona_like_hook(self):
+        voice = self.settings.active_voice()
+        self.assertEqual(ActiveVoice("supertonic-3", 1.8, {
+            "persona": "supertonic-3", "speed": 1.8, "speed_method": "tempo",
+            "voice_kokoro": "", "voice_kokoro_blend": "", "voice_sherpa": "ru_RU-denis",
+            "speaker_sherpa": 0, "voice_mlx": "", "speaker_mlx": "", "lang_mlx": "",
+            "pitch_filter": ""}), voice)
+
+    def test_missing_speed_and_method_take_defaults(self):
+        config = make_config()
+        del config["personas"]["supertonic-3"]["speed"]
+        del config["personas"]["supertonic-3"]["speed_method"]
+        self.write_config(config)
+        voice = self.settings.active_voice()
+        self.assertEqual((2.0, "playback"), (voice.speed, voice.fields["speed_method"]))
+
+    def test_speed_out_of_screen_range_is_still_voice(self):
+        """Диапазон спина экрана настроек к переозвучке не относится."""
+        config = make_config()
+        config["personas"]["supertonic-3"]["speed"] = 5.0
+        self.write_config(config)
+        self.assertEqual(5.0, self.settings.active_voice().speed)
+
+    def test_broken_config_raises_settings_error(self):
+        for config in ({"personas": {}}, {**make_config(), "active_persona": "nobody"}):
+            self.write_config(config)
+            with self.assertRaises(SettingsError):
+                self.settings.active_voice()
+        config = make_config()
+        config["personas"]["supertonic-3"]["speed"] = "fast"
+        self.write_config(config)
+        with self.assertRaises(SettingsError):
+            self.settings.active_voice()
 
 
 if __name__ == "__main__":

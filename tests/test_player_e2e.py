@@ -41,7 +41,12 @@ class PlayerProcessCase(unittest.TestCase):
     (настройки плеера пользователя не читаются), своя история демона, заглушка pactl первой
     в PATH (громкость настоящих потоков пользователя не меняется ни в одном e2e), свой HOME
     (обёртка paplay читает id задачи из временного .claude-tts/playback.json, а не из
-    настоящего; без task() файла нет — id "unknown")."""
+    настоящего; без task() файла нет — id "unknown"; задачи демону плеер пишет во временную
+    .claude-tts/queue, config.json там нет — кэш считается актуальным).
+
+    drop() кладёт предложение, как демон: первое предложение нового token — сначала задача
+    хука в hook-home (hook_task), id задачи демона — из файла, который плеер записал в
+    .claude-tts/queue; его ставит task() перед обёрткой."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -73,6 +78,11 @@ class PlayerProcessCase(unittest.TestCase):
         self.pactl_log = self.tmp / "pactl.log"
         self.pactl_fixture = self.tmp / "sink-inputs.json"
         self.pactl_fixture.write_text(json.dumps([FOREIGN]))
+        self.daemon_queue = self.home / ".claude-tts" / "queue"
+        self.daemon_queue.mkdir(parents=True)
+        self.hook_queue = self.runtime / "tts-player" / "hook-home" / ".claude-tts" / "queue"
+        self.task_ids: dict[str, str] = {}  # token предложений → id задачи демона
+        self.hook_id = ""  # id последней задачи хука из hook_task()
 
     def env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
@@ -148,7 +158,41 @@ class PlayerProcessCase(unittest.TestCase):
         (claude_tts / "playback.json").write_text(json.dumps({"current_message": {
             "id": task_id, "source": "tts-player", "session_id": "s", "project": "p"}}))
 
-    def drop(self, path: Path) -> None:
+    def hook_task(self, session: str, text: str) -> dict:
+        """Задача хука в hook-home (как claude-tts: .tmp, затем rename); возвращает задачу,
+        которую плеер записал в очередь демона. Стартующий плеер чистит queue/ (HookHome
+        prepare) — задача, пропавшая без задачи демона, пишется заново."""
+        hook_id = self.hook_id = uuid.uuid4().hex[:16]
+        task = {"id": hook_id, "timestamp": time.time(), "session_id": session,
+                "project": "/w/proj", "text": text, "persona": "p", "speed": 1.0}
+        target = self.hook_queue / f"{hook_id}.json"
+        deadline = time.monotonic() + WAIT
+        while True:
+            self.assertLess(time.monotonic(), deadline, "задача не дошла до очереди демона")
+            before = set(self.daemon_queue.glob("*.json"))
+            try:
+                tmp = self.hook_queue / f"{hook_id}.tmp"
+                tmp.write_text(json.dumps(task))
+                tmp.rename(target)
+            except FileNotFoundError:  # каталога ещё нет или его почистили
+                time.sleep(0.02)
+                continue
+            while target.exists():  # плеер удаляет задачу хука после записи задачи демона
+                self.assertLess(time.monotonic(), deadline, "задача хука не забрана")
+                time.sleep(0.02)
+            new = set(self.daemon_queue.glob("*.json")) - before
+            if new:
+                [path] = new
+                return json.loads(path.read_text())
+
+    def drop(self, path: Path, key: str | None = None) -> None:
+        """Предложение через обёртку paplay с id задачи демона его сообщения; key — token
+        сообщения (по умолчанию из имени WAV), новый — сначала задача хука."""
+        session, token = path.name.removeprefix("tts_queue_").rsplit("_", 2)[:2]
+        key = token if key is None else key
+        if key not in self.task_ids:
+            self.task_ids[key] = self.hook_task(session, f"text {key}")["id"]
+        self.task(self.task_ids[key])
         subprocess.run([str(PAPLAY), str(path)], env=self.env(), check=True)
 
     def next_line(self, prefix: str) -> str:
@@ -204,14 +248,26 @@ class PlayerE2ETest(PlayerProcessCase):
         self.drop(self.sentence(session, "cccccc", 0))
         self.assertTrue(self.next_line("playing ").endswith("cccccc_s0.wav"))
 
-    def test_backlog_plays_first_by_recv_ns(self) -> None:
+    def test_backlog_of_previous_run_is_deleted(self) -> None:
+        """Файлы в inbox/ до старта несут id задач прошлого запуска — чужие (контракт (13))."""
         session = uuid.uuid4().hex
-        for token in ("aaaaaa", "bbbbbb"):
-            self.drop(self.sentence(session, token, 0))
+        self.task("0123456789abcdef")
+        subprocess.run([str(PAPLAY), str(self.sentence(session, "aaaaaa", 0))], env=self.env(),
+                       check=True)
         self.start_player()
-        names = self.played(2)
-        self.assertTrue(names[0].endswith("aaaaaa_s0.wav"))
-        self.assertTrue(names[1].endswith("bbbbbb_s0.wav"))
+        self.assertIn("0123456789abcdef", self.next_line("чужое предложение "))
+        self.assert_quiet()
+        self.assertEqual(([], []), (list(self.inbox.iterdir()), list(self.store.iterdir())))
+
+    def test_unknown_task_sentence_is_deleted(self) -> None:
+        session = uuid.uuid4().hex
+        self.start_player()
+        self.hook_task(session, "text")
+        subprocess.run([str(PAPLAY), str(self.sentence(session, "aaaaaa", 0))], env=self.env(),
+                       check=True)
+        self.assertIn("_unknown_", self.next_line("чужое предложение "))
+        self.assert_quiet()
+        self.assertEqual([], list(self.store.iterdir()))
 
     def test_broken_wav_reports_error_and_next_still_plays(self) -> None:
         session = uuid.uuid4().hex
@@ -222,23 +278,17 @@ class PlayerE2ETest(PlayerProcessCase):
         self.drop(self.sentence(session, "bbbbbb", 0))
         self.assertTrue(self.next_line("playing ").endswith("bbbbbb_s0.wav"))
 
-    def test_sigterm_returns_unfinished_to_inbox_and_restart_plays_them(self) -> None:
+    def test_sigterm_deletes_unfinished(self) -> None:
+        """id задач этого запуска следующему чужие: незаконченное не возвращается в inbox/."""
         session = uuid.uuid4().hex
+        self.start_player()
         self.drop(self.sentence(session, "aaaaaa", 0, seconds=3.0))
         self.drop(self.sentence(session, "aaaaaa", 1))
         self.drop(self.sentence(session, "bbbbbb", 0))
-        self.start_player()
         self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
-        back = sorted(p.name for p in self.inbox.iterdir())
-        self.assertEqual(
-            [f"_tts_queue_{session}_aaaaaa_s0.wav", f"_tts_queue_{session}_aaaaaa_s1.wav",
-             f"_tts_queue_{session}_bbbbbb_s0.wav"],
-            [n[n.index("_tts_queue"):] for n in back])
-        self.assertEqual([], list(self.store.iterdir()))
-        self.start_player()
-        self.assertEqual(back, self.played(3))
+        self.assertEqual(([], []), (list(self.inbox.iterdir()), list(self.store.iterdir())))
 
     def test_output_error_keeps_sentence_and_reports_once(self) -> None:
         session = uuid.uuid4().hex
@@ -413,8 +463,7 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
         self.start_player()
         self.drop(self.sentence(uuid.uuid4().hex, "bbbbbb", 0))
-        names = self.played(2)  # недоигранное aaaaaa вернулось в inbox/ и играет снова
-        self.assertTrue(names[0].endswith("aaaaaa_s0.wav") and names[1].endswith("bbbbbb_s0.wav"))
+        self.assertTrue(self.played(1)[0].endswith("bbbbbb_s0.wav"))
 
     def test_stop_without_player_exits_0_silently(self) -> None:
         result = self.run_bin("stop")
@@ -495,9 +544,26 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(0, result.returncode)
         self.assertIn("плеер не запущен", result.stderr)
 
+    def test_hook_task_goes_to_daemon_queue_and_its_files_play(self) -> None:
+        """Задача хука в hook-home → файл в очереди демона с source и новым id; предложения
+        с этим id через настоящую обёртку (playback.json подставной) играют."""
+        session = uuid.uuid4().hex
+        self.start_player()
+        task = self.hook_task(session, "Привет")
+        self.assertEqual(("tts-player", "Привет", session, "/w/proj", "p", 1.0),
+                         (task["source"], task["text"], task["session_id"], task["project"],
+                          task["persona"], task["speed"]))
+        self.assertRegex(task["id"], "^[0-9a-f]{16}$")
+        self.assertEqual(f"task {self.hook_id} {session} 6 chars", self.next_line("task "))
+        self.assertNotEqual(self.hook_id, task["id"])
+        self.task(task["id"])
+        subprocess.run([str(PAPLAY), str(self.sentence(session, "aaaaaa", 0))], env=self.env(),
+                       check=True)
+        self.assertTrue(self.next_line("playing ").endswith(
+            f"_{task['id']}_tts_queue_{session}_aaaaaa_s0.wav"))
+
     def test_hook_task_is_taken_and_logged(self) -> None:
         claude_tts = self.home / ".claude-tts"
-        claude_tts.mkdir()
         (claude_tts / "daemon.heartbeat").write_text(str(time.time()))
         self.start_player()
         hook_base = self.runtime / "tts-player" / "hook-home" / ".claude-tts"
@@ -510,7 +576,9 @@ class SingleInstanceTest(PlayerProcessCase):
         tmp.write_text(json.dumps({"id": "abc", "session_id": "sess", "text": "Привет"}))
         tmp.rename(queue_dir / "1.json")
         self.assertEqual("task abc sess 6 chars", self.next_line("task "))
-        self.assertFalse((queue_dir / "1.json").exists())
+        while (queue_dir / "1.json").exists():  # удаляется после записи задачи демона
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.02)
         self.assertFalse((self.runtime / "hook-home").exists())
         while not (hook_base / "daemon.heartbeat").exists():
             self.assertLess(time.monotonic(), deadline)

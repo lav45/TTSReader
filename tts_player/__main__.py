@@ -23,6 +23,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
+from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.hook_home import HookHome  # noqa: E402
@@ -101,17 +102,20 @@ def main(argv: list[str] | None = None) -> int:
     # подменённый HOME хука: его queue/ плеер забирает, heartbeat держит HookHome
     hook_home = HookHome(Path(runtime) / "tts-player", Path("~/.claude-tts").expanduser())
     hook_home.start()  # до player.start(): к первой задаче хука hook-home уже готов
+    # голос и скорость: экран настроек и переозвучка сообщений с устаревшим кэшем
+    settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
     try:
         player = Player(Path(runtime), args.audio_sink,
                         Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
-                        ducker, hook_tasks_dir=hook_home.queue_dir)
+                        ducker, hook_tasks_dir=hook_home.queue_dir,
+                        daemon_queue=DaemonQueue(Path("~/.claude-tts/queue").expanduser()),
+                        daemon_settings=settings)
         prefs = PlayerSettings(Path(args.settings_file).expanduser())
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:
             loop = GLib.MainLoop()
             run(player, loop.run, loop.quit, hook_home=hook_home)
         else:
-            settings = DaemonSettings(Path(args.tts_config_dir).expanduser())
             voicing = Voicing(Path(args.tts_flag).expanduser(), Path(args.tts_off_hook).expanduser())
             text_speaker = TextSpeaker(Path(runtime), Path(args.tts_python).expanduser(),
                                        SYNTH_WORKER, player, args.audio_sink)
@@ -172,7 +176,7 @@ def stop_sound(player: Player, text_speaker: TextSpeaker | None) -> None:
 
 def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None],
         text_speaker: TextSpeaker | None = None, hook_home: HookHome | None = None) -> None:
-    """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, незаконченное — обратно в inbox/.
+    """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, файлы сообщений удаляются.
 
     Свой текст (только с окном): остатки прошлых запусков удаляются до player.start(), выход
     TextSpeaker — до player.shutdown(), иначе его release() пришёл бы в остановленный плеер.

@@ -30,7 +30,7 @@ class Inbox:
     в inbox/ с WARNING. Имя прежнего вида, без id задачи, забирается с id "unknown".
 
     store/ принадлежит одному запуску плеера: start() удаляет остатки прошлого (после
-    падения), штатный выход возвращает незаконченное в inbox/ через put_back().
+    падения), файлы штатно вышедшего запуска удаляет его очередь (MessageQueue.clear).
 
     Порядок: накопленное при start() отдаётся по возрастанию recv_ns; дальше доставка
     идёт в порядке событий каталога. Упорядочивает по Sentence.recv_ns потребитель
@@ -66,17 +66,6 @@ class Inbox:
         if self._monitor is not None:
             self._monitor.cancel()
             self._monitor = None
-
-    def put_back(self, sentences: list[Sentence]) -> None:
-        """Возвращает предложения из store/ в inbox/ под тем же именем: их заберёт следующий запуск.
-
-        Звать после stop(), иначе монитор заберёт их обратно.
-        """
-        for sentence in sentences:
-            try:
-                os.rename(sentence.path, self._inbox / sentence.path.name)
-            except OSError:
-                log.exception("Не удалось вернуть %s в inbox", sentence.path.name)
 
     def _clear_store(self) -> None:
         with os.scandir(self._store) as entries:

@@ -1,6 +1,7 @@
-"""Тесты Player: воспроизведение по курсору, кнопки, снимок состояния, возврат
-незавершённого при штатном выходе, повтор при отказе вывода звука, переход играющего
-сообщения на склейку демона, приглушение чужих звуков на время playing (заглушка Ducker)."""
+"""Тесты Player: задачи хука в демон и переозвучка (заглушки DaemonQueue и DaemonSettings),
+воспроизведение по курсору, кнопки, снимок состояния, выход процесса, повтор при отказе вывода
+звука, переход играющего сообщения на склейку демона, приглушение чужих звуков на время
+playing (заглушка Ducker)."""
 import tempfile
 import time
 import unittest
@@ -14,17 +15,20 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
+from tts_player.daemon_settings import ActiveVoice  # noqa: E402
 from tts_player.history import HistoryEntry  # noqa: E402
 from tts_player.inbox import NAME_PATTERN  # noqa: E402
-from tts_player.model import HookTask, Sentence  # noqa: E402
+from tts_player.model import HookTask, Message, Sentence  # noqa: E402
+from tts_player.settings_error import SettingsError  # noqa: E402
 from tts_player.player import Player, PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 
-A0 = "1000000000000000001_unknown_tts_queue_S_aa_s0.wav"
-A1 = "1000000000000000002_unknown_tts_queue_S_aa_s1.wav"
-B0 = "1000000000000000003_unknown_tts_queue_S_bb_s0.wav"
-N0 = "1000000000000000004_unknown_tts_queue_N_cc_s0.wav"  # другая сессия: склейка S её не берёт
-C0 = "1000000000000000005_unknown_tts_queue_S_cc_s0.wav"
+# <recv_ns>_<id задачи демона>_<имя WAV демона>; id задачи = token, кроме N0
+A0 = "1000000000000000001_aa_tts_queue_S_aa_s0.wav"
+A1 = "1000000000000000002_aa_tts_queue_S_aa_s1.wav"
+B0 = "1000000000000000003_bb_tts_queue_S_bb_s0.wav"
+N0 = "1000000000000000004_dd_tts_queue_N_cc_s0.wav"  # другая сессия: склейка S её не берёт
+C0 = "1000000000000000005_cc_tts_queue_S_cc_s0.wav"
 JOINED = "tts-2000000000.000-S.wav"
 RATE = 1000
 SECONDS = 0.5
@@ -99,6 +103,37 @@ class FakeDucker:
         self.calls.append(("restore",))
 
 
+class FakeDaemonQueue:
+    """Подменяет DaemonQueue: запоминает поля задач; id — по очереди из ids, кончились — None
+    (сбой записи)."""
+
+    def __init__(self) -> None:
+        self.ids: list[str] = []
+        self.puts: list[dict] = []
+
+    def put(self, fields: dict) -> str | None:
+        self.puts.append(fields)
+        return self.ids.pop(0) if self.ids else None
+
+
+class FakeSettings:
+    """Подменяет DaemonSettings: текущая персона p со скоростью 1.0; error — сбой config.json."""
+
+    def __init__(self) -> None:
+        self.persona = "p"
+        self.speed = 1.0
+        self.error: SettingsError | None = None
+        self.reads = 0
+
+    def active_voice(self) -> ActiveVoice:
+        self.reads += 1
+        if self.error is not None:
+            raise self.error
+        return ActiveVoice(self.persona, self.speed, {
+            "persona": self.persona, "speed": self.speed, "speed_method": "tempo",
+            "voice_sherpa": f"voice-{self.persona}"})
+
+
 class PlayerCase(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -117,19 +152,39 @@ class PlayerCase(unittest.TestCase):
         self.glib = glib.start()
         self.addCleanup(glib.stop)
         self.glib.timeout_add_seconds.return_value = 42
-        self.player = Player(self.runtime, None, history_dir, self.runtime / "handy_analysis.db")
+        self.daemon = FakeDaemonQueue()
+        self.settings = FakeSettings()
+        self.player = Player(self.runtime, None, history_dir, self.runtime / "handy_analysis.db",
+                             daemon_queue=self.daemon, daemon_settings=self.settings)
         self.playback: FakePlayback = self.player._playback
         self.states: list[PlayerState] = []
         self.player.on_change = self.states.append
 
+    def announce(self, task_id: str, session: str = "S", player: Player | None = None) -> None:
+        """Задача хука пришла и ушла в демон с id task_id (текущая персона p, скорость 1.0)."""
+        player = self.player if player is None else player
+        self.daemon.ids.append(task_id)
+        player._on_hook_task(HookTask(f"hook-{task_id}", 1.0, session, "proj", f"text {task_id}",
+                                      "p", 1.0, {"id": f"hook-{task_id}",
+                                                 "text": f"text {task_id}"}))
+
+    def announce_names(self, names: tuple[str, ...]) -> None:
+        """Задачи хука для предложений names, каждая — до первого своего предложения."""
+        for name in names:
+            match = NAME_PATTERN.match(name)
+            if not any(match["task_id"] in m.task_ids for m in self.player._queue.messages):
+                self.announce(match["task_id"], match["session_id"])
+
     def start_with(self, *names: str) -> None:
-        """Накопленное в inbox/ до старта: настоящие WAV по SECONDS."""
+        """Задачи хука, затем их предложения в inbox/ до старта: настоящие WAV по SECONDS."""
+        self.announce_names(names)
         for name in names:
             write_wav(self.inbox_dir / name, SECONDS)
         self.player.start()
 
     def arrive(self, name: str, seconds: float = SECONDS) -> None:
-        """Предложение, забранное inbox/ после старта."""
+        """Предложение, забранное inbox/ после старта; задача хука для него — заранее."""
+        self.announce_names((name,))
         path = self.store_dir / name
         write_wav(path, seconds)
         match = NAME_PATTERN.match(name)
@@ -159,9 +214,13 @@ class PlayerCase(unittest.TestCase):
     def state(self) -> PlayerState:
         return self.player.state()
 
-    def token(self) -> str | None:
+    def task(self) -> str | None:
+        """id задачи демона текущего сообщения (последней, если их несколько)."""
         current = self.state().current
-        return None if current is None else current.token
+        return None if current is None else self.task_of(current)
+
+    def task_of(self, message: Message) -> str | None:
+        return self.player._queue.task_of(message)
 
 
 class PlayerHistoryTest(PlayerCase):
@@ -224,45 +283,27 @@ class PlayerHistoryTest(PlayerCase):
         self.assertEqual("playing", self.state().status)
         self.player._on_entry(self.joined())
         self.assertEqual("idle", self.state().status)
-        self.assertEqual("aa", self.token())
+        self.assertEqual("aa", self.task())
         self.assertTrue(self.state().current.heard)
 
-    def test_stop_during_joined_file_returns_whole_message(self) -> None:
+    def test_shutdown_during_joined_file_deletes_all(self) -> None:
+        """Выход: id задач этого запуска следующему чужие (контракт (13)) — в inbox/ ничего
+        не возвращается, store/ пуст."""
         self.switch_on_a1()
         self.player.shutdown()
-        self.assertEqual(sorted([A0, A1, N0]), sorted(p.name for p in self.inbox_dir.iterdir()))
-        self.assertEqual([], list(self.store_dir.iterdir()))
-
-    def test_stop_after_joined_file_returns_only_next(self) -> None:
-        self.switch_on_a1()
-        self.finish()
-        self.player.shutdown()
-        self.assertEqual([N0], [p.name for p in self.inbox_dir.iterdir()])
+        self.assertEqual([], list(self.inbox_dir.iterdir()))
         self.assertEqual([], list(self.store_dir.iterdir()))
 
     def test_store_is_taken_from_inbox(self) -> None:
         self.assertEqual(self.store_dir, self.player._inbox.store)
 
-    def test_stop_returns_playing_and_unplayed_to_inbox(self) -> None:
+    def test_shutdown_deletes_playing_and_unplayed(self) -> None:
         self.start_with(A0, A1, B0)
         self.assertEqual([A0], self.playback.played)
-        self.player.shutdown()
-        self.assertEqual(sorted([A0, A1, B0]), sorted(p.name for p in self.inbox_dir.iterdir()))
-        self.assertEqual([], list(self.store_dir.iterdir()))
-
-    def test_stop_deletes_finished(self) -> None:
-        self.start_with(A0, A1, B0)
-        self.finish()
-        self.assertEqual([A0, A1], self.playback.played)
-        self.player.shutdown()
-        self.assertEqual(sorted([A1, B0]), sorted(p.name for p in self.inbox_dir.iterdir()))
-        self.assertEqual([], list(self.store_dir.iterdir()))
-
-    def test_stop_returns_rest_of_sentence_at_position(self) -> None:
-        self.start_with(A0, A1, B0)
         self.playback.at = 0.3
         self.player.shutdown()
-        self.assertEqual(sorted([A0, A1, B0]), sorted(p.name for p in self.inbox_dir.iterdir()))
+        self.assertEqual([], list(self.inbox_dir.iterdir()))
+        self.assertEqual([], list(self.store_dir.iterdir()))
 
     def test_file_error_skips_to_next(self) -> None:
         self.start_with(A0, B0)
@@ -273,6 +314,7 @@ class PlayerHistoryTest(PlayerCase):
         self.glib.timeout_add_seconds.assert_not_called()
 
     def test_broken_first_sentence_is_tried_not_skipped(self) -> None:
+        self.announce("aa")
         (self.inbox_dir / A0).write_bytes(b"not a wav")
         write_wav(self.inbox_dir / A1, SECONDS)
         with self.assertLogs("tts_player.queue", "WARNING"):  # длительность не-WAV не читается
@@ -314,6 +356,7 @@ class PlayerHistoryTest(PlayerCase):
     def test_new_sentence_during_outage_does_not_jump_in(self) -> None:
         self.start_with(A0)
         self.playback.fail("no output", True)
+        self.announce("bb")
         write_wav(self.inbox_dir / B0, SECONDS)
         deadline = time.monotonic() + 5
         while not self.path(B0).exists() and time.monotonic() < deadline:
@@ -321,12 +364,12 @@ class PlayerHistoryTest(PlayerCase):
         self.assertTrue(self.path(B0).exists())
         self.assertEqual([A0], self.playback.played)
 
-    def test_stop_cancels_pending_retry_and_returns_sentence(self) -> None:
+    def test_shutdown_cancels_pending_retry(self) -> None:
         self.start_with(A0)
         self.playback.fail("no output", True)
         self.player.shutdown()
         self.glib.source_remove.assert_called_once_with(42)
-        self.assertEqual([A0], [p.name for p in self.inbox_dir.iterdir()])
+        self.assertEqual([], list(self.inbox_dir.iterdir()))
 
     def test_successful_retry_clears_outage_and_position_moves(self) -> None:
         self.start_with(A0, A1)
@@ -378,10 +421,8 @@ class PlayerHistoryTest(PlayerCase):
         self.playback.started()
         self.playback.at = 0.1
         state = self.state()
-        self.assertEqual((False, "bb"), (state.output_down, state.current.token))
+        self.assertEqual((False, "bb"), (state.output_down, self.task_of(state.current)))
         self.assertAlmostEqual(0.1, state.position_s)
-        self.player.shutdown()
-        self.assertEqual([B0], [p.name for p in self.inbox_dir.iterdir()])
 
     def test_pause_during_outage_cancels_retry_and_resume_plays_same_place(self) -> None:
         self.start_with(A0, A1)
@@ -409,16 +450,6 @@ class PlayerHistoryTest(PlayerCase):
         self.assertFalse(state.output_down)
         self.assertAlmostEqual(0.9, state.position_s)
 
-    def test_heard_message_reached_by_prev_is_not_returned(self) -> None:
-        """aa прослушано по next и не возвращается; bb покинуто по prev растущим — вернётся."""
-        self.start_with(A0, A1, B0)
-        self.player.next()
-        self.player.prev()
-        self.player.stop_playback()
-        self.player.shutdown()
-        self.assertEqual([B0], [p.name for p in self.inbox_dir.iterdir()])
-        self.assertEqual([], list(self.store_dir.iterdir()))
-
     def test_change_callback_exception_is_logged_and_state_stays_consistent(self) -> None:
         self.start_with(A0, B0)
 
@@ -430,11 +461,13 @@ class PlayerHistoryTest(PlayerCase):
             self.player.next()
         self.assertIn("window broke", logs.output[0] + "".join(
             str(r.exc_info[1]) for r in logs.records if r.exc_info))
-        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_without_history_plays(self) -> None:
-        player = Player(self.runtime, None, None, None)
+        player = Player(self.runtime, None, None, None, daemon_queue=self.daemon,
+                        daemon_settings=self.settings)
+        self.announce("aa", player=player)
         write_wav(self.inbox_dir / A0, SECONDS)
         player.start()
         self.assertEqual([A0], player._playback.played)
@@ -457,10 +490,10 @@ class PlayerCursorTest(PlayerCase):
         self.finish()
         self.playback.at = 0.2
         state = self.state()
-        self.assertEqual(("playing", "aa"), (state.status, state.current.token))
+        self.assertEqual(("playing", "aa"), (state.status, self.task_of(state.current)))
         self.assertAlmostEqual(0.7, state.position_s)
         self.assertAlmostEqual(1.0, state.length_s)
-        self.assertEqual(["aa", "bb"], [m.token for m in state.messages])
+        self.assertEqual(["aa", "bb"], [self.task_of(m) for m in state.messages])
 
     def test_sentences_of_message_play_in_order_then_next_message(self) -> None:
         self.start_with(A0, A1, B0)
@@ -473,7 +506,7 @@ class PlayerCursorTest(PlayerCase):
         self.start_with(A0)
         self.finish()
         state = self.state()
-        self.assertEqual(("playing", "aa"), (state.status, state.current.token))
+        self.assertEqual(("playing", "aa"), (state.status, self.task_of(state.current)))
         self.assertAlmostEqual(0.5, state.position_s)
         self.arrive(A1)
         self.assertEqual([(A0, 0.0), (A1, 0.0)], self.playback.starts)
@@ -491,29 +524,30 @@ class PlayerCursorTest(PlayerCase):
         self.finish()
         self.player._on_entry(self.joined(seconds=3.0))  # другая длина: конец без склейки
         state = self.state()
-        self.assertEqual(("idle", "aa"), (state.status, state.current.token))
+        self.assertEqual(("idle", "aa"), (state.status, self.task_of(state.current)))
         self.arrive(B0)
-        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual([A0, B0], self.playback.played)
 
     def test_tail_keeps_five_started_messages(self) -> None:
-        names = [f"100000000000000000{i}_unknown_tts_queue_S_{t}_s0.wav"
+        names = [f"100000000000000000{i}_{t}_tts_queue_S_{t}_s0.wav"
                  for i, t in enumerate(["a1", "a2", "a3", "a4", "a5", "a6"], start=1)]
         self.start_with(*names)
         for _ in range(5):
             self.player.next()
-        self.assertEqual(["a2", "a3", "a4", "a5", "a6"], [m.token for m in self.state().messages])
+        self.assertEqual(["a2", "a3", "a4", "a5", "a6"], [self.task_of(m) for m in self.state().messages])
         self.assertFalse(self.path(names[0]).exists())
 
     def test_on_change_after_file_change_and_new_sentence(self) -> None:
         self.start_with(A0, A1)
+        self.announce("bb")
         count = len(self.states)
         self.assertGreater(count, 0)
         self.finish()
         self.assertEqual(count + 1, len(self.states))
         self.arrive(B0)
         self.assertEqual(count + 2, len(self.states))
-        self.assertEqual(["aa", "bb"], [m.token for m in self.states[-1].messages])
+        self.assertEqual(["aa", "bb"], [self.task_of(m) for m in self.states[-1].messages])
 
 
 class PlayerButtonsTest(PlayerCase):
@@ -537,7 +571,7 @@ class PlayerButtonsTest(PlayerCase):
         self.finish()
         self.player.toggle_play_pause()
         self.arrive(B0)
-        self.assertEqual(("paused", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("paused", "aa"), (self.state().status, self.task()))
         self.assertEqual([A0], self.playback.played)
 
     def test_stop_resets_position_and_new_message_does_not_start(self) -> None:
@@ -550,7 +584,7 @@ class PlayerButtonsTest(PlayerCase):
         self.assertIsNone(self.playback.playing)
         self.arrive(B0)
         self.assertEqual([A0, A1], self.playback.played)
-        self.assertEqual("aa", self.token())
+        self.assertEqual("aa", self.task())
         self.player.toggle_play_pause()
         self.assertEqual("playing", self.state().status)
         self.assertEqual((A0, 0.0), self.playback.starts[-1])
@@ -566,7 +600,7 @@ class PlayerButtonsTest(PlayerCase):
         self.playback.at = 0.3
         self.player.next()
         state = self.state()
-        self.assertEqual(("playing", "bb", 0.0), (state.status, state.current.token,
+        self.assertEqual(("playing", "bb", 0.0), (state.status, self.task_of(state.current),
                                                   self.player._position))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
         self.assertTrue(state.messages[0].heard)
@@ -574,13 +608,13 @@ class PlayerButtonsTest(PlayerCase):
     def test_prev_from_incomplete_message_keeps_it_unheard_and_sentences_arrive(self) -> None:
         self.start_with(A0, B0)
         self.player.next()
-        self.assertEqual("bb", self.token())
+        self.assertEqual("bb", self.task())
         self.player.prev()
         bb = self.state().messages[1]
         self.assertFalse(bb.heard)
         self.assertTrue(self.state().messages[0].heard)
         self.assertTrue(self.path(B0).exists())
-        self.arrive("1000000000000000006_unknown_tts_queue_S_bb_s1.wav")
+        self.arrive("1000000000000000006_bb_tts_queue_S_bb_s1.wav")
         bb = self.state().messages[1]
         self.assertEqual(2, len(bb.sentences))
         self.assertFalse(bb.heard)
@@ -592,12 +626,12 @@ class PlayerButtonsTest(PlayerCase):
         starts = list(self.playback.starts)
         self.player.play_message(self.player._queue.messages[1])
         bb = self.state().messages[1]
-        self.assertEqual(("stopped", "bb", 0.0), (self.state().status, self.token(),
+        self.assertEqual(("stopped", "bb", 0.0), (self.state().status, self.task(),
                                                   self.player._position))
         self.assertEqual(starts, self.playback.starts)
         self.assertFalse(self.player._queue.is_started(bb))
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
         self.assertTrue(self.player._queue.is_started(bb))
 
@@ -622,7 +656,7 @@ class PlayerButtonsTest(PlayerCase):
         starts = list(self.playback.starts)
         self.playback.at = 0.3
         self.player.play_message(self.player._queue.messages[0])
-        self.assertEqual(("stopped", "aa", 0.0), (self.state().status, self.token(),
+        self.assertEqual(("stopped", "aa", 0.0), (self.state().status, self.task(),
                                                   self.player._position))
         self.assertEqual(starts, self.playback.starts)
         # выбор не снимает отметку «прослушано»
@@ -668,19 +702,19 @@ class PlayerButtonsTest(PlayerCase):
         self.player.clear()
         self.arrive(C0)
         starts = list(self.playback.starts)
-        token = self.token()
+        token = self.task()
         self.player.play_message(stale)
         self.assertEqual(starts, self.playback.starts)
-        self.assertEqual(token, self.token())
+        self.assertEqual(token, self.task())
 
     def test_play_message_current_while_idle_changes_nothing(self) -> None:
         self.start_with(A0)
         self.finish()
         self.player._on_entry(self.joined(seconds=3.0))  # другая длина: конец без склейки
-        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
         starts = list(self.playback.starts)
         self.player.play_message(self.player._queue.messages[0])
-        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
         self.assertEqual(starts, self.playback.starts)
 
     def test_play_message_other_during_outage_cancels_retry(self) -> None:
@@ -688,7 +722,7 @@ class PlayerButtonsTest(PlayerCase):
         self.playback.fail("no output", True)
         self.player.play_message(self.player._queue.messages[1])
         self.glib.source_remove.assert_called_once_with(42)
-        self.assertEqual(("stopped", "bb"), (self.state().status, self.token()))
+        self.assertEqual(("stopped", "bb"), (self.state().status, self.task()))
 
     def test_next_on_last_does_nothing(self) -> None:
         self.start_with(A0, B0)
@@ -696,13 +730,13 @@ class PlayerButtonsTest(PlayerCase):
         played = list(self.playback.played)
         self.player.next()
         self.assertEqual(played, self.playback.played)
-        self.assertEqual("bb", self.token())
+        self.assertEqual("bb", self.task())
 
     def test_next_after_stop_plays(self) -> None:
         self.start_with(A0, B0)
         self.player.stop_playback()
         self.player.next()
-        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_prev_plays_preceding_from_start(self) -> None:
@@ -711,7 +745,7 @@ class PlayerButtonsTest(PlayerCase):
         self.playback.at = 0.3
         self.player.prev()
         state = self.state()
-        self.assertEqual(("playing", "aa"), (state.status, state.current.token))
+        self.assertEqual(("playing", "aa"), (state.status, self.task_of(state.current)))
         self.assertEqual((A0, 0.0), self.playback.starts[-1])
         self.assertTrue(state.messages[1].heard)
 
@@ -719,14 +753,14 @@ class PlayerButtonsTest(PlayerCase):
         self.start_with(A0, B0)
         self.player.prev()
         self.assertEqual([A0], self.playback.played)
-        self.assertEqual("aa", self.token())
+        self.assertEqual("aa", self.task())
 
     def test_prev_while_paused_plays(self) -> None:
         self.start_with(A0, B0)
         self.player.next()
         self.player.toggle_play_pause()
         self.player.prev()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
 
     def test_stop_playback_while_playing_stops_at_start(self) -> None:
         self.start_with(A0, B0)
@@ -835,7 +869,7 @@ class PlayerButtonsTest(PlayerCase):
         self.assertIsNone(self.playback.playing)
         self.assertEqual([], list(self.store_dir.iterdir()))
         self.arrive(C0)
-        self.assertEqual(("playing", "cc"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "cc"), (self.state().status, self.task()))
         self.assertEqual(C0, self.playback.played[-1])
 
     def test_on_change_after_each_command(self) -> None:
@@ -854,8 +888,8 @@ class PlayerButtonsTest(PlayerCase):
 class PlayerPrefsTest(PlayerCase):
     """Настройки плеера (контракт (6)): хвост, автовоспроизведение, команда play/pause."""
 
-    def tokens(self) -> list[str]:
-        return [m.token for m in self.state().messages]
+    def tasks(self) -> list[str]:
+        return [self.task_of(m) for m in self.state().messages]
 
     def manual(self, tail: int = 5) -> None:
         self.player.apply_prefs(Prefs(tail=tail, autoplay=False))
@@ -897,7 +931,7 @@ class PlayerPrefsTest(PlayerCase):
         self.player.stop_playback()
         self.player.seek(0.3)
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         name, start = self.playback.starts[-1]
         self.assertEqual(A0, name)
         self.assertAlmostEqual(0.3, start)
@@ -907,7 +941,7 @@ class PlayerPrefsTest(PlayerCase):
         self.finish()
         self.finish()
         self.player._on_entry(self.joined())
-        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
         self.player.toggle_play_pause()
         self.assertEqual("playing", self.state().status)
         self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
@@ -916,7 +950,7 @@ class PlayerPrefsTest(PlayerCase):
         self.manual()
         self.start_with(A0, B0)
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         self.assertEqual([(A0, 0.0)], self.playback.starts)
 
     def test_play_pause_without_messages_does_nothing(self) -> None:
@@ -931,7 +965,7 @@ class PlayerPrefsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.finish()
         state = self.state()
-        self.assertEqual(("stopped", "bb", 0.0), (state.status, self.token(), state.position_s))
+        self.assertEqual(("stopped", "bb", 0.0), (state.status, self.task(), state.position_s))
         self.assertTrue(state.messages[0].heard)
         self.assertEqual([A0], self.playback.played)
         self.assertIsNone(self.playback.playing)
@@ -946,7 +980,7 @@ class PlayerPrefsTest(PlayerCase):
         self.finish()
         self.player._on_entry(self.joined())
         state = self.state()
-        self.assertEqual(("stopped", "aa"), (state.status, self.token()))
+        self.assertEqual(("stopped", "aa"), (state.status, self.task()))
         self.assertAlmostEqual(state.length_s, state.position_s)
         self.assertTrue(state.current.heard)
         self.assertEqual([A0, A1], self.playback.played)
@@ -963,16 +997,16 @@ class PlayerPrefsTest(PlayerCase):
     def test_play_pause_after_last_ended_plays_message_arrived_since(self) -> None:
         self.end_last_manually()
         self.arrive(B0)
-        self.assertEqual(("stopped", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("stopped", "aa"), (self.state().status, self.task()))
         self.player.toggle_play_pause()
         state = self.state()
-        self.assertEqual(("playing", "bb", 0.0), (state.status, self.token(), state.position_s))
+        self.assertEqual(("playing", "bb", 0.0), (state.status, self.task(), state.position_s))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_play_pause_after_last_ended_without_new_replays_it(self) -> None:
         self.end_last_manually()
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
 
     def test_play_pause_in_idle_after_end_plays_message_arrived_since(self) -> None:
@@ -983,9 +1017,9 @@ class PlayerPrefsTest(PlayerCase):
         self.player._on_entry(self.joined())
         self.manual()
         self.arrive(B0)
-        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_click_in_idle_without_current_selects_without_playing(self) -> None:
@@ -997,7 +1031,7 @@ class PlayerPrefsTest(PlayerCase):
         self.assertIsNone(self.state().current)
         self.player.play_message(self.player._queue.messages[1])
         bb = self.state().messages[1]
-        self.assertEqual(("stopped", "bb", 0.0), (self.state().status, self.token(),
+        self.assertEqual(("stopped", "bb", 0.0), (self.state().status, self.task(),
                                                   self.player._position))
         self.assertEqual([], self.playback.starts)
         self.assertFalse(self.player._queue.is_started(bb))
@@ -1012,18 +1046,18 @@ class PlayerPrefsTest(PlayerCase):
         self.player._on_entry(self.joined())
         self.manual()
         self.arrive(B0)
-        self.assertEqual(("idle", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
         starts = list(self.playback.starts)
         self.player.play_message(self.player._queue.messages[1])
         bb = self.state().messages[1]
-        self.assertEqual(("stopped", "bb", 0.0), (self.state().status, self.token(),
+        self.assertEqual(("stopped", "bb", 0.0), (self.state().status, self.task(),
                                                   self.player._position))
         self.assertEqual(starts, self.playback.starts)
         self.assertFalse(self.player._queue.is_started(bb))
         # покинутое aa доиграно и начато: прослушано
         self.assertTrue(self.state().messages[0].heard)
         self.player.play_message(self.player._queue.messages[0])
-        self.assertEqual(("stopped", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("stopped", "aa"), (self.state().status, self.task()))
         self.assertEqual(starts, self.playback.starts)
 
     def stop_on_bb_manually(self, tail: int = 5) -> None:
@@ -1032,40 +1066,34 @@ class PlayerPrefsTest(PlayerCase):
         self.start_with(A0, B0, C0)
         self.player.toggle_play_pause()
         self.finish()
-        self.assertEqual(("stopped", "bb"), (self.state().status, self.token()))
+        self.assertEqual(("stopped", "bb"), (self.state().status, self.task()))
 
     def heard(self) -> dict[str, bool]:
-        return {m.token: m.heard for m in self.state().messages}
+        return {self.task_of(m): m.heard for m in self.state().messages}
 
     def test_next_from_unplayed_current_keeps_it_unheard_and_out_of_tail(self) -> None:
         self.stop_on_bb_manually(tail=1)
         bb = self.state().current
         self.player.next()
-        self.assertEqual(("playing", "cc"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "cc"), (self.state().status, self.task()))
         self.assertEqual({"bb": False, "cc": False}, self.heard())
         self.assertFalse(self.player._queue.is_started(bb))
-        self.player.shutdown()
-        self.assertEqual(sorted([B0, C0]), sorted(p.name for p in self.inbox_dir.iterdir()))
 
-    def test_prev_from_unplayed_current_returns_it_to_inbox(self) -> None:
+    def test_prev_from_unplayed_current_keeps_it_unheard(self) -> None:
         self.stop_on_bb_manually()
         bb = self.state().current
         self.player.prev()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         self.assertFalse(bb.heard)
         self.assertFalse(self.player._queue.is_started(bb))
-        self.player.shutdown()
-        self.assertEqual(sorted([B0, C0]), sorted(p.name for p in self.inbox_dir.iterdir()))
 
     def test_click_from_unplayed_current_keeps_it_unheard(self) -> None:
         self.stop_on_bb_manually()
         bb = self.state().current
         self.player.play_message(self.state().messages[2])
-        self.assertEqual(("stopped", "cc"), (self.state().status, self.token()))
+        self.assertEqual(("stopped", "cc"), (self.state().status, self.task()))
         self.assertFalse(bb.heard)
         self.assertFalse(self.player._queue.is_started(bb))
-        self.player.shutdown()
-        self.assertEqual(sorted([B0, C0]), sorted(p.name for p in self.inbox_dir.iterdir()))
 
     def test_play_pause_after_joined_longer_than_sentences_plays_new(self) -> None:
         """Склейка длиннее предложений (в пределах допуска): курсор доигранного — в её конце."""
@@ -1080,7 +1108,7 @@ class PlayerPrefsTest(PlayerCase):
         self.assertAlmostEqual(1.04, state.position_s)
         self.arrive(B0)
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_manual_new_message_in_idle_only_appears_in_list(self) -> None:
@@ -1089,7 +1117,7 @@ class PlayerPrefsTest(PlayerCase):
         self.arrive(A0)
         state = self.state()
         self.assertEqual(("idle", None), (state.status, state.current))
-        self.assertEqual(["aa"], self.tokens())
+        self.assertEqual(["aa"], self.tasks())
         self.assertEqual([], self.playback.played)
 
     def test_manual_play_of_following_enters_tail(self) -> None:
@@ -1097,15 +1125,15 @@ class PlayerPrefsTest(PlayerCase):
         self.start_with(A0, B0)
         self.player.toggle_play_pause()
         self.finish()
-        self.assertEqual(["aa", "bb"], self.tokens())
+        self.assertEqual(["aa", "bb"], self.tasks())
         self.player.toggle_play_pause()
-        self.assertEqual(["bb"], self.tokens())
+        self.assertEqual(["bb"], self.tasks())
 
     def test_play_if_stopped_in_silence_plays_first_unheard(self) -> None:
         self.manual()
         self.start_with(A0, B0)
         self.player.play_if_stopped()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         self.assertEqual([(A0, 0.0)], self.playback.starts)
 
     def test_on_change_after_play_pause(self) -> None:
@@ -1128,7 +1156,8 @@ class PlayerDuckingTest(PlayerCase):
         self.now = 0.0
         self.player = Player(self.runtime, None, self.history_dir,
                              self.runtime / "handy_analysis.db", ducker=self.ducker,
-                             clock=lambda: self.now)
+                             clock=lambda: self.now, daemon_queue=self.daemon,
+                             daemon_settings=self.settings)
         self.playback = self.player._playback
         self.player.on_change = self.states.append
 
@@ -1215,8 +1244,8 @@ class PlayerDuckingTest(PlayerCase):
                 if c.args[0] == 2]
 
     def test_watch_timer_while_orphans_and_not_playing(self) -> None:
-        self.ducker.has_orphans = True
         self.start_with(A0, B0)
+        self.ducker.has_orphans = True
         self.assertEqual([], self.watch_timers())
         self.player.toggle_play_pause()
         timers = self.watch_timers()
@@ -1355,7 +1384,7 @@ class PlayerHoldTest(PlayerCase):
         self.player._on_entry(self.joined(seconds=SECONDS))
         self.finish()
         state = self.state()
-        self.assertEqual(("stopped", "bb"), (state.status, self.token()))
+        self.assertEqual(("stopped", "bb"), (state.status, self.task()))
         self.assertEqual(0.0, state.position_s)
         self.assertEqual([A0, A0], self.playback.played[:2])
         self.assertNotIn(B0, self.playback.played)
@@ -1393,52 +1422,233 @@ class PlayerHoldTest(PlayerCase):
         self.assertEqual("playing", self.state().status)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
+class PlayerHookTasksTest(PlayerCase):
+    """Задача хука → задача демону и сообщение с текстом (контракты (12), (13))."""
 
-class PlayerHookTasksCase(unittest.TestCase):
-    """Задачи хука в Player: хранение хвоста, журнал, забор при start()."""
+    def hook_task(self, hook_id: str = "h1", text: str = "четыре") -> HookTask:
+        fields = {"id": hook_id, "timestamp": 5.0, "session_id": "S", "project": "/w/proj",
+                  "text": text, "persona": "p", "speed": 1.0, "speed_method": "tempo",
+                  "voice_sherpa": "v"}
+        return HookTask(hook_id, 5.0, "S", "/w/proj", text, "p", 1.0, fields)
 
-    def setUp(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.runtime = Path(tmp.name)
-        self.queue_dir = self.runtime / "hook-queue"
-        self.queue_dir.mkdir()
-        patcher = mock.patch("tts_player.player.Playback", FakePlayback)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        glib = mock.patch("tts_player.player.GLib")
-        glib.start()
-        self.addCleanup(glib.stop)
+    def manual(self) -> None:
+        self.player.apply_prefs(Prefs(autoplay=False))
 
-    def make_task(self, task_id: str, text: str = "abc") -> HookTask:
-        return HookTask(task_id, 1.0, "S", "proj", text, "p", 1.0, {"id": task_id})
+    def test_hook_task_goes_to_daemon_as_is_and_message_appears_with_text(self) -> None:
+        task = self.hook_task()
+        self.daemon.ids.append("aa")
+        self.player._on_hook_task(task)
+        self.assertEqual([task.fields], self.daemon.puts)
+        state = self.states[-1]
+        [message] = state.messages
+        self.assertEqual(("S", "/w/proj", "четыре", "p", 1.0, {"aa"}, [], 5.0, True),
+                         (message.session_id, message.project, message.text, message.persona,
+                          message.speed, message.task_ids, message.sentences,
+                          message.received_at, message.sent))
+        self.assertEqual(([0.0], [False], "idle"), (state.lengths, state.completes, state.status))
 
-    def test_without_dir_has_no_tasks(self) -> None:
-        player = Player(self.runtime, None, None, None)
-        player.start()
-        self.addCleanup(player.shutdown)
-        self.assertEqual([], player.tasks)
+    def test_message_without_sentences_can_be_selected(self) -> None:
+        self.manual()
+        self.announce("aa")
+        message = self.state().messages[0]
+        self.player.play_message(message)
+        self.assertEqual(("stopped", message), (self.state().status, self.state().current))
 
-    def test_keeps_last_50_in_order(self) -> None:
-        player = Player(self.runtime, None, None, None, hook_tasks_dir=self.queue_dir)
-        for number in range(55):
-            player._on_hook_task(self.make_task(str(number)))
-        self.assertEqual([str(n) for n in range(5, 55)], [t.id for t in player.tasks])
+    def test_play_of_message_without_sentences_waits_for_them(self) -> None:
+        self.player.start()
+        self.manual()
+        self.announce("aa")
+        self.player.toggle_play_pause()
+        self.assertEqual(("playing", 0.0, []),
+                         (self.state().status, self.state().length_s, self.playback.played))
+        self.arrive(A0)
+        self.assertEqual([A0], self.playback.played)
 
     def test_logs_task_line(self) -> None:
-        player = Player(self.runtime, None, None, None, hook_tasks_dir=self.queue_dir)
+        self.daemon.ids.append("aa")
         with self.assertLogs("tts_player.player", "INFO") as logs:
-            player._on_hook_task(self.make_task("t1", "четыре"))
-        self.assertEqual(["task t1 S 6 chars"], [r.getMessage() for r in logs.records])
+            self.player._on_hook_task(self.hook_task("t1", "четыре"))
+        self.assertIn("task t1 S 6 chars", [r.getMessage() for r in logs.records])
 
-    def test_start_takes_existing_tasks_and_stop_releases(self) -> None:
-        (self.queue_dir / "1.json").write_text(
-            '{"id": "z", "session_id": "S", "text": "xy"}')
-        player = Player(self.runtime, None, None, None, hook_tasks_dir=self.queue_dir)
+    def test_put_failure_marks_message_not_sent_with_hook_id_and_text(self) -> None:
+        text = "x" * 79 + "yz"
+        with self.assertLogs("tts_player.player", "WARNING") as logs:
+            self.player._on_hook_task(self.hook_task("h9", text))
+        [message] = self.state().messages
+        self.assertEqual((False, set()), (message.sent, message.task_ids))
+        self.assertIn("h9", logs.output[0])
+        self.assertIn("x" * 79 + "y", logs.output[0])
+        self.assertNotIn("yz", logs.output[0])
+
+    def test_sentences_with_task_id_join_message_and_play(self) -> None:
+        self.player.start()
+        self.announce("aa")
+        self.assertEqual([], self.playback.played)
+        self.arrive(A0)
+        self.assertEqual([A0], self.playback.played)
+        self.assertEqual([self.path(A0)], [s.path for s in self.state().messages[0].sentences])
+
+    def test_unknown_and_foreign_task_sentences_are_deleted(self) -> None:
+        self.player.start()
+        unknown = "1000000000000000001_unknown_tts_queue_S_aa_s0.wav"
+        foreign = "1000000000000000002_beef_tts_queue_S_aa_s0.wav"
+        for name in (unknown, foreign):
+            path = self.store_dir / name
+            write_wav(path, SECONDS)
+            match = NAME_PATTERN.match(name)
+            with self.assertLogs("tts_player.queue", "WARNING"):
+                self.player._on_sentence(Sentence(int(match["recv_ns"]), match["task_id"], "S",
+                                                  "aa", 0, path))
+            self.assertFalse(path.exists())
+        self.assertEqual(([], []), (self.state().messages, self.playback.played))
+
+    def test_start_takes_existing_hook_tasks_into_daemon(self) -> None:
+        queue_dir = self.runtime / "hook-queue"
+        queue_dir.mkdir()
+        (queue_dir / "1.json").write_text('{"id": "z", "session_id": "S", "text": "xy"}')
+        player = Player(self.runtime, None, None, None, hook_tasks_dir=queue_dir,
+                        daemon_queue=self.daemon, daemon_settings=self.settings)
+        self.daemon.ids.append("aa")
         player.start()
         player.shutdown()
-        self.assertEqual(["z"], [t.id for t in player.tasks])
-        self.assertEqual([], list(self.queue_dir.iterdir()))
+        self.assertEqual([{"id": "z", "session_id": "S", "text": "xy"}], self.daemon.puts)
+        self.assertEqual([], list(queue_dir.iterdir()))
+
+    def test_hook_tasks_need_daemon_queue_and_settings(self) -> None:
+        with self.assertRaises(ValueError):
+            Player(self.runtime, None, None, None, hook_tasks_dir=self.runtime / "q")
+
+
+class PlayerRevoiceTest(PlayerCase):
+    """Начало проигрывания сообщения с устаревшим кэшем или без звука — переозвучка (12)."""
+
+    NEW0 = "1000000000000000010_ee_tts_queue_S_ff_s0.wav"
+
+    def heard_a(self) -> Message:
+        """A0+A1 доиграны, склейка привязана: сообщение aa прослушано, плеер idle."""
+        self.start_with(A0, A1)
+        self.finish()
+        self.finish()
+        self.player._on_entry(self.joined())
+        self.assertEqual("idle", self.state().status)
+        return self.state().current
+
+    def revoice_fields(self, persona: str, speed: float, task: str = "aa") -> dict:
+        return {"persona": persona, "speed": speed, "speed_method": "tempo",
+                "voice_sherpa": f"voice-{persona}", "text": f"text {task}", "session_id": "S",
+                "project": "proj"}
+
+    def test_fresh_cache_plays_without_new_task(self) -> None:
+        self.heard_a()
+        self.player.toggle_play_pause()
+        self.assertEqual(1, len(self.daemon.puts))
+        self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+
+    def test_stale_persona_revoices_with_current_persona(self) -> None:
+        message = self.heard_a()
+        audio = message.audio
+        self.settings.persona = "q"
+        self.daemon.ids.append("ee")
+        self.player.toggle_play_pause()
+        self.assertEqual(self.revoice_fields("q", 1.0), self.daemon.puts[-1])
+        self.assertFalse(any(self.path(name).exists() for name in (A0, A1)))
+        self.assertFalse(audio.exists())
+        self.assertEqual(({"aa", "ee"}, "q", 1.0, [], None, False),
+                         (message.task_ids, message.persona, message.speed, message.sentences,
+                          message.audio, message.heard))
+        self.assertEqual(("playing", 0.0), (self.state().status, self.state().position_s))
+        played = list(self.playback.played)
+        self.arrive(self.NEW0)
+        self.assertEqual(played + [self.NEW0], self.playback.played)
+
+    def test_stale_speed_revoices(self) -> None:
+        self.heard_a()
+        self.settings.speed = 1.5
+        self.daemon.ids.append("ee")
+        self.player.toggle_play_pause()
+        self.assertEqual(self.revoice_fields("p", 1.5), self.daemon.puts[-1])
+
+    def test_message_in_flight_is_not_revoiced(self) -> None:
+        """Задача сообщения ещё синтезируется: оно играет, как растёт, без новой задачи."""
+        self.settings.persona = "q"
+        self.start_with(A0)
+        self.finish()
+        self.player.stop_playback()
+        self.player.toggle_play_pause()
+        self.assertEqual(1, len(self.daemon.puts))
+        self.assertEqual(0, self.settings.reads)
+        self.assertEqual([A0, A0], self.playback.played)
+
+    def test_click_only_selects_and_play_revoices(self) -> None:
+        self.start_with(A0, B0)
+        self.finish()
+        self.finish()
+        self.settings.persona = "q"
+        self.player.play_message(self.state().messages[0])
+        self.assertEqual(2, len(self.daemon.puts))
+        self.daemon.ids.append("ee")
+        self.player.toggle_play_pause()
+        self.assertEqual(self.revoice_fields("q", 1.0), self.daemon.puts[-1])
+
+    def test_prev_into_stale_message_revoices(self) -> None:
+        self.start_with(A0, B0)
+        self.finish()
+        self.settings.persona = "q"
+        self.daemon.ids.append("ee")
+        self.player.prev()
+        self.assertEqual(self.revoice_fields("q", 1.0), self.daemon.puts[-1])
+        self.assertEqual("ee", self.task())
+
+    def test_autoplay_transition_revoices_stale_next(self) -> None:
+        self.start_with(A0, B0)
+        self.finish()
+        self.finish()
+        self.settings.persona = "q"
+        self.daemon.ids.append("ee")
+        self.player.play_message(self.state().messages[0])
+        self.player.toggle_play_pause()
+        self.arrive(self.NEW0)
+        self.player._on_entry(self.joined(seconds=SECONDS))
+        self.daemon.ids.append("ff")
+        self.finish()
+        self.assertEqual(self.revoice_fields("q", 1.0, "bb"), self.daemon.puts[-1])
+        self.assertEqual(("playing", "ff"), (self.state().status, self.task()))
+
+    def test_not_sent_message_is_voiced_on_play(self) -> None:
+        self.player.start()
+        self.player.apply_prefs(Prefs(autoplay=False))
+        with self.assertLogs("tts_player.player", "WARNING"):
+            self.player._on_hook_task(HookTask("h1", 1.0, "S", "proj", "text aa", "p", 1.0,
+                                               {"id": "h1", "text": "text aa"}))
+        self.daemon.ids.append("ee")
+        self.player.toggle_play_pause()
+        self.assertEqual(self.revoice_fields("p", 1.0), self.daemon.puts[-1])
+        message = self.state().current
+        self.assertEqual(({"ee"}, True, "playing"),
+                         (message.task_ids, message.sent, self.state().status))
+        self.arrive(self.NEW0)
+        self.assertEqual([self.NEW0], self.playback.played)
+
+    def test_revoice_failure_skips_message_with_warning(self) -> None:
+        self.heard_a()
+        self.settings.persona = "q"
+        with self.assertLogs("tts_player.player", "WARNING") as logs:
+            self.player.toggle_play_pause()
+        self.assertIn("text aa", logs.output[-1])
+        message = self.state().current
+        self.assertEqual((False, True, "idle"),
+                         (message.sent, message.heard, self.state().status))
+
+    def test_config_failure_keeps_cache_with_warning(self) -> None:
+        self.heard_a()
+        self.settings.error = SettingsError("config.json не JSON")
+        with self.assertLogs("tts_player.player", "WARNING") as logs:
+            self.player.toggle_play_pause()
+        self.assertIn("config.json не JSON", logs.output[0])
+        self.assertEqual(1, len(self.daemon.puts))
+        self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+
+
+if __name__ == "__main__":
+    unittest.main()

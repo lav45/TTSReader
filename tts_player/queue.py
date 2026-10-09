@@ -1,41 +1,31 @@
-"""Очередь сообщений: порядок по recv_ns, навигация, длина сообщений и хвост начатых."""
+"""Очередь сообщений: порядок прихода, связь с задачами демона, навигация, длина и хвост начатых."""
 import bisect
+import itertools
 import logging
 import shutil
 import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tts_player.model import UNKNOWN_TASK, Message, Sentence
+from tts_player.model import Message, Sentence
 
 if TYPE_CHECKING:
     from tts_player.history import HistoryEntry
 
 log = logging.getLogger("tts_player.queue")
 
-_MessageKey = str | tuple[str, str]
-
-
-def _message_key(item: Sentence | Message) -> _MessageKey:
-    """Ключ сообщения: id задачи демона; без него ("unknown") — пара (session_id, token).
-
-    Проходы синтеза одной задачи (разные token) получают один ключ — одно сообщение.
-    """
-    if item.task_id != UNKNOWN_TASK:
-        return item.task_id
-    return item.session_id, item.token
-
 
 class MessageQueue:
-    """Сообщения по первому recv_ns; хвост из tail начатых сообщений.
+    """Сообщения в порядке прихода задач хука; хвост из tail начатых сообщений.
 
     Очередь не знает, что играет: текущее сообщение и позицию держит Player. Очередь
-    отвечает на вопросы о порядке (following/preceding/first_unheard), длине и
-    завершённости сообщения, отображает позицию в файл (locate) и владеет файлами
-    своих сообщений: удаляет их при вытеснении из хвоста, в release() и clear().
+    связывает предложения с сообщениями по id задач демона (link), отвечает на вопросы о
+    порядке (following/preceding/first_unheard), длине и завершённости сообщения, отображает
+    позицию в файл (locate) и владеет файлами своих сообщений: удаляет их при вытеснении из
+    хвоста, в forget_audio() и clear().
 
     following/preceding/is_complete принимают только живые сообщения — из messages;
-    сообщение, вытесненное или забытое после release()/clear(), им не передаётся.
+    сообщение, вытесненное или забытое после clear(), им не передаётся.
 
     tail задаёт снаружи Player (настройки плеера) и может меняться на ходу: start()
     подгоняет хвост к нему постепенно (см. start).
@@ -44,35 +34,66 @@ class MessageQueue:
 
     def __init__(self, tail: int) -> None:
         self.tail = tail
+        # Порядок постановки задач демону за всё время очереди (и забытых сообщений): демон
+        # синтезирует задачи по одной в этом порядке.
+        self._sequence = itertools.count(1)
+        self._task_order: dict[str, int] = {}
+        self._delivered = 0  # наибольший порядок задачи, от которой пришло предложение
         self._forget()
 
     def _forget(self) -> None:
         self._messages: list[Message] = []
         self._started: list[Message] = []
-        self._evicted: set[_MessageKey] = set()
         self._durations: dict[Path, float] = {}
 
     @property
     def messages(self) -> list[Message]:
-        """Сообщения по recv_ns первого предложения (копия списка)."""
+        """Сообщения в порядке прихода (копия списка)."""
         return list(self._messages)
 
+    def append(self, message: Message) -> None:
+        """Новое сообщение задачи хука — в конец; предложений у него ещё нет."""
+        self._messages.append(message)
+
+    def link(self, message: Message, task_id: str) -> None:
+        """Задача демона task_id поставлена для message: её предложения — его."""
+        message.task_ids.add(task_id)
+        self._task_order[task_id] = next(self._sequence)
+
+    def task_of(self, message: Message) -> str | None:
+        """Последняя задача демона сообщения; None, если ни одна не поставлена."""
+        return max(message.task_ids, key=self._task_order.__getitem__, default=None)
+
     def add(self, sentence: Sentence) -> None:
-        """Добавляет предложение в его сообщение; к прослушанному или вытесненному — удаляет файл."""
-        key = _message_key(sentence)
-        message = self._find(key)
-        late = key in self._evicted or (message is not None and message.heard)
-        if late:
-            log.info("предложение законченного сообщения %s/%s/%s не играется: %s",
-                     sentence.task_id, sentence.session_id, sentence.token, sentence.path)
+        """Добавляет предложение в сообщение его задачи. Задача чужая (нет сообщения:
+        unknown, прошлый запуск, вытесненное или очищенное) — файл удалён, WARNING; сообщение
+        прослушано — файл удалён."""
+        message = self._find(sentence.task_id)
+        if message is None:
+            log.warning("чужое предложение %s (задача %s), удаляю", sentence.path.name,
+                        sentence.task_id)
             self._unlink(sentence)
             return
-        if message is None:
-            message = Message(sentence.task_id, sentence.session_id, sentence.token, [])
-            self._messages.append(message)
+        if message.heard:
+            log.info("предложение прослушанного сообщения %s не играется: %s",
+                     sentence.task_id, sentence.path)
+            self._unlink(sentence)
+            return
+        self._delivered = max(self._delivered, self._task_order[sentence.task_id])
         received = [s.recv_ns for s in message.sentences]
         message.sentences.insert(bisect.bisect_right(received, sentence.recv_ns), sentence)
-        self._messages.sort(key=lambda m: m.sentences[0].recv_ns)
+
+    def forget_audio(self, message: Message) -> None:
+        """Кэш сообщения устарел: файлы предложений и склейки удалены, сообщение — как только
+        пришедшее (без предложений, записи истории и отметки «прослушано»)."""
+        for sentence in message.sentences:
+            self._unlink(sentence)
+        self._unlink_audio(message)
+        message.sentences = []
+        message.audio = None
+        message.created_at = None
+        message.duration_s = None
+        message.heard = False
 
     def following(self, message: Message) -> Message | None:
         index = self._messages.index(message) + 1
@@ -93,8 +114,8 @@ class MessageQueue:
         tail, новое начатое вытесняет самое старое только сверх tail.
         """
         if message not in self._messages:
-            log.debug("сообщение %s/%s/%s уже не в очереди, не начинается",
-                      message.task_id, message.session_id, message.token)
+            log.debug("сообщение %s/%s уже не в очереди, не начинается",
+                      message.session_id, self.task_of(message))
             return
         if message in self._started:
             return
@@ -117,71 +138,34 @@ class MessageQueue:
         return sum(self._duration(s) for s in message.sentences)
 
     def is_complete(self, message: Message) -> bool:
-        """Сообщение больше не растёт: есть склейка или запись истории, или есть более позднее.
-
-        Более позднее сообщение — сообщение с другим ключом (_message_key): демон
-        синтезирует задачи строго по одной.
+        """Сообщение больше не растёт: есть склейка или запись истории; его задача не ушла в
+        демон (ждать нечего); или пришло предложение задачи, поставленной позже его последней,
+        — демон синтезирует задачи строго по одной в порядке постановки.
         """
-        return (message.audio is not None or message.created_at is not None
-                or self.following(message) is not None)
-
-    def release(self, current: Message | None, position_s: float) -> list[Sentence]:
-        """Отдаёт непрослушанные предложения по recv_ns и забывает все сообщения.
-
-        current (если не прослушано) — предложения, кончающиеся после position_s или
-        начинающиеся не раньше неё (предложение нулевой длины на позиции не теряется);
-        остальные непрослушанные сообщения — все предложения. Прослушанное, даже если
-        оно current (вернулись по prev), не отдаётся. Файлы прослушанных и сыгранных предложений
-        удаляются, копии склеек удаляются всегда: после перезапуска непрослушанное
-        играется по предложениям.
-        """
-        pending: list[Sentence] = []
-        for message in self._messages:
-            if message.heard:
-                continue
-            if message is current:
-                pending.extend(s for s in message.sentences
-                               if self._unfinished(message, s, position_s))
-            else:
-                pending.extend(message.sentences)
-        for message in self._messages:
-            for sentence in message.sentences:
-                if sentence not in pending:
-                    self._unlink(sentence)
-            self._unlink_audio(message)
-        self._forget()
-        return sorted(pending, key=lambda s: s.recv_ns)
-
-    def _unfinished(self, message: Message, sentence: Sentence, position_s: float) -> bool:
-        start = self.offset_of(message, sentence)
-        return start + self._duration(sentence) > position_s or start >= position_s
+        if message.audio is not None or message.created_at is not None or not message.sent:
+            return True
+        task_id = self.task_of(message)
+        return task_id is not None and self._delivered > self._task_order[task_id]
 
     def clear(self) -> None:
-        """Удаляет файлы всех сообщений, включая хвост, и забывает их.
-
-        Ключи очищенных сообщений запоминаются как вытесненные: их поздние предложения
-        не добавляются, файлы удаляются. Новые сообщения приходят как обычно.
-        """
-        cleared = {_message_key(m) for m in self._messages}
+        """Удаляет файлы всех сообщений, включая хвост, и забывает их вместе с задачами:
+        поздние предложения очищенных — чужие (add удаляет их файлы). Новые сообщения
+        приходят как обычно."""
         for message in self._messages:
             for sentence in message.sentences:
                 self._unlink(sentence)
             self._unlink_audio(message)
-        evicted = self._evicted | cleared
         self._forget()
-        self._evicted = evicted
 
-    def _find(self, key: _MessageKey) -> Message | None:
-        return next((m for m in self._messages if _message_key(m) == key), None)
+    def _find(self, task_id: str) -> Message | None:
+        return next((m for m in self._messages if task_id in m.task_ids), None)
 
     def _drop(self, message: Message) -> None:
         self._messages.remove(message)
-        self._evicted.add(_message_key(message))
         for sentence in message.sentences:
             self._unlink(sentence)
         self._unlink_audio(message)
-        log.info("сообщение %s/%s/%s удалено из хвоста", message.task_id, message.session_id,
-                 message.token)
+        log.info("сообщение %s/%s удалено из хвоста", message.session_id, self.task_of(message))
 
     def _unlink(self, sentence: Sentence) -> None:
         self._durations.pop(sentence.path, None)
@@ -203,8 +187,8 @@ class MessageQueue:
     def attach(self, entry: "HistoryEntry", store: Path) -> Message | None:
         """Привязывает склейку демона к сообщению её сессии; None, если сообщения нет.
 
-        Сообщение — с наибольшим первым recv_ns среди сообщений сессии без audio,
-        все предложения которых получены раньше entry.created_at. При совпадении
+        Сообщение — с наибольшим первым recv_ns среди сообщений сессии с предложениями,
+        без audio и записи истории, все предложения которых получены раньше entry.created_at. При совпадении
         длительности (допуск DURATION_TOLERANCE_S) склейка копируется в store/ и
         становится audio; иначе (или при сбое копирования) audio остаётся None, а
         сообщение доигрывается по предложениям. created_at/project заполняются
@@ -220,9 +204,9 @@ class MessageQueue:
         message.project = entry.project
         total = sum(self._duration(s) for s in message.sentences)
         if abs(entry.duration_s - total) > self.DURATION_TOLERANCE_S + 1e-9:
-            log.warning("склейка %s: %.3f с, предложения сообщения %s/%s/%s: %.3f с;"
+            log.warning("склейка %s: %.3f с, предложения сообщения %s/%s: %.3f с;"
                         " играется по предложениям", entry.path.name, entry.duration_s,
-                        message.task_id, message.session_id, message.token, total)
+                        message.session_id, self.task_of(message), total)
             return message
         target = store / entry.path.name
         try:
@@ -239,8 +223,9 @@ class MessageQueue:
     def locate(self, message: Message, position_s: float) -> tuple[Path, float]:
         """Файл и смещение в нём для позиции в сообщении (за концом — конец последнего).
 
-        Предложение, которое кончается после позиции или начинается на ней, — как в
-        release(): предложение нулевой длины (битый файл) на позиции не пропускается.
+        Предложение, которое кончается после позиции или начинается на ней: предложение
+        нулевой длины (битый файл) на позиции не пропускается. Сообщение без звука
+        (ни предложений, ни склейки) сюда не передаётся.
         """
         if message.audio is not None:
             return message.audio, position_s
@@ -265,7 +250,7 @@ class MessageQueue:
     def _candidate(self, entry: "HistoryEntry") -> Message | None:
         created_ns = entry.created_at * 1e9
         fitting = [m for m in self._messages
-                   if m.session_id == entry.session_id and m.audio is None
+                   if m.session_id == entry.session_id and m.sentences and m.audio is None
                    and m.created_at is None
                    and all(s.recv_ns < created_ns for s in m.sentences)]
         return max(fitting, key=lambda m: m.sentences[0].recv_ns, default=None)

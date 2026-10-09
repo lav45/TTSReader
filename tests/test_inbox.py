@@ -184,15 +184,6 @@ class InboxTest(unittest.TestCase):
         self.assertEqual([fresh], [p.name for p in self.store_dir.iterdir()])
         self.assertEqual([fresh], [s.path.name for s in self.got])
 
-    def test_put_back_moves_sentences_to_inbox_under_same_name(self):
-        name = "1000000000000000000_unknown_tts_queue_S_ab_s0.wav"
-        self.drop(name)
-        self.inbox.start()
-        self.inbox.stop()
-        self.inbox.put_back(self.got)
-        self.assertTrue((self.inbox_dir / name).exists())
-        self.assertEqual([], list(self.store_dir.iterdir()))
-
     def test_directory_in_inbox_is_skipped(self):
         self.inbox_dir.mkdir(parents=True)
         (self.inbox_dir / "1000000000000000000_unknown_tts_queue_S_ab_s0.wav").mkdir()

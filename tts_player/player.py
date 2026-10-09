@@ -10,6 +10,8 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
+from tts_player.daemon_queue import DaemonQueue  # noqa: E402
+from tts_player.daemon_settings import ActiveVoice, DaemonSettings  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.history import History, HistoryEntry  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
@@ -18,13 +20,13 @@ from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.queue import MessageQueue  # noqa: E402
+from tts_player.settings_error import SettingsError  # noqa: E402
 
 log = logging.getLogger("tts_player.player")
 
 Status = Literal["playing", "paused", "stopped", "idle"]
 
-
-HOOK_TASKS_KEPT = 50
+LOGGED_TEXT_CHARS = 80  # столько знаков текста задачи в строке о сбое её записи
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,13 @@ class Player:
     RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор. Отказ кончается,
     когда звук пошёл (Playback.on_started); повтор, упавший до звука, — тот же отказ.
 
+    Сообщение заводит задача хука (контракт (11)): она сразу уходит в очередь демона, а
+    сообщение с её текстом — в список, ещё без звука; предложения приходят по id задачи
+    демона (контракты (12), (13)). Начало проигрывания (_start: play/pause, автопереход,
+    next/prev) сообщения, которое демон уже не озвучивает, сверяет его голос с текущим из
+    config.json: устарел или звука нет — кэш удаляется и текст уходит в демон заново
+    (переозвучка), сообщение играет по мере прихода предложений, как растущее.
+
     Склейка играющего по предложениям сообщения подменяет их с той же позиции. Пока
     вывод недоступен, звука нет — повтор начнёт склейку с позиции, с которой запускался
     несыгравший файл (начало предложения или точка seek/продолжения в нём).
@@ -82,9 +91,15 @@ class Player:
                  history_dir: Path | None, history_db: Path | None,
                  ducker: Ducker | None = None,
                  clock: Callable[[], float] = time.monotonic,
-                 hook_tasks_dir: Path | None = None) -> None:
+                 hook_tasks_dir: Path | None = None,
+                 daemon_queue: DaemonQueue | None = None,
+                 daemon_settings: DaemonSettings | None = None) -> None:
         """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
-        hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука."""
+        hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
+        очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки:
+        оба нужны, чтобы принимать задачи хука."""
+        if hook_tasks_dir is not None and (daemon_queue is None or daemon_settings is None):
+            raise ValueError("задачам хука нужны daemon_queue и daemon_settings")
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
@@ -94,7 +109,8 @@ class Player:
         self._playback.on_error = self._on_error
         self._playback.on_started = self._on_started
         self._inbox = Inbox(runtime_dir, self._on_sentence)
-        self.tasks: list[HookTask] = []  # хвост HOOK_TASKS_KEPT последних, по порядку прихода
+        self._daemon_queue = daemon_queue
+        self._daemon_settings = daemon_settings
         self._hook_tasks = None
         if hook_tasks_dir is not None:
             self._hook_tasks = HookTasks(hook_tasks_dir, self._on_hook_task)
@@ -164,14 +180,29 @@ class Player:
         self._changed()
 
     def _on_hook_task(self, task: HookTask) -> None:
-        """Задача хука забрана: в хвост tasks и строка журнала (её читает e2e)."""
-        self.tasks.append(task)
-        del self.tasks[:-HOOK_TASKS_KEPT]
+        """Задача хука забрана (строка журнала — её читает e2e): её поля как есть уходят в
+        очередь демона, сообщение с её текстом — в конец списка, ещё без звука."""
         log.info("task %s %s %d chars", task.id, task.session_id, len(task.text))
+        message = Message(task.session_id, project=task.project, text=task.text,
+                          persona=task.persona, speed=task.speed, received_at=task.timestamp)
+        self._queue.append(message)
+        self._send(message, task.fields, f"задача хука {task.id}")
+        self._changed()
+
+    def _send(self, message: Message, fields: dict, origin: str) -> None:
+        """Задача демону для message; сбой записи — сообщение «не отправлено» и строка в
+        журнал с origin и началом текста: задача не теряется молча."""
+        task_id = self._daemon_queue.put(fields)
+        message.sent = task_id is not None
+        if task_id is None:
+            log.warning("%s не отправлена в демон: %.*s", origin, LOGGED_TEXT_CHARS,
+                        message.text or "")
+            return
+        self._queue.link(message, task_id)
 
     def shutdown(self) -> None:
-        """Выход процесса: громкость чужих потоков — обратно; незаконченное — обратно в
-        inbox/, законченное удаляет очередь."""
+        """Выход процесса: громкость чужих потоков — обратно; файлы всех сообщений удалены —
+        id их задач следующему запуску чужие (контракт (13)), текст и кэш временные."""
         self._unduck()
         self._stop_watch()
         self._inbox.stop()
@@ -179,9 +210,8 @@ class Player:
             self._hook_tasks.stop()
         if self._history is not None:
             self._history.stop()
-        position = self._now()
         self._halt()
-        self._inbox.put_back(self._queue.release(self._current, position))
+        self._queue.clear()
 
     def state(self) -> PlayerState:
         current = self._current
@@ -230,9 +260,7 @@ class Player:
         position = self._position
         if position >= self._queue.length(self._current):
             position = 0.0
-        self._queue.start(self._current)
-        self._status = "playing"
-        self._play_at(position)
+        self._start(self._current, position)
 
     def stop_playback(self) -> None:
         """Идемпотентный stop (команда `tts-player stop`): играет или на паузе — звук стоп,
@@ -321,7 +349,7 @@ class Player:
             if message is not None:
                 self._begin(message)
         elif self._waiting():
-            following = self._sentence_after(self._sentence)
+            following = self._next_sentence()
             if following is not None:
                 self._play_sentence(following)
             else:
@@ -332,11 +360,11 @@ class Player:
         message = self._queue.attach(entry, self._inbox.store)
         if message is None:
             return
+        task_id = self._queue.task_of(message)
         if message.audio is None:
-            log.info("ended %s %s", message.session_id, message.token)
+            log.info("ended %s %s", message.session_id, task_id)
         else:
-            log.info("complete %s %s %.2fs", message.session_id, message.token,
-                     message.duration_s)
+            log.info("complete %s %s %.2fs", message.session_id, task_id, message.duration_s)
         if message is self._current and self._status == "playing":
             if self._file is None:
                 self._message_end()
@@ -435,13 +463,58 @@ class Player:
             self._queue.mark_heard(message)
 
     def _begin(self, message: Message) -> None:
+        self._start(message, 0.0)
+
+    def _start(self, message: Message, position: float) -> None:
+        """Начало проигрывания — одно место для play/pause, автоперехода и next/prev:
+        сообщение входит в хвост; кэш устарел или звука нет — переозвучка с начала."""
         self._queue.start(message)
         self._current = message
         self._status = "playing"
-        self._play_at(0.0)
+        if self._revoice_if_stale(message):
+            position = 0.0
+        self._play_at(position)
+
+    def _revoice_if_stale(self, message: Message) -> bool:
+        """Сообщение, которое демон уже не озвучивает (is_complete), с голосом, отличным от
+        текущего, или без звука: файлы удалены, текст — в демон текущим голосом. True —
+        переозвучка начата (и при сбое записи задачи: старого звука уже нет). Сбой чтения
+        config.json — кэш считается актуальным, строка в журнал."""
+        if not self._queue.is_complete(message):
+            return False
+        voice = self._active_voice()
+        if voice is None:
+            return False
+        silent = not message.sentences and message.audio is None
+        if not silent and (message.persona, message.speed) == (voice.persona, voice.speed):
+            return False
+        log.info("revoice %s %s: %s %s -> %s %s", message.session_id,
+                 self._queue.task_of(message), message.persona, message.speed,
+                 voice.persona, voice.speed)
+        self._queue.forget_audio(message)
+        message.persona = voice.persona
+        message.speed = voice.speed
+        fields = {**voice.fields, "text": message.text, "session_id": message.session_id,
+                  "project": message.project}
+        self._send(message, fields, "переозвучка")
+        return True
+
+    def _active_voice(self) -> ActiveVoice | None:
+        try:
+            return self._daemon_settings.active_voice()
+        except SettingsError as error:
+            log.warning("голос не прочитан (%s), кэш считается актуальным", error)
+            return None
 
     def _play_at(self, position: float) -> None:
         current = self._current
+        if current.audio is None and not current.sentences:
+            # звука ещё нет: ждём предложение, как у растущего; не ждём — конец сообщения
+            self._file = None
+            self._sentence = None
+            self._position = 0.0
+            self._message_end()
+            return
         path, offset = self._queue.locate(current, position)
         self._sentence = None
         if current.audio is None:
@@ -470,6 +543,13 @@ class Player:
     def _waiting(self) -> bool:
         """Сообщение доиграно до конца полученного и не завершено: ждём предложение."""
         return self._status == "playing" and self._file is None
+
+    def _next_sentence(self) -> Sentence | None:
+        """Что играть ожидающему сообщению: следующее за доигравшим, а если ещё ничего не
+        играло (сообщение без звука при начале) — первое."""
+        if self._sentence is None:
+            return next(iter(self._current.sentences), None)
+        return self._sentence_after(self._sentence)
 
     def _sentence_after(self, sentence: Sentence) -> Sentence | None:
         sentences = self._current.sentences

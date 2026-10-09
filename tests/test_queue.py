@@ -1,4 +1,4 @@
-"""Тесты MessageQueue: группировка в сообщения, порядок, навигация, хвост начатых (tail, по умолчанию 5)."""
+"""Тесты MessageQueue: сообщения по задачам демона, порядок, навигация, хвост начатых (tail, по умолчанию 5)."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,55 +15,103 @@ class MessageQueueTest(unittest.TestCase):
         self.dir = Path(self._tmp.name)
         self.queue = MessageQueue(tail=5)
 
-    def sentence(self, recv_ns, token="t1", index=0, session="s1", task="unknown"):
+    def message(self, task="t1", session="s1"):
+        """Сообщение задачи хука, отправленное демону с id task."""
+        message = Message(session)
+        self.queue.append(message)
+        self.queue.link(message, task)
+        return message
+
+    def sentence(self, recv_ns, task="t1", index=0, session="s1", token="aa"):
         path = self.dir / f"{task}-{session}-{token}-{index}-{recv_ns}.wav"
         path.write_bytes(b"wav")
         return Sentence(recv_ns, task, session, token, index, path)
 
-    def tokens(self):
-        return [m.token for m in self.queue.messages]
+    def add(self, recv_ns, task="t1", index=0, session="s1", token="aa"):
+        """Предложение задачи task; сообщения для task ещё нет — оно заводится первым."""
+        if not any(task in m.task_ids for m in self.queue.messages):
+            self.message(task, session)
+        sentence = self.sentence(recv_ns, task, index, session, token)
+        self.queue.add(sentence)
+        return sentence
 
-    def test_same_session_and_token_make_one_message(self):
-        a, b = self.sentence(1, index=0), self.sentence(2, index=1)
-        self.queue.add(a)
-        self.queue.add(b)
+    def tasks(self):
+        return [self.queue.task_of(m) for m in self.queue.messages]
+
+    def test_sentences_of_one_task_make_one_message(self):
+        a, b = self.add(1, index=0), self.add(2, index=1)
         self.assertEqual(1, len(self.queue.messages))
         self.assertEqual([a, b], self.queue.messages[0].sentences)
 
-    def test_other_token_makes_new_message(self):
-        self.queue.add(self.sentence(1, token="t1"))
-        self.queue.add(self.sentence(2, token="t2"))
-        self.assertEqual(["t1", "t2"], self.tokens())
+    def test_other_task_is_other_message(self):
+        self.add(1, task="t1")
+        self.add(2, task="t2")
+        self.assertEqual(["t1", "t2"], self.tasks())
 
-    def test_other_session_same_token_is_other_message(self):
-        a = self.sentence(1, session="s1")
-        b = self.sentence(2, session="s2")
-        self.queue.add(a)
-        self.queue.add(b)
-        self.assertEqual([[a], [b]], [m.sentences for m in self.queue.messages])
+    def test_two_passes_of_one_task_make_one_message_by_recv_ns(self):
+        """Два прохода синтеза одной задачи (новый token) — одно сообщение."""
+        message = self.message("f00d")
+        a0 = self.sentence(1, "f00d", 0, token="aa")
+        a1 = self.sentence(2, "f00d", 1, token="aa")
+        b0 = self.sentence(4, "f00d", 0, token="bb")
+        b1 = self.sentence(5, "f00d", 1, token="bb")
+        for s in (a0, b1, a1, b0):
+            self.queue.add(s)
+        self.assertEqual([message], self.queue.messages)
+        self.assertEqual([a0, a1, b0, b1], message.sentences)
+
+    def test_message_is_in_queue_before_its_sentences(self):
+        message = self.message("t1")
+        self.assertEqual([message], self.queue.messages)
+        self.assertEqual([], message.sentences)
+        self.assertEqual(0.0, self.queue.length(message))
+
+    def test_sentence_of_any_task_of_message_joins_it(self):
+        message = self.message("t1")
+        self.queue.link(message, "t2")
+        sentence = self.sentence(1, "t2")
+        self.queue.add(sentence)
+        self.assertEqual([sentence], message.sentences)
+        self.assertEqual({"t1", "t2"}, message.task_ids)
+        self.assertEqual("t2", self.queue.task_of(message))
+
+    def test_task_of_message_without_tasks_is_none(self):
+        message = Message("s1", sent=False)
+        self.queue.append(message)
+        self.assertIsNone(self.queue.task_of(message))
+
+    def test_unknown_task_sentence_is_deleted_with_warning(self):
+        self.message("t1")
+        late = self.sentence(1, "unknown")
+        with self.assertLogs("tts_player.queue", "WARNING") as logs:
+            self.queue.add(late)
+        self.assertFalse(late.path.exists())
+        self.assertIn(late.path.name, logs.output[0])
+        self.assertEqual([], self.queue.messages[0].sentences)
+
+    def test_foreign_task_sentence_is_deleted_with_warning(self):
+        late = self.sentence(1, "beef")
+        with self.assertLogs("tts_player.queue", "WARNING"):
+            self.queue.add(late)
+        self.assertFalse(late.path.exists())
+        self.assertEqual([], self.queue.messages)
 
     def test_sentences_ordered_by_recv_ns(self):
+        message = self.message()
         a, b, c = (self.sentence(n, index=n) for n in (1, 2, 3))
         for s in (c, a, b):
             self.queue.add(s)
-        self.assertEqual([a, b, c], self.queue.messages[0].sentences)
+        self.assertEqual([a, b, c], message.sentences)
 
-    def test_messages_ordered_by_first_recv_ns_in_any_add_order(self):
-        a = self.sentence(1, token="t1")
-        b = self.sentence(2, token="t2")
-        c = self.sentence(3, token="t3")
-        for s in (c, a, b):
-            self.queue.add(s)
-        self.assertEqual(["t1", "t2", "t3"], self.tokens())
-
-    def test_late_earlier_sentence_reorders_messages(self):
-        self.queue.add(self.sentence(5, token="t1", index=1))
-        self.queue.add(self.sentence(3, token="t2"))
-        self.queue.add(self.sentence(1, token="t1", index=0))
-        self.assertEqual(["t1", "t2"], self.tokens())
+    def test_messages_ordered_by_arrival_not_by_sentences(self):
+        """Порядок — приход задач хука: переозвучка не двигает сообщение в списке."""
+        first, second = self.message("t1"), self.message("t2")
+        self.queue.add(self.sentence(5, "t1"))
+        self.queue.add(self.sentence(3, "t2"))
+        self.assertEqual([first, second], self.queue.messages)
 
     def test_messages_is_a_copy(self):
-        self.queue.add(self.sentence(1))
+        self.add(1)
         self.queue.messages.clear()
         self.assertEqual(1, len(self.queue.messages))
 
@@ -73,7 +121,7 @@ class MessageQueueTest(unittest.TestCase):
 
     def test_following_and_preceding_walk_messages(self):
         for n in (1, 2, 3):
-            self.queue.add(self.sentence(n, token=f"t{n}"))
+            self.add(n, task=f"t{n}")
         first, second, third = self.queue.messages
         self.assertIs(second, self.queue.following(first))
         self.assertIs(third, self.queue.following(second))
@@ -84,7 +132,7 @@ class MessageQueueTest(unittest.TestCase):
 
     def test_first_unheard_is_earliest_not_heard(self):
         for n in (1, 2, 3):
-            self.queue.add(self.sentence(n, token=f"t{n}"))
+            self.add(n, task=f"t{n}")
         first, second, _ = self.queue.messages
         self.assertIs(first, self.queue.first_unheard())
         self.queue.mark_heard(first)
@@ -92,56 +140,90 @@ class MessageQueueTest(unittest.TestCase):
         self.assertIs(second, self.queue.first_unheard())
 
     def test_first_unheard_none_when_all_heard(self):
-        self.queue.add(self.sentence(1))
+        self.add(1)
         self.queue.mark_heard(self.queue.messages[0])
         self.assertIsNone(self.queue.first_unheard())
 
     def test_new_message_is_not_heard(self):
-        self.queue.add(self.sentence(1))
+        self.add(1)
         self.assertFalse(self.queue.messages[0].heard)
 
-    def test_is_complete_false_for_last_message_without_audio(self):
-        self.queue.add(self.sentence(1))
+    def test_is_complete_false_while_its_task_is_last_delivered(self):
+        self.add(1)
         self.assertFalse(self.queue.is_complete(self.queue.messages[0]))
 
-    def test_is_complete_true_when_later_message_appears(self):
-        self.queue.add(self.sentence(1, token="t1"))
-        first = self.queue.messages[0]
-        self.queue.add(self.sentence(2, token="t2"))
-        self.assertTrue(self.queue.is_complete(first))
-        self.assertFalse(self.queue.is_complete(self.queue.messages[1]))
+    def test_is_complete_false_for_message_without_sentences_yet(self):
+        first = self.message("t1")
+        self.message("t2")
+        self.assertFalse(self.queue.is_complete(first))
+
+    def test_is_complete_when_later_task_delivers(self):
+        """Демон синтезирует задачи по одной: предложение более поздней задачи завершает
+        все сообщения, чьи задачи отправлены раньше, — даже без своих предложений."""
+        first, second = self.message("t1"), self.message("t2")
+        third = self.message("t3")
+        self.queue.add(self.sentence(1, "t2"))
+        self.assertEqual([True, False, False],
+                         [self.queue.is_complete(m) for m in (first, second, third)])
+
+    def test_later_task_of_earlier_message_is_not_complete(self):
+        """Переозвучка: новая задача первого сообщения — после задачи второго."""
+        first, second = self.message("t1"), self.message("t2")
+        self.queue.add(self.sentence(1, "t1"))
+        self.queue.link(first, "t3")
+        self.queue.add(self.sentence(2, "t2"))
+        self.assertFalse(self.queue.is_complete(first))
+        self.assertFalse(self.queue.is_complete(second))
+        self.queue.add(self.sentence(3, "t3"))
+        self.assertTrue(self.queue.is_complete(second))
+
+    def test_not_sent_message_is_complete(self):
+        """Задача не ушла в демон: ждать нечего."""
+        message = Message("s1", sent=False)
+        self.queue.append(message)
+        self.assertTrue(self.queue.is_complete(message))
 
     def test_late_sentence_of_started_message_is_added(self):
-        a, b = self.sentence(1, index=0), self.sentence(2, index=1)
-        self.queue.add(a)
+        a = self.add(1, index=0)
         message = self.queue.messages[0]
         self.queue.start(message)
-        self.queue.add(b)
+        b = self.add(2, index=1)
         self.assertEqual([a, b], message.sentences)
 
     def test_sentence_of_heard_message_is_deleted_not_added(self):
-        self.queue.add(self.sentence(1, token="t1", index=0))
+        self.add(1, task="t1", index=0)
         message = self.queue.messages[0]
         self.queue.start(message)
         self.queue.mark_heard(message)
-        late = self.sentence(3, token="t1", index=1)
+        late = self.sentence(3, task="t1", index=1)
         with self.assertLogs("tts_player.queue", "INFO"):
             self.queue.add(late)
         self.assertEqual(1, len(message.sentences))
         self.assertFalse(late.path.exists())
 
+    def test_forget_audio_deletes_files_and_resets_message(self):
+        message = self.message()
+        sentences = [self.add(n, index=n) for n in (1, 2)]
+        audio = self.dir / "joined.wav"
+        audio.write_bytes(b"wav")
+        message.audio, message.created_at, message.duration_s = audio, 5.0, 1.0
+        message.heard = True
+        self.queue.forget_audio(message)
+        self.assertFalse(any(s.path.exists() for s in sentences))
+        self.assertFalse(audio.exists())
+        self.assertEqual(([], None, None, None, False),
+                         (message.sentences, message.audio, message.created_at,
+                          message.duration_s, message.heard))
+        self.assertEqual([message], self.queue.messages)
+
     def start_messages(self, count):
-        sentences = [self.sentence(n, token=f"t{n}") for n in range(1, count + 1)]
-        for s in sentences:
-            self.queue.add(s)
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, count + 1)]
         for message in self.queue.messages:
             self.queue.start(message)
         return sentences
 
     def test_sixth_started_message_deletes_first_only(self):
-        sentences = [self.sentence(n, token=f"t{n}") for n in range(1, 7)]
-        for s in sentences:
-            self.queue.add(s)
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, 7)]
         messages = self.queue.messages
         for message in messages[:5]:
             self.queue.start(message)
@@ -151,11 +233,11 @@ class MessageQueueTest(unittest.TestCase):
         self.assertTrue(all(s.path.exists() for s in sentences[1:]))
         self.assertEqual(messages[1:], self.queue.messages)
 
-    def start_token(self, token):
-        self.queue.start(next(m for m in self.queue.messages if m.token == token))
+    def start_task(self, task):
+        self.queue.start(next(m for m in self.queue.messages if task in m.task_ids))
 
     def test_is_started_only_after_start(self):
-        self.queue.add(self.sentence(1, token="t1"))
+        self.add(1, task="t1")
         message = self.queue.messages[0]
         self.assertFalse(self.queue.is_started(message))
         self.queue.start(message)
@@ -166,9 +248,9 @@ class MessageQueueTest(unittest.TestCase):
         self.start_messages(2)
         first = self.queue.messages[0]
         self.assertTrue(self.queue.is_started(first))
-        self.queue.add(self.sentence(9, token="t9"))
+        self.add(9, task="t9")
         evicted = first
-        self.start_token("t9")
+        self.start_task("t9")
         self.assertFalse(self.queue.is_started(evicted))
 
     def test_smaller_tail_shrinks_by_one_per_start(self):
@@ -177,21 +259,21 @@ class MessageQueueTest(unittest.TestCase):
         self.start_messages(5)
         self.queue.tail = 2
         for n in range(6, 9):
-            self.queue.add(self.sentence(n, token=f"t{n}"))
-        self.start_token("t6")
-        self.assertEqual(["t3", "t4", "t5", "t6", "t7", "t8"], self.tokens())
-        self.start_token("t7")
-        self.assertEqual(["t5", "t6", "t7", "t8"], self.tokens())
-        self.start_token("t8")
-        self.assertEqual(["t7", "t8"], self.tokens())
+            self.add(n, task=f"t{n}")
+        self.start_task("t6")
+        self.assertEqual(["t3", "t4", "t5", "t6", "t7", "t8"], self.tasks())
+        self.start_task("t7")
+        self.assertEqual(["t5", "t6", "t7", "t8"], self.tasks())
+        self.start_task("t8")
+        self.assertEqual(["t7", "t8"], self.tasks())
 
     def test_shrunk_tail_then_holds_its_size(self):
         self.start_messages(5)
         self.queue.tail = 2
         for n in range(6, 10):
-            self.queue.add(self.sentence(n, token=f"t{n}"))
+            self.add(n, task=f"t{n}")
             self.queue.start(self.queue.messages[-1])
-        self.assertEqual(["t8", "t9"], self.tokens())
+        self.assertEqual(["t8", "t9"], self.tasks())
 
     def test_larger_tail_stops_evicting_until_new_limit(self):
         """tail 2 → 5: новые начатые не вытесняют, пока их меньше 5."""
@@ -199,12 +281,12 @@ class MessageQueueTest(unittest.TestCase):
         self.start_messages(2)
         self.queue.tail = 5
         for n in range(3, 6):
-            self.queue.add(self.sentence(n, token=f"t{n}"))
+            self.add(n, task=f"t{n}")
             self.queue.start(self.queue.messages[-1])
-        self.assertEqual(["t1", "t2", "t3", "t4", "t5"], self.tokens())
-        self.queue.add(self.sentence(6, token="t6"))
+        self.assertEqual(["t1", "t2", "t3", "t4", "t5"], self.tasks())
+        self.add(6, task="t6")
         self.queue.start(self.queue.messages[-1])
-        self.assertEqual(["t2", "t3", "t4", "t5", "t6"], self.tokens())
+        self.assertEqual(["t2", "t3", "t4", "t5", "t6"], self.tasks())
 
     def test_restarting_started_message_does_not_evict(self):
         sentences = self.start_messages(5)
@@ -212,9 +294,7 @@ class MessageQueueTest(unittest.TestCase):
         self.assertTrue(all(s.path.exists() for s in sentences))
 
     def test_deleted_message_leaves_queue_and_missing_file_is_fine(self):
-        sentences = [self.sentence(n, token=f"t{n}") for n in range(1, 8)]
-        for s in sentences:
-            self.queue.add(s)
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, 8)]
         sentences[1].path.unlink()
         for message in self.queue.messages:
             self.queue.start(message)
@@ -223,19 +303,15 @@ class MessageQueueTest(unittest.TestCase):
         self.assertEqual(5, len(self.queue.messages))
 
     def test_all_sentences_of_oldest_message_deleted(self):
-        first = [self.sentence(1, index=0), self.sentence(2, index=1)]
-        for s in first:
-            self.queue.add(s)
+        first = [self.add(1, index=0), self.add(2, index=1)]
         for n in range(3, 8):
-            self.queue.add(self.sentence(n, token=f"t{n}"))
+            self.add(n, task=f"t{n}")
         for message in self.queue.messages:
             self.queue.start(message)
         self.assertFalse(any(s.path.exists() for s in first))
 
     def test_unstarted_messages_never_deleted(self):
-        sentences = [self.sentence(n, token=f"t{n}") for n in range(1, 21)]
-        for s in sentences:
-            self.queue.add(s)
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, 21)]
         self.queue.start(self.queue.messages[0])
         self.assertTrue(all(s.path.exists() for s in sentences))
         self.assertEqual(20, len(self.queue.messages))
@@ -244,108 +320,61 @@ class MessageQueueTest(unittest.TestCase):
         with mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")):
             with self.assertLogs("tts_player.queue", "ERROR"):
                 self.start_messages(7)
-        self.assertEqual(["t3", "t4", "t5", "t6", "t7"], self.tokens())
+        self.assertEqual(["t3", "t4", "t5", "t6", "t7"], self.tasks())
 
     def test_sentence_of_evicted_message_is_deleted_not_added(self):
         self.start_messages(6)
-        late = self.sentence(100, token="t1", index=1)
-        with self.assertLogs("tts_player.queue", "INFO"):
+        late = self.sentence(100, task="t1", index=1)
+        with self.assertLogs("tts_player.queue", "WARNING"):
             self.queue.add(late)
         self.assertFalse(late.path.exists())
-        self.assertNotIn("t1", self.tokens())
+        self.assertNotIn("t1", self.tasks())
 
     def test_sentence_of_evicted_message_with_missing_file_is_fine(self):
         self.start_messages(6)
-        late = self.sentence(100, token="t1", index=1)
+        late = self.sentence(100, task="t1", index=1)
         late.path.unlink()
-        self.queue.add(late)
-        self.assertNotIn("t1", self.tokens())
+        with self.assertLogs("tts_player.queue", "WARNING"):
+            self.queue.add(late)
+        self.assertNotIn("t1", self.tasks())
 
     def test_sentence_of_evicted_message_unlink_error_is_logged(self):
         self.start_messages(6)
-        late = self.sentence(100, token="t1", index=1)
+        late = self.sentence(100, task="t1", index=1)
         with mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")):
             with self.assertLogs("tts_player.queue", "ERROR") as logs:
                 self.queue.add(late)
         self.assertTrue(any(str(late.path) in line for line in logs.output))
-        self.assertNotIn("t1", self.tokens())
+        self.assertNotIn("t1", self.tasks())
 
     def test_messages_with_same_fields_are_different_messages(self):
-        self.assertNotEqual(Message("unknown", "s1", "t1", []),
-                            Message("unknown", "s1", "t1", []))
-
-    def test_release_returns_unheard_and_keeps_their_files(self):
-        a0, a1 = self.sentence(1, token="ta", index=0), self.sentence(2, token="ta", index=1)
-        b0 = self.sentence(3, token="tb")
-        for s in (b0, a1, a0):
-            self.queue.add(s)
-        self.assertEqual([a0, a1, b0], self.queue.release(None, 0.0))
-        self.assertTrue(all(s.path.exists() for s in (a0, a1, b0)))
-
-    def test_release_deletes_heard(self):
-        a0, b0 = self.sentence(1, token="ta"), self.sentence(2, token="tb")
-        self.queue.add(a0)
-        self.queue.add(b0)
-        first, second = self.queue.messages
-        self.queue.start(first)
-        self.queue.mark_heard(first)
-        self.queue.start(second)
-        with self.assertLogs("tts_player.queue", "WARNING"):
-            released = self.queue.release(second, 0.0)
-        self.assertEqual([b0], released)
-        self.assertFalse(a0.path.exists())
-        self.assertTrue(b0.path.exists())
-
-    def test_release_when_all_heard_returns_nothing_and_deletes_all(self):
-        a0 = self.sentence(1, token="ta")
-        self.queue.add(a0)
-        self.queue.mark_heard(self.queue.messages[0])
-        self.assertEqual([], self.queue.release(None, 0.0))
-        self.assertFalse(a0.path.exists())
-
-    def test_release_forgets_all_messages(self):
-        self.queue.add(self.sentence(1, token="ta"))
-        self.queue.add(self.sentence(2, token="tb"))
-        self.queue.release(None, 0.0)
-        self.assertEqual([], self.queue.messages)
-        self.assertEqual([], self.queue.release(None, 0.0))
+        self.assertNotEqual(Message("s1"), Message("s1"))
 
     def test_clear_deletes_all_files_and_forgets(self):
-        sentences = [self.sentence(n, token=f"t{n}") for n in range(1, 4)]
-        for s in sentences:
-            self.queue.add(s)
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, 4)]
         self.queue.start(self.queue.messages[0])
         self.queue.mark_heard(self.queue.messages[0])
         self.queue.clear()
         self.assertEqual([], self.queue.messages)
         self.assertFalse(any(s.path.exists() for s in sentences))
-        self.assertEqual([], self.queue.release(None, 0.0))
 
     def test_sentence_of_cleared_message_is_deleted_not_added(self):
-        self.queue.add(self.sentence(1, token="t1", index=0))
+        self.add(1, task="t1", index=0)
         self.queue.clear()
-        late = self.sentence(2, token="t1", index=1)
-        with self.assertLogs("tts_player.queue", "INFO"):
+        late = self.sentence(2, task="t1", index=1)
+        with self.assertLogs("tts_player.queue", "WARNING"):
             self.queue.add(late)
         self.assertFalse(late.path.exists())
         self.assertEqual([], self.queue.messages)
 
     def test_new_message_after_clear_is_added(self):
-        self.queue.add(self.sentence(1, token="t1"))
+        self.add(1, task="t1")
         self.queue.clear()
-        fresh = self.sentence(2, token="t2")
-        self.queue.add(fresh)
+        fresh = self.add(2, task="t2")
         self.assertEqual([[fresh]], [m.sentences for m in self.queue.messages])
 
-    def test_release_forgets_evicted_keys(self):
-        self.start_messages(6)
-        self.queue.release(None, 0.0)
-        late = self.sentence(100, token="t1", index=1)
-        self.queue.add(late)
-        self.assertEqual(["t1"], self.tokens())
-
     def test_start_of_forgotten_message_is_noop(self):
-        self.queue.add(self.sentence(1, token="t1"))
+        self.add(1, task="t1")
         message = self.queue.messages[0]
         self.queue.clear()
         with self.assertLogs("tts_player.queue", "DEBUG"):
@@ -353,86 +382,6 @@ class MessageQueueTest(unittest.TestCase):
         self.assertEqual([], self.queue.messages)
         self.start_messages(6)
         self.assertEqual(5, len(self.queue.messages))
-
-
-class TaskIdTest(unittest.TestCase):
-    """Ключ сообщения — id задачи демона; id "unknown" — пара (session_id, token)."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.dir = Path(self._tmp.name)
-        self.queue = MessageQueue(tail=5)
-
-    sentence = MessageQueueTest.sentence
-
-    def test_two_passes_of_one_task_make_one_message_by_recv_ns(self):
-        """Два прохода синтеза одной задачи (новый token) — одно сообщение; token — первого прохода."""
-        a0 = self.sentence(1, token="aa", index=0, task="f00d")
-        a1 = self.sentence(2, token="aa", index=1, task="f00d")
-        b0 = self.sentence(4, token="bb", index=0, task="f00d")
-        b1 = self.sentence(5, token="bb", index=1, task="f00d")
-        for s in (a0, b1, a1, b0):
-            self.queue.add(s)
-        [message] = self.queue.messages
-        self.assertEqual([a0, a1, b0, b1], message.sentences)
-        self.assertEqual(("f00d", "s1", "aa"), (message.task_id, message.session_id, message.token))
-
-    def test_other_task_of_same_session_is_other_message_and_completes_first(self):
-        self.queue.add(self.sentence(1, token="aa", task="f00d"))
-        first = self.queue.messages[0]
-        self.assertFalse(self.queue.is_complete(first))
-        self.queue.add(self.sentence(2, token="aa", task="beef"))
-        self.assertEqual(["f00d", "beef"], [m.task_id for m in self.queue.messages])
-        self.assertTrue(self.queue.is_complete(first))
-        self.assertFalse(self.queue.is_complete(self.queue.messages[1]))
-
-    def test_unknown_task_groups_by_session_and_token(self):
-        self.queue.add(self.sentence(1, token="aa"))
-        self.queue.add(self.sentence(2, token="aa", index=1))
-        self.queue.add(self.sentence(3, token="bb"))
-        self.assertEqual([2, 1], [len(m.sentences) for m in self.queue.messages])
-
-    def test_unknown_task_is_not_merged_with_known(self):
-        self.queue.add(self.sentence(1, token="aa", task="f00d"))
-        self.queue.add(self.sentence(2, token="aa", index=1))
-        self.assertEqual(["f00d", "unknown"], [m.task_id for m in self.queue.messages])
-
-    def test_late_pass_of_evicted_task_is_deleted(self):
-        self.queue.tail = 1
-        self.queue.add(self.sentence(1, token="aa", task="f00d"))
-        self.queue.add(self.sentence(2, token="aa", task="beef"))
-        for message in self.queue.messages:
-            self.queue.start(message)
-        late = self.sentence(3, token="cc", task="f00d")
-        with self.assertLogs("tts_player.queue", "INFO"):
-            self.queue.add(late)
-        self.assertFalse(late.path.exists())
-        self.assertEqual(["beef"], [m.task_id for m in self.queue.messages])
-
-    def test_late_pass_of_cleared_task_is_deleted(self):
-        self.queue.add(self.sentence(1, token="aa", task="f00d"))
-        self.queue.clear()
-        late = self.sentence(2, token="bb", task="f00d")
-        with self.assertLogs("tts_player.queue", "INFO"):
-            self.queue.add(late)
-        self.assertFalse(late.path.exists())
-        self.assertEqual([], self.queue.messages)
-
-    def test_late_pass_of_heard_task_is_deleted(self):
-        self.queue.add(self.sentence(1, token="aa", task="f00d"))
-        self.queue.mark_heard(self.queue.messages[0])
-        late = self.sentence(2, token="bb", task="f00d")
-        with self.assertLogs("tts_player.queue", "INFO"):
-            self.queue.add(late)
-        self.assertFalse(late.path.exists())
-
-    def test_release_returns_both_passes(self):
-        a0 = self.sentence(1, token="aa", task="f00d")
-        b0 = self.sentence(2, token="bb", task="f00d")
-        self.queue.add(a0)
-        self.queue.add(b0)
-        self.assertEqual([a0, b0], self.queue.release(None, 0.0))
 
 
 if __name__ == "__main__":

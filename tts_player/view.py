@@ -29,9 +29,12 @@ def format_seconds(seconds: float) -> str:
 
 
 def _start_time(message: Message) -> str:
-    """Время — всегда от первого предложения: created_at приходит позже, и время строки
-    не должно прыгать. Без предложений (их нет у сообщения только в тестах) — created_at."""
-    if message.sentences:
+    """Время — прихода задачи хука: оно есть с появления строки и не прыгает ни с первым
+    предложением, ни с переозвучкой. Без него (сообщения тестов) — первое предложение, затем
+    created_at."""
+    if message.received_at is not None:
+        stamp = message.received_at
+    elif message.sentences:
         stamp = message.sentences[0].recv_ns / 1e9
     elif message.created_at is not None:
         stamp = message.created_at

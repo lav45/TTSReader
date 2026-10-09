@@ -1,4 +1,4 @@
-"""Тесты привязки склейки демона к сообщению очереди, длины, карты позиций и release."""
+"""Тесты привязки склейки демона к сообщению очереди, длины и карты позиций."""
 import logging
 import tempfile
 import unittest
@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from tts_player.history import HistoryEntry
-from tts_player.model import Sentence
+from tts_player.model import Message, Sentence
 from tts_player.queue import MessageQueue
 
 RATE = 1000
@@ -33,7 +33,12 @@ class QueueHistoryTest(unittest.TestCase):
             d.mkdir()
         self.queue = MessageQueue(tail=5)
 
-    def add(self, recv_ns, seconds, token="t1", index=0, session="s1", task="unknown"):
+    def add(self, recv_ns, seconds, task="t1", index=0, session="s1", token="aa"):
+        """Предложение задачи task; сообщения для task ещё нет — оно заводится первым."""
+        if not any(task in m.task_ids for m in self.queue.messages):
+            message = Message(session)
+            self.queue.append(message)
+            self.queue.link(message, task)
         path = self.dir / f"{task}-{session}-{token}-{index}-{recv_ns}.wav"
         write_wav(path, seconds)
         sentence = Sentence(recv_ns, task, session, token, index, path)
@@ -45,9 +50,8 @@ class QueueHistoryTest(unittest.TestCase):
         write_wav(path, duration)
         return HistoryEntry(path, created_s, session, "proj", duration)
 
-    def message(self, token="t1", session="s1"):
-        return next(m for m in self.queue.messages
-                    if m.token == token and m.session_id == session)
+    def message(self, task="t1"):
+        return next(m for m in self.queue.messages if task in m.task_ids)
 
     def test_clip_of_second_pass_ends_message_of_both_passes(self):
         """Как у демона: пауза обрывает проход 1 на s1 без записи истории, проход 2 (новый
@@ -60,20 +64,32 @@ class QueueHistoryTest(unittest.TestCase):
         with self.assertLogs("tts_player.queue", "WARNING"):
             message = self.queue.attach(self.entry(2), self.store)
         self.assertEqual([message], self.queue.messages)
-        self.assertEqual(("f00d", "aa", 4), (message.task_id, message.token,
-                                             len(message.sentences)))
+        self.assertEqual(4, len(message.sentences))
         self.assertIsNone(message.audio)
         self.assertEqual(100.0, message.created_at)
         self.assertTrue(self.queue.is_complete(message))
 
     def test_attaches_latest_message_of_session_without_audio(self):
-        self.add(1_000_000_000, 1, token="old")
-        self.add(2_000_000_000, 1, token="new")
-        other = self.add(3_000_000_000, 1, token="x", session="s2")
+        self.add(1_000_000_000, 1, task="old")
+        self.add(2_000_000_000, 1, task="new")
+        self.add(3_000_000_000, 1, task="x", session="s2")
         message = self.queue.attach(self.entry(1), self.store)
-        self.assertEqual("new", message.token)
+        self.assertIs(self.message("new"), message)
         self.assertIsNone(self.message("old").audio)
-        self.assertIsNone(self.message(other.token, "s2").audio)
+        self.assertIsNone(self.message("x").audio)
+
+    def test_message_without_sentences_is_not_candidate(self):
+        """Сообщение задачи хука, чьих предложений ещё нет, склейку не берёт."""
+        with_sentences = self.message_with(1_000_000_000, "old")
+        empty = Message("s1")
+        self.queue.append(empty)
+        self.queue.link(empty, "new")
+        self.assertIs(with_sentences, self.queue.attach(self.entry(1), self.store))
+        self.assertIsNone(empty.created_at)
+
+    def message_with(self, recv_ns, task):
+        self.add(recv_ns, 1, task=task)
+        return self.message(task)
 
     def test_matching_copies_audio_and_fills_fields(self):
         self.add(1_000_000_000, 1.0, index=0)
@@ -109,11 +125,11 @@ class QueueHistoryTest(unittest.TestCase):
         self.assertIsNone(self.queue.attach(self.entry(1.0), self.store))
 
     def test_already_attached_message_is_skipped(self):
-        self.add(1_000_000_000, 1.0, token="a")
-        self.add(2_000_000_000, 1.0, token="b")
+        self.add(1_000_000_000, 1.0, task="a")
+        self.add(2_000_000_000, 1.0, task="b")
         first = self.queue.attach(self.entry(1.0, name="tts-1.wav"), self.store)
         second = self.queue.attach(self.entry(1.0, name="tts-2.wav"), self.store)
-        self.assertEqual(("b", "a"), (first.token, second.token))
+        self.assertEqual((self.message("b"), self.message("a")), (first, second))
 
     def test_copy_failure_is_mismatch(self):
         self.add(1_000_000_000, 1.0)
@@ -199,15 +215,15 @@ class QueueHistoryTest(unittest.TestCase):
             message = self.queue.attach(self.entry(5.0), self.store)
         self.assertTrue(self.queue.is_complete(message))
 
-    def attach_first(self, token, recv_ns, name="tts-1.wav"):
-        self.add(recv_ns, 1.0, token=token)
+    def attach_first(self, task, recv_ns, name="tts-1.wav"):
+        self.add(recv_ns, 1.0, task=task)
         message = self.queue.attach(self.entry(1.0, name=name), self.store)
         self.assertIsNotNone(message.audio)
         return message
 
     def test_unstarted_audio_message_not_evicted(self):
         for i in range(self.queue.tail + 1):
-            self.add((i + 1) * 1_000_000_000, 0.1, token=f"m{i}")
+            self.add((i + 1) * 1_000_000_000, 0.1, task=f"m{i}")
         for message in self.queue.messages:
             self.queue.start(message)
         message = self.attach_first("last", 50_000_000_000, name="tts-9.wav")
@@ -216,83 +232,11 @@ class QueueHistoryTest(unittest.TestCase):
 
     def audio_message(self):
         """Сообщение из двух предложений по 0,5 с со склейкой 1,0 с."""
-        a = self.add(1_000_000_000, 0.5, token="a", index=0)
-        b = self.add(2_000_000_000, 0.5, token="a", index=1)
+        a = self.add(1_000_000_000, 0.5, task="a", index=0)
+        b = self.add(2_000_000_000, 0.5, task="a", index=1)
         message = self.queue.attach(self.entry(1.0), self.store)
         self.assertIsNotNone(message.audio)
         return message, [a, b]
-
-    def test_release_current_audio_message_from_start_returns_all_sentences(self):
-        message, sentences = self.audio_message()
-        self.queue.start(message)
-        self.assertEqual(sentences, self.queue.release(message, 0.0))
-        self.assertFalse(message.audio.exists())
-        self.assertTrue(all(s.path.exists() for s in sentences))
-
-    def test_release_heard_audio_message_returns_nothing_and_deletes_files(self):
-        message, sentences = self.audio_message()
-        self.queue.start(message)
-        self.queue.mark_heard(message)
-        self.assertEqual([], self.queue.release(None, 0.0))
-        self.assertFalse(message.audio.exists())
-        self.assertFalse(any(s.path.exists() for s in sentences))
-
-    def test_release_unstarted_audio_message_returns_all_sentences(self):
-        message, sentences = self.audio_message()
-        self.assertEqual(sentences, self.queue.release(None, 0.0))
-        self.assertFalse(message.audio.exists())
-
-    def three_sentences(self):
-        """Три предложения по 0,5 с одного сообщения, сообщение начато."""
-        sentences = [self.add((i + 1) * 1_000_000_000, 0.5, token="a", index=i)
-                     for i in range(3)]
-        message = self.message("a")
-        self.queue.start(message)
-        return message, sentences
-
-    def test_release_current_returns_sentences_ending_after_position(self):
-        message, sentences = self.three_sentences()
-        self.assertEqual(sentences[1:], self.queue.release(message, 0.75))
-        self.assertFalse(sentences[0].path.exists())
-        self.assertTrue(all(s.path.exists() for s in sentences[1:]))
-
-    def test_release_current_at_sentence_boundary_skips_finished(self):
-        message, sentences = self.three_sentences()
-        self.assertEqual(sentences[2:], self.queue.release(message, 1.0))
-        self.assertFalse(any(s.path.exists() for s in sentences[:2]))
-
-    def test_release_current_with_audio_uses_sentence_offsets(self):
-        message, sentences = self.three_sentences()
-        self.queue.attach(self.entry(1.5), self.store)
-        self.assertIsNotNone(message.audio)
-        self.assertEqual(sentences[1:], self.queue.release(message, 0.75))
-        self.assertFalse(message.audio.exists())
-        self.assertFalse(sentences[0].path.exists())
-
-    def test_release_current_keeps_zero_length_sentence_at_position(self):
-        message, sentences = self.three_sentences()
-        sentences[1].path.write_bytes(b"garbage")
-        with self.assertLogs("tts_player.queue", logging.WARNING):
-            released = self.queue.release(message, 0.5)
-        self.assertEqual(sentences[1:], released)
-
-    def test_release_current_drops_zero_length_sentence_before_position(self):
-        message, sentences = self.three_sentences()
-        sentences[1].path.write_bytes(b"garbage")
-        with self.assertLogs("tts_player.queue", logging.WARNING):
-            released = self.queue.release(message, 0.75)
-        self.assertEqual(sentences[2:], released)
-
-    def test_release_heard_current_returns_nothing_and_deletes_files(self):
-        message, sentences = self.three_sentences()
-        self.queue.mark_heard(message)
-        self.assertEqual([], self.queue.release(message, 0.75))
-        self.assertFalse(any(s.path.exists() for s in sentences))
-
-    def test_release_mixes_current_and_unheard_by_recv_ns(self):
-        message, sentences = self.three_sentences()
-        later = self.add(9_000_000_000, 0.5, token="b")
-        self.assertEqual(sentences[2:] + [later], self.queue.release(message, 1.2))
 
     def test_failed_copy_leaves_no_partial_file(self):
         self.add(1_000_000_000, 1.0)
@@ -308,20 +252,14 @@ class QueueHistoryTest(unittest.TestCase):
         self.assertEqual([], list(self.store.iterdir()))
 
     def test_eviction_deletes_audio(self):
-        self.add(1_000_000_000, 1.0, token="m0")
+        self.add(1_000_000_000, 1.0, task="m0")
         message = self.queue.attach(self.entry(1.0), self.store)
         for i in range(1, self.queue.tail + 1):
-            self.add((i + 1) * 1_000_000_000, 0.1, token=f"m{i}")
+            self.add((i + 1) * 1_000_000_000, 0.1, task=f"m{i}")
         for item in self.queue.messages:
             self.queue.start(item)
         self.assertFalse(message.audio.exists())
         self.assertNotIn(message, self.queue.messages)
-
-    def test_release_deletes_audio(self):
-        self.add(1_000_000_000, 1.0)
-        message = self.queue.attach(self.entry(1.0), self.store)
-        self.queue.release(None, 0.0)
-        self.assertFalse(message.audio.exists())
 
     def test_clear_deletes_audio_and_sentences(self):
         message, sentences = self.audio_message()

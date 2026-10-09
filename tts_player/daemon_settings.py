@@ -17,6 +17,10 @@ CONFIG_NAME = "config.json"
 SESSIONS_DIR = "sessions.d"
 SESSION_KEYS = ("persona", "speed")
 DEFAULT_SPEED = 2.0  # как в claude-tts get_persona_config, если у персоны нет speed
+DEFAULT_SPEED_METHOD = "playback"  # как в claude-tts write_queue_message, если у персоны нет
+# голос персоны в задаче демона (формат claude-tts 9.20.1, audio.py:670); нет у персоны — ""
+VOICE_KEYS = ("voice_kokoro", "voice_kokoro_blend", "voice_sherpa", "speaker_sherpa",
+              "voice_mlx", "speaker_mlx", "lang_mlx", "pitch_filter")
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,15 @@ class VoiceSettings:
     speed: float
 
 
+@dataclass(frozen=True)
+class ActiveVoice:
+    """Текущий голос озвучки: активная персона, её скорость и поля задачи демона
+    (persona, speed, speed_method и VOICE_KEYS) — как их пишет хук claude-tts."""
+    persona: str
+    speed: float
+    fields: dict
+
+
 class DaemonSettings:
     SPEED_MIN = 0.5
     SPEED_MAX = 4.0
@@ -44,18 +57,11 @@ class DaemonSettings:
     def load(self) -> VoiceSettings:
         config = self._read_config()
         personas = config["personas"]
-        active = config.get("active_persona")
-        if not isinstance(active, str) or active not in personas:
-            raise SettingsError(
-                f"В {self._config} активная персона {active!r} не найдена среди personas"
-            )
+        active, speed = self._active(config)
         voices = [
             Voice(name, str(persona.get("description") or ""))
             for name, persona in personas.items()
         ]
-        speed = personas[active].get("speed", DEFAULT_SPEED)
-        if self._not_number(speed):
-            raise SettingsError(f"В {self._config} у персоны {active!r} скорость не число")
         if not self.SPEED_MIN <= speed <= self.SPEED_MAX:
             # спин прижал бы её к границе, и «Сохранить» молча записал бы другую скорость
             raise SettingsError(
@@ -63,6 +69,32 @@ class DaemonSettings:
                 f" вне диапазона {self.SPEED_MIN}–{self.SPEED_MAX}"
             )
         return VoiceSettings(voices=voices, active=active, speed=float(speed))
+
+    def active_voice(self) -> ActiveVoice:
+        """Голос, которым озвучивать сейчас (переозвучка, контракт (12)); диапазон спина
+        экрана настроек здесь не проверяется. Сбой разбора — SettingsError."""
+        config = self._read_config()
+        active, speed = self._active(config)
+        persona = config["personas"][active]
+        fields = {
+            "persona": active,
+            "speed": float(speed),
+            "speed_method": persona.get("speed_method") or DEFAULT_SPEED_METHOD,
+            **{key: persona.get(key, "") for key in VOICE_KEYS},
+        }
+        return ActiveVoice(active, float(speed), fields)
+
+    def _active(self, config: dict) -> tuple[str, int | float]:
+        """Активная персона и её скорость (число) из разобранного config.json."""
+        active = config.get("active_persona")
+        if not isinstance(active, str) or active not in config["personas"]:
+            raise SettingsError(
+                f"В {self._config} активная персона {active!r} не найдена среди personas"
+            )
+        speed = config["personas"][active].get("speed", DEFAULT_SPEED)
+        if self._not_number(speed):
+            raise SettingsError(f"В {self._config} у персоны {active!r} скорость не число")
+        return active, speed
 
     def save(self, persona: str, speed: float) -> None:
         config = self._read_config()
