@@ -206,14 +206,14 @@ class PlayerHistoryTest(PlayerCase):
 
     def test_stop_during_joined_file_returns_whole_message(self) -> None:
         self.switch_on_a1()
-        self.player.stop()
+        self.player.shutdown()
         self.assertEqual(sorted([A0, A1, N0]), sorted(p.name for p in self.inbox_dir.iterdir()))
         self.assertEqual([], list(self.store_dir.iterdir()))
 
     def test_stop_after_joined_file_returns_only_next(self) -> None:
         self.switch_on_a1()
         self.finish()
-        self.player.stop()
+        self.player.shutdown()
         self.assertEqual([N0], [p.name for p in self.inbox_dir.iterdir()])
         self.assertEqual([], list(self.store_dir.iterdir()))
 
@@ -223,7 +223,7 @@ class PlayerHistoryTest(PlayerCase):
     def test_stop_returns_playing_and_unplayed_to_inbox(self) -> None:
         self.start_with(A0, A1, B0)
         self.assertEqual([A0], self.playback.played)
-        self.player.stop()
+        self.player.shutdown()
         self.assertEqual(sorted([A0, A1, B0]), sorted(p.name for p in self.inbox_dir.iterdir()))
         self.assertEqual([], list(self.store_dir.iterdir()))
 
@@ -231,14 +231,14 @@ class PlayerHistoryTest(PlayerCase):
         self.start_with(A0, A1, B0)
         self.finish()
         self.assertEqual([A0, A1], self.playback.played)
-        self.player.stop()
+        self.player.shutdown()
         self.assertEqual(sorted([A1, B0]), sorted(p.name for p in self.inbox_dir.iterdir()))
         self.assertEqual([], list(self.store_dir.iterdir()))
 
     def test_stop_returns_rest_of_sentence_at_position(self) -> None:
         self.start_with(A0, A1, B0)
         self.playback.at = 0.3
-        self.player.stop()
+        self.player.shutdown()
         self.assertEqual(sorted([A0, A1, B0]), sorted(p.name for p in self.inbox_dir.iterdir()))
 
     def test_file_error_skips_to_next(self) -> None:
@@ -300,7 +300,7 @@ class PlayerHistoryTest(PlayerCase):
     def test_stop_cancels_pending_retry_and_returns_sentence(self) -> None:
         self.start_with(A0)
         self.playback.fail("no output", True)
-        self.player.stop()
+        self.player.shutdown()
         self.glib.source_remove.assert_called_once_with(42)
         self.assertEqual([A0], [p.name for p in self.inbox_dir.iterdir()])
 
@@ -356,7 +356,7 @@ class PlayerHistoryTest(PlayerCase):
         state = self.state()
         self.assertEqual((False, "bb"), (state.output_down, state.current.token))
         self.assertAlmostEqual(0.1, state.position_s)
-        self.player.stop()
+        self.player.shutdown()
         self.assertEqual([B0], [p.name for p in self.inbox_dir.iterdir()])
 
     def test_pause_during_outage_cancels_retry_and_resume_plays_same_place(self) -> None:
@@ -386,20 +386,35 @@ class PlayerHistoryTest(PlayerCase):
         self.assertAlmostEqual(0.9, state.position_s)
 
     def test_heard_message_reached_by_prev_is_not_returned(self) -> None:
+        """aa прослушано по next и не возвращается; bb покинуто по prev растущим — вернётся."""
         self.start_with(A0, A1, B0)
         self.player.next()
         self.player.prev()
         self.player.toggle_play_stop()
-        self.player.stop()
-        self.assertEqual([], list(self.inbox_dir.iterdir()))
+        self.player.shutdown()
+        self.assertEqual([B0], [p.name for p in self.inbox_dir.iterdir()])
         self.assertEqual([], list(self.store_dir.iterdir()))
+
+    def test_change_callback_exception_is_logged_and_state_stays_consistent(self) -> None:
+        self.start_with(A0, B0)
+
+        def broken(state: PlayerState) -> None:
+            raise RuntimeError("window broke")
+
+        self.player.on_change = broken
+        with self.assertLogs("tts_player.player", "ERROR") as logs:
+            self.player.next()
+        self.assertIn("window broke", logs.output[0] + "".join(
+            str(r.exc_info[1]) for r in logs.records if r.exc_info))
+        self.assertEqual(("playing", "bb"), (self.state().status, self.token()))
+        self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_without_history_plays(self) -> None:
         player = Player(self.runtime, None, None, None)
         write_wav(self.inbox_dir / A0, SECONDS)
         player.start()
         self.assertEqual([A0], player._playback.played)
-        player.stop()
+        player.shutdown()
 
 
 class PlayerCursorTest(PlayerCase):
@@ -532,6 +547,21 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
         self.assertTrue(state.messages[0].heard)
 
+    def test_prev_from_incomplete_message_keeps_it_unheard_and_sentences_arrive(self) -> None:
+        self.start_with(A0, B0)
+        self.player.next()
+        self.assertEqual("bb", self.token())
+        self.player.prev()
+        bb = self.state().messages[1]
+        self.assertFalse(bb.heard)
+        self.assertTrue(self.state().messages[0].heard)
+        self.assertTrue(self.path(B0).exists())
+        self.arrive("1000000000000000006_tts_queue_S_bb_s1.wav")
+        bb = self.state().messages[1]
+        self.assertEqual(2, len(bb.sentences))
+        self.assertFalse(bb.heard)
+        self.assertTrue(all(s.path.exists() for s in bb.sentences))
+
     def test_next_on_last_does_nothing(self) -> None:
         self.start_with(A0, B0)
         self.player.next()
@@ -548,7 +578,7 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
     def test_prev_plays_preceding_from_start(self) -> None:
-        self.start_with(A0, A1, B0)
+        self.start_with(A0, B0, C0)
         self.player.next()
         self.playback.at = 0.3
         self.player.prev()
@@ -569,6 +599,41 @@ class PlayerButtonsTest(PlayerCase):
         self.player.toggle_pause()
         self.player.prev()
         self.assertEqual(("playing", "aa"), (self.state().status, self.token()))
+
+    def test_stop_playback_while_playing_stops_at_start(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.at = 0.3
+        self.player.stop_playback()
+        state = self.state()
+        self.assertEqual(("stopped", 0.0), (state.status, state.position_s))
+        self.assertIsNone(self.playback.playing)
+
+    def test_stop_playback_while_paused_stops_at_start(self) -> None:
+        self.start_with(A0, B0)
+        self.player.toggle_pause()
+        self.player.stop_playback()
+        state = self.state()
+        self.assertEqual(("stopped", 0.0), (state.status, state.position_s))
+
+    def test_stop_playback_when_stopped_or_idle_changes_nothing(self) -> None:
+        self.player.start()
+        self.player.stop_playback()
+        self.assertEqual("idle", self.state().status)
+        self.start_with(A0)
+        self.player.toggle_play_stop()
+        count = len(self.states)
+        stops = self.playback.stops
+        self.player.stop_playback()
+        self.assertEqual("stopped", self.state().status)
+        self.assertEqual(stops, self.playback.stops)
+        self.assertEqual(count, len(self.states))
+
+    def test_state_completes_per_message(self) -> None:
+        self.start_with(A0, A1, B0)
+        state = self.state()
+        self.assertEqual([True, False], state.completes)
+        self.player._on_entry(HistoryEntry(self.history_dir / "x", 1.0, "S", "p", 1.0))
+        self.assertEqual(len(state.messages), len(self.state().completes))
 
     def test_seek_before_joined_plays_sentence_at_offset(self) -> None:
         self.start_with(A0, A1, B0)

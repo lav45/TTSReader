@@ -30,6 +30,7 @@ class PlayerState:
     messages: list[Message]
     output_down: bool
     lengths: list[float]  # queue.length(m) для каждого из messages, в том же порядке
+    completes: list[bool]  # queue.is_complete(m) для каждого из messages, в том же порядке
 
 
 class Player:
@@ -90,7 +91,7 @@ class Player:
         self._inbox.start()
         self._changed()
 
-    def stop(self) -> None:
+    def shutdown(self) -> None:
         """Выход процесса: незаконченное — обратно в inbox/, законченное удаляет очередь."""
         self._inbox.stop()
         if self._history is not None:
@@ -104,8 +105,9 @@ class Player:
         length = 0.0 if current is None else self._queue.length(current)
         messages = self._queue.messages
         lengths = [self._queue.length(m) for m in messages]
+        completes = [self._queue.is_complete(m) for m in messages]
         return PlayerState(self._status, current, self._now(), length,
-                           messages, self._output_down, lengths)
+                           messages, self._output_down, lengths, completes)
 
     def toggle_pause(self) -> None:
         if self._status == "playing":
@@ -117,13 +119,23 @@ class Player:
             self._play_at(self._position)
         self._changed()
 
+    def stop_playback(self) -> None:
+        """Идемпотентный stop (команда `tts-player stop`): играет или на паузе — как stop
+        кнопки play|stop; stopped и idle — без изменений."""
+        if self._status in ("playing", "paused"):
+            self._stop()
+            self._changed()
+
+    def _stop(self) -> None:
+        self._halt()
+        self._status = "stopped"
+        self._position = 0.0
+
     def toggle_play_stop(self) -> None:
         """stop — позиция на начало, автоперехода нет; play — текущее с позиции курсора
         (после stop это начало; после конца сообщения — снова с начала)."""
         if self._status in ("playing", "paused"):
-            self._halt()
-            self._status = "stopped"
-            self._position = 0.0
+            self._stop()
         elif self._current is not None:
             position = self._position
             if position >= self._queue.length(self._current):
@@ -264,9 +276,11 @@ class Player:
         self._begin(upcoming)
 
     def _leave(self, message: Message) -> None:
-        """Сообщение покинуто по next/prev: звук стоп, считается прослушанным."""
+        """Сообщение покинуто по next/prev: звук стоп; прослушанным считается только
+        завершённое — у растущего ещё придут предложения."""
         self._halt()
-        self._queue.mark_heard(message)
+        if self._queue.is_complete(message):
+            self._queue.mark_heard(message)
 
     def _begin(self, message: Message) -> None:
         self._queue.start(message)
@@ -318,4 +332,7 @@ class Player:
         return self._position if at is None else self._file_base + at
 
     def _changed(self) -> None:
-        self.on_change(self.state())
+        try:
+            self.on_change(self.state())
+        except Exception:
+            log.exception("on_change: ошибка обработчика окна")

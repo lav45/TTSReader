@@ -88,7 +88,7 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
     try:
         main_loop()
     finally:
-        player.stop()
+        player.shutdown()
 
 
 if __name__ == "__main__":

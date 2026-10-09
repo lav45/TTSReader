@@ -13,7 +13,7 @@ PENDING_MARK = "…"
 @dataclass(frozen=True)
 class MessageRow:
     title: str  # "HH:MM:SS  <project>"
-    duration: str  # "M:SS"; до склейки "M:SS…"
+    duration: str  # "M:SS"; пока сообщение растёт (не завершено) "M:SS…"
     current: bool
     heard: bool
 
@@ -28,10 +28,12 @@ def format_seconds(seconds: float) -> str:
 
 
 def _start_time(message: Message) -> str:
-    if message.created_at is not None:
-        stamp = message.created_at
-    elif message.sentences:
+    """Время — всегда от первого предложения: created_at приходит позже, и время строки
+    не должно прыгать. Без предложений (их нет у сообщения только в тестах) — created_at."""
+    if message.sentences:
         stamp = message.sentences[0].recv_ns / 1e9
+    elif message.created_at is not None:
+        stamp = message.created_at
     else:
         return "--:--:--"
     return time.strftime("%H:%M:%S", time.localtime(stamp))
@@ -42,20 +44,20 @@ def _project(message: Message) -> str:
     return name or NO_PROJECT
 
 
-def _duration(message: Message, length_s: float) -> str:
+def _duration(complete: bool, length_s: float) -> str:
     text = format_seconds(length_s)
-    return text if message.duration_s is not None else text + PENDING_MARK
+    return text if complete else text + PENDING_MARK
 
 
 def rows(state: PlayerState) -> list[MessageRow]:
     return [
         MessageRow(
             title=f"{_start_time(m)}  {_project(m)}",
-            duration=_duration(m, length_s),
+            duration=_duration(complete, length_s),
             current=m is state.current,
             heard=m.heard,
         )
-        for m, length_s in zip(state.messages, state.lengths)
+        for m, length_s, complete in zip(state.messages, state.lengths, state.completes)
     ]
 
 

@@ -19,10 +19,16 @@ def message(token="t", sentences=None, **kw) -> Message:
 
 
 def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=(),
-          lengths=None) -> PlayerState:
+          lengths=None, completes=None) -> PlayerState:
     messages = list(messages)
     lengths = [0.0] * len(messages) if lengths is None else lengths
-    return PlayerState(status, current, position_s, length_s, messages, False, lengths)
+    completes = [True] * len(messages) if completes is None else completes
+    return PlayerState(status, current, position_s, length_s, messages, False, lengths,
+                       completes)
+
+
+def sentence(recv_s: float) -> Sentence:
+    return Sentence(int(recv_s * 1e9), "s", "t", 0, Path("/nonexistent.wav"))
 
 
 class RowsTest(unittest.TestCase):
@@ -34,13 +40,27 @@ class RowsTest(unittest.TestCase):
         self.assertEqual([r.heard for r in result], [True, False])
 
     def test_title_with_created_at_and_project(self):
-        m = message(created_at=CREATED_AT, project="/home/u/proj/", duration_s=5)
+        m = message(sentences=[sentence(CREATED_AT)], project="/home/u/proj/", duration_s=5)
         self.assertEqual(rows(state(messages=[m]))[0].title, f"{hms(CREATED_AT)}  proj")
 
     def test_title_without_project(self):
         for project in (None, "", "/"):
-            m = message(created_at=CREATED_AT, project=project, duration_s=5)
+            m = message(sentences=[sentence(CREATED_AT)], project=project, duration_s=5)
             self.assertEqual(rows(state(messages=[m]))[0].title, f"{hms(CREATED_AT)}  —")
+
+    def test_title_time_is_first_sentence_even_with_created_at(self):
+        m = message(sentences=[sentence(CREATED_AT)], created_at=CREATED_AT + 500, project="p")
+        before = rows(state(messages=[m]))[0].title
+        self.assertEqual(before, f"{hms(CREATED_AT)}  p")
+        m.created_at = CREATED_AT + 900
+        self.assertEqual(rows(state(messages=[m]))[0].title, before)
+
+    def test_ellipsis_by_completeness_not_duration(self):
+        done = message("a", duration_s=None)
+        growing = message("b", duration_s=7)
+        result = rows(state(messages=[done, growing], lengths=[4.0, 7.0],
+                            completes=[True, False]))
+        self.assertEqual([r.duration for r in result], ["0:04", "0:07…"])
 
     def test_title_time_from_first_sentence(self):
         s = Sentence(int(CREATED_AT * 1e9), "s", "t", 0, Path("/nonexistent.wav"))
@@ -57,11 +77,12 @@ class RowsTest(unittest.TestCase):
 
     def test_duration_before_gluing_has_ellipsis(self):
         m = message()
-        self.assertEqual(rows(state(messages=[m], lengths=[4.0]))[0].duration, "0:04…")
+        result = rows(state(messages=[m], lengths=[4.0], completes=[False]))
+        self.assertEqual(result[0].duration, "0:04…")
 
     def test_duration_uses_length_of_own_message(self):
         a, b = message("a"), message("b", duration_s=9)
-        result = rows(state(messages=[a, b], lengths=[4.0, 9.0]))
+        result = rows(state(messages=[a, b], lengths=[4.0, 9.0], completes=[False, True]))
         self.assertEqual([r.duration for r in result], ["0:04…", "0:09"])
 
 
@@ -106,8 +127,8 @@ class ControlsTest(unittest.TestCase):
         self.assertEqual((prev_enabled(st), next_enabled(st)), (False, False))
 
     def test_current_title(self):
-        a = message("a", created_at=CREATED_AT, project="p")
-        b = message("b", created_at=CREATED_AT + 1, project="q")
+        a = message("a", [sentence(CREATED_AT)], project="p")
+        b = message("b", [sentence(CREATED_AT + 1)], project="q")
         self.assertEqual(current_title(state("playing", b, messages=[a, b])),
                          f"{hms(CREATED_AT + 1)}  q")
 

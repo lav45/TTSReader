@@ -35,7 +35,7 @@ def state(status: str, current: Message | None, messages: list[Message],
           position_s: float = 0.0) -> PlayerState:
     length = 0.0 if current is None else 10.0
     return PlayerState(status, current, position_s, length, messages, False,
-                       [10.0] * len(messages))
+                       [10.0] * len(messages), [True] * len(messages))
 
 
 class FakePlayer:
@@ -137,12 +137,12 @@ class PlayerWindowTest(unittest.TestCase):
         w = self.window
         self.assertEqual([], self.player.calls)
         self.assertEqual(5.0, w.scale.get_value())
-        self.assertEqual(position_label(snapshot), w.position.get_text())
+        self.assertEqual(position_label(snapshot), w.position_label_widget.get_text())
         self.assertEqual(pause_label(snapshot), w.pause_button.get_label())
         self.assertEqual(play_stop_label(snapshot), w.play_stop_button.get_label())
         self.assertTrue(w.prev_button.get_sensitive())
         self.assertFalse(w.next_button.get_sensitive())
-        self.assertEqual(3, len(w.rows.get_children()))
+        self.assertEqual(3, len(w.message_list.get_children()))
 
     def test_stopped_disables_pause(self) -> None:
         self.player.change(state("stopped", self.a, [self.a, self.b, self.c]))

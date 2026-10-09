@@ -34,14 +34,14 @@ class PlayerWindow(Gtk.Window):
         self._shown_rows: list[MessageRow] | None = None
         self.set_default_size(420, 360)
 
-        self.title = Gtk.Label(xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
+        self.title_label = Gtk.Label(xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 1.0, 1.0)
         self.scale.set_draw_value(False)
         self.scale.connect("button-press-event", self._on_scale_press)
         self.scale.connect("button-release-event", self._on_scale_release)
         self.scale.connect("change-value", self._on_scale_change)
         self.scale.connect("grab-broken-event", self._on_scale_grab_broken)
-        self.position = Gtk.Label(xalign=1.0)
+        self.position_label_widget = Gtk.Label(xalign=1.0)
 
         self.prev_button = self._button(PREV_LABEL, player.prev)
         self.pause_button = self._button("", player.toggle_pause)
@@ -53,14 +53,14 @@ class PlayerWindow(Gtk.Window):
         for button in (self.prev_button, self.pause_button, self.play_stop_button,
                        self.next_button):
             buttons.pack_start(button, False, False, 0)
-        buttons.pack_end(self.position, False, False, 0)
+        buttons.pack_end(self.position_label_widget, False, False, 0)
 
-        self.rows = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.message_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
-        scrolled.add(self.rows)
+        scrolled.add(self.message_list)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=12)
-        box.pack_start(self.title, False, False, 0)
+        box.pack_start(self.title_label, False, False, 0)
         box.pack_start(self.scale, False, False, 0)
         box.pack_start(buttons, False, False, 0)
         box.pack_start(scrolled, True, True, 0)
@@ -81,8 +81,8 @@ class PlayerWindow(Gtk.Window):
         return button
 
     def _show_state(self, state: PlayerState) -> None:
-        self.title.set_text(current_title(state))
-        self.position.set_text(position_label(state))
+        self.title_label.set_text(current_title(state))
+        self.position_label_widget.set_text(position_label(state))
         self.pause_button.set_label(pause_label(state))
         self.pause_button.set_sensitive(pause_enabled(state))
         self.play_stop_button.set_label(play_stop_label(state))
@@ -101,11 +101,11 @@ class PlayerWindow(Gtk.Window):
         if items == self._shown_rows:
             return
         self._shown_rows = items
-        for child in self.rows.get_children():
-            self.rows.remove(child)
+        for child in self.message_list.get_children():
+            self.message_list.remove(child)
         for item in items:
-            self.rows.add(self._row(item))
-        self.rows.show_all()
+            self.message_list.add(self._row(item))
+        self.message_list.show_all()
 
     @staticmethod
     def _row(item: MessageRow) -> Gtk.Box:
