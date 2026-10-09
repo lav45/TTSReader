@@ -293,8 +293,8 @@ stdout   {"count": k}                                              — посл�
 ~/.config/tts-player/settings.json      ($XDG_CONFIG_HOME, если задан)
   {"tail": <целое 1–20>, "autoplay": <true|false>, "duck": <целое 0–100>}
 
-нет файла                              → tail = 5, autoplay = true
-не JSON / не объект                    → оба по умолчанию, строка в stderr (player.log)
+нет файла                              → tail = 5, autoplay = true, duck = 30
+не JSON / не объект                    → все по умолчанию, строка в stderr (player.log)
 tail вне 1–20 / не целое (bool — не целое) → tail = 5, строка в stderr; autoplay читается как есть
 autoplay не bool                       → autoplay = true, строка в stderr; tail читается как есть
 duck вне 0–100 / не целое               → duck = 30, строка в stderr; остальные читаются как есть
