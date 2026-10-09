@@ -65,33 +65,50 @@
 
 ```
 class Ducker:
-    def __init__(self, state_file: Path, own_pid: int) -> None   # state_file = <runtime>/duck.json
+    def __init__(self, state_file: Path, own_pid: int, orphans_file: Path) -> None   # <runtime>/duck.json, <runtime>/duck-orphans.json
     def duck(self, percent: int) -> None      # 0–99; 100 → ничего не делает
     def refresh(self) -> None                 # приглушить потоки, появившиеся после duck
     def restore(self) -> None
     def recover(self) -> None                 # при старте: вернуть громкости из state_file, удалить его
+    def watch(self) -> None                   # вне приглушения: один проход по списку, исправить сирот (при приглушении — refresh)
     @property
     def ducked(self) -> bool
+    @property
+    def has_orphans(self) -> bool
+    @property
+    def orphans_changed_at(self) -> float | None   # по clock; None — сирот не было
 
 pactl:   LC_ALL=C pactl -f json list sink-inputs
          pactl set-sink-input-volume <index> <value> [<value> …]   # по каналам, порядок channel_map
 чужой    properties["application.process.id"] != str(own_pid)
-duck     запомнить {index: [value по каналам]} → state_file (атомарно) → каждому
+duck     запомнить {index: {volumes: [value по каналам], name: application.name, pid: application.process.id}} → state_file (атомарно) → каждому
          set-sink-input-volume round(value × percent / 100); повторный duck без restore — только refresh
-refresh  потоки, которых нет в запомненных, — запомнить и приглушить тем же percent
-restore  каждому запомненному, который ещё есть в списке, — запомненные значения; state_file удалить
+refresh  потоки, которых нет в запомненных или чьи name/pid другие (index переиспользован) и которые живут не меньше Ducker.MIN_AGE_S = 5 с
+         (время первого появления — time.monotonic, ключ index+name+pid; потоки первого списка duck — «старые») — запомнить
+         текущие громкости (запись заменить) и приглушить тем же percent; моложе — не трогать и не запоминать; исчезнувшие забыть
+restore  каждому запомненному, который ещё есть в списке с тем же index, name и pid, — запомненные значения (иной поток под тем же index пропустить, info); нечего возвращать — pactl не звать; список не получен — set вслепую каждому; state_file удалить
 recover  state_file есть → restore по нему (потоки, которых нет, пропустить) → удалить; битый — удалить, строка в stderr
+сироты   пара приложения (original, ducked = round(original × percent / 100)): действует, пока жив запомненный поток приложения;
+         когда последний исчез (refresh / restore) — сирота по application.name {original, ducked, known} → orphans_file
+         (атомарно; читается в __init__, битый или с негодными типами — удалить, строка в stderr); нет имени — не сирота;
+         known — index+pid потоков приложения, звучавших ДО начала речи (первый список duck); позже появившееся — кандидат
+         кандидат с громкостью == ducked (±1 по каналу) — применяется ко ВСЕМ подходящим кандидатам прохода:
+           при приглушении → сразу (без 5 с) запомнить original пары и приглушить (пара — живого запомненного потока или сирота)
+           вне приглушения (watch) → set original
+         кандидат с другой громкостью → обычный путь (5 с при приглушении, вне него не трогать); сирота при новых кандидатах без подходящих — снимается
+         сирота снимается после записи state_file и успешного set (при ошибке set остаётся); known-поток сироту не трогает и не снимает
 ошибки   pactl нет / код ≠ 0 / таймаут 2 с / не JSON → строка в stderr, исключение не выходит
 ```
 
 **Acceptance Criteria:**
 - [ ] `duck(30)` при двух чужих и одном своём потоке: два вызова `set-sink-input-volume` со значениями 30 % от исходных по каналам, свой поток не тронут
 - [ ] `restore()` возвращает исходные значения; поток, исчезнувший между duck и restore, пропущен; `state_file` удалён
-- [ ] `refresh()` приглушает только новый поток
+- [ ] `refresh()` приглушает только новый поток, и только когда ему ≥ 5 с (4,9 с — нет, 5,0 с — да, с текущими громкостями); поток, исчезнувший раньше, не оставляет следа; потоки первого списка `duck` приглушаются сразу
 - [ ] `duck(100)` — вызовов `set-sink-input-volume` нет
 - [ ] `recover()` по оставленному `state_file` возвращает громкости и удаляет файл; битый файл удалён, в stderr строка
 - [ ] заглушка `pactl` с кодом 1, с не-JSON, спящая 3 с — `duck` не бросает, возвращается не позже ~2 с, в stderr строка
 - [ ] вызовы `pactl` идут с `LC_ALL=C`
+- [ ] пары и сироты: новый поток приложения с громкостью == сниженной ±1 у живого запомненного потока (новая вкладка, пересечение при смене трека) глушится сразу от исходной пары; когда последний приглушённый поток исчез — сирота в orphans_file; подходящие новые потоки (все) получают original (вне приглушения) или глушатся от него (при приглушении); другая громкость — поток не тронут, сирота снята; потоки, звучавшие до речи (в том числе заглушённые при `duck` 0), пару не трогают; при ошибке `set` сирота остаётся; сироты переживают пересоздание `Ducker`; битый orphans_file удалён, в stderr строка
 
 **Verify:** `python3 -m unittest tests.test_ducking -v` → `OK`
 
@@ -118,9 +135,10 @@ Player(…, ducker: Ducker | None)        # None — без приглушени
   статус стал playing (из любого другого)     → ducker.duck(prefs.duck)
   статус ушёл из playing (paused/stopped/idle) → ducker.restore()
   пока playing — ducker.refresh() раз в 1 с (GLib таймер; снимается при restore)
+  пока не playing и ducker.has_orphans и с orphans_changed_at прошло < 10 минут — ducker.watch() раз в 2 с (GLib-таймер; снимается, когда сирот нет, 10 минут истекли, при входе в playing и в shutdown; дальше сироты обрабатываются при начале речи; Player(…, clock) — часы для orphans_changed_at)
   shutdown()                                   → ducker.restore()
   apply_prefs с новым duck во время playing    → restore(), затем duck(новый)
-__main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start()
+__main__: Ducker(<runtime>/duck.json, os.getpid(), <runtime>/duck-orphans.json); recover() до player.start()
 ```
 
 **Acceptance Criteria:**
@@ -129,9 +147,11 @@ __main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start(
 - [ ] ожидание следующего предложения растущего сообщения (статус `playing`, звук молчит) не вызывает `restore`
 - [ ] `shutdown` во время игры вызывает `restore`
 - [ ] таймер `refresh` есть только в `playing`
+- [ ] таймер `watch` (2 с) идёт, пока `has_orphans`, статус не `playing` и с `orphans_changed_at` прошло < 10 минут (проверка с подставными часами); снимается, когда сирот нет, срок вышел, при входе в `playing` и в `shutdown`; изменение сирот возобновляет его
+- [ ] e2e: приглушённый чужой поток исчез во время речи, после конца новый поток того же приложения со сниженной громкостью получает исходную
 - [ ] e2e процесс плеера получает заглушку `pactl` в `PATH`: после первого сообщения в журнале заглушки есть `set-sink-input-volume`, после конца — возврат исходного значения
 
-**Verify:** `python3 -m unittest tests.test_player_settings tests.test_player tests.test_player_e2e -v` → `OK`
+**Verify:** `python3 -m unittest discover -s tests` → `OK`
 
 **Steps:**
 
@@ -145,7 +165,7 @@ __main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start(
 **Goal:** «Приглушать другие звуки до, %» на экране настроек сохраняется в `Prefs.duck`.
 
 **Files:**
-- Modify: `tts_player/window.py`, `README.md`
+- Modify: `tts_player/window.py`, `tts_player/ducking.py` (докстринг), `README.md`
 - Test: `tests/gui_window_cases.py`
 
 **Contract:** экран настроек ↔ `PlayerSettings`
@@ -154,12 +174,18 @@ __main__: Ducker(<runtime>/duck.json, os.getpid()); recover() до player.start(
 duck_spin: Gtk.SpinButton 0–100, шаг 5, 0 знаков, подпись «Приглушать другие звуки до, %»;
            значение = prefs.load().duck при открытии экрана; доступен при ошибке настроек claude-tts
 «Сохранить»: Prefs(tail, autoplay, duck_spin) → prefs.save → player.apply_prefs
+Главный экран: нижний ряд — position_label слева (pack_start), кнопки [prev][play/pause][next] справа (pack_end);
+               верхний ряд — settings_button, clear_button, voicing_off_button слева, autoplay справа
 ```
 
 **Acceptance Criteria:**
 - [ ] поле показывает загруженное значение; «Сохранить» пишет новое и вызывает `apply_prefs` с ним
 - [ ] при ошибке настроек claude-tts поле активно и сохраняется
 - [ ] README: что делает приглушение, 100 — выключено, восстановление после падения, `pactl` нужен
+- [ ] порядок нижнего ряда: время (position_label) слева, кнопки prev / play-pause / next справа; GUI-тест закрепляет порядок детей и pack-type
+- [ ] порядок верхнего ряда: шестерёнка «Настройки», «Очистить буфер», «Выключить озвучку» слева, выключатель автовоспроизведения справа; GUI-тест закрепляет порядок и pack-type
+- [ ] «Сохранить» не сбрасывает duck: Prefs(tail, autoplay, duck_spin)
+- [ ] ducking.py: докстринг `ducked` — «снижение запрошено», не «громкость снижена»; README: порядок кнопок и времени
 
 **Verify:** `python3 -m unittest discover -s tests` → `OK`, GUI-случаи не пропущены; `pgrep broadwayd` пуст
 

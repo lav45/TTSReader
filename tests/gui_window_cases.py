@@ -187,7 +187,7 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual("system-shutdown-symbolic", icon_name(button))
         self.assertEqual("Выключить озвучку (/tts-off)", button.get_tooltip_text())
         row = w.clear_button.get_parent()
-        self.assertEqual([w.clear_button, w.settings_button, button], row.get_children()[:3])
+        self.assertEqual([w.settings_button, w.clear_button, button], row.get_children()[:3])
 
     def test_voicing_off_button_follows_is_on_on_show_and_tick(self) -> None:
         button = self.window.voicing_off_button
@@ -336,14 +336,20 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertFalse(w.next_button.get_sensitive())
         self.assertEqual(3, len(w.message_list.get_children()))
 
-    def test_transport_row_is_prev_play_pause_next_with_position_right(self) -> None:
+    def test_transport_row_is_position_left_then_prev_play_pause_next_right(self) -> None:
         w = self.window
         row = w.play_pause_button.get_parent()
         buttons = [child for child in row.get_children() if isinstance(child, Gtk.Button)]
         self.assertEqual([w.prev_button, w.play_pause_button, w.next_button], buttons)
         self.assertIs(row, w.position_label_widget.get_parent())
-        self.assertEqual(Gtk.PackType.END,
+        self.assertEqual(Gtk.PackType.START,
                          row.child_get_property(w.position_label_widget, "pack-type"))
+        self.assertEqual(w.position_label_widget, row.get_children()[0])
+        for button in buttons:
+            self.assertEqual(Gtk.PackType.END, row.child_get_property(button, "pack-type"))
+        # pack_end кладёт последним добавленного первым справа: порядок слева направо
+        self.assertEqual([w.position_label_widget, w.prev_button, w.play_pause_button,
+                          w.next_button], row.get_children())
         for name in ("pause_button", "play_stop_button"):
             self.assertFalse(hasattr(w, name), name)
 
@@ -391,9 +397,11 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertTrue(button.get_active())
 
     def test_autoplay_toggle_saves_prefs_and_applies(self) -> None:
+        """Остальные ключи (хвост, приглушение) — из файла, меняется только autoplay."""
         w = self.window
+        self.prefs.loaded = Prefs(tail=7, autoplay=True, duck=45)
         w.autoplay_button.set_active(False)
-        expected = Prefs(tail=7, autoplay=False)
+        expected = Prefs(tail=7, autoplay=False, duck=45)
         self.assertIn(("save", expected), self.prefs.calls)
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
         self.assertFalse(w.autoplay_button.get_active())
@@ -438,16 +446,16 @@ class SettingsScreenTest(unittest.TestCase):
 
     def test_icon_buttons_without_text_first_in_one_row(self) -> None:
         w = self.window
-        for button, icon, tooltip in ((w.clear_button, "user-trash-symbolic", "Очистить буфер"),
-                                      (w.settings_button, "emblem-system-symbolic", "Настройки")):
+        for button, icon, tooltip in ((w.settings_button, "emblem-system-symbolic", "Настройки"),
+                                      (w.clear_button, "user-trash-symbolic", "Очистить буфер")):
             self.assertFalse(button.get_label(), tooltip)
             self.assertEqual(icon, icon_name(button))
             self.assertEqual(tooltip, button.get_tooltip_text())
         row = w.clear_button.get_parent()
         self.assertIs(row, w.settings_button.get_parent())
         self.assertEqual(Gtk.Orientation.HORIZONTAL, row.get_orientation())
-        self.assertEqual([w.clear_button, w.settings_button], row.get_children()[:2])
-        for button in (w.clear_button, w.settings_button):
+        self.assertEqual([w.settings_button, w.clear_button], row.get_children()[:2])
+        for button in (w.settings_button, w.clear_button):
             self.assertEqual(Gtk.PackType.START,
                              row.child_get_property(button, "pack-type"))
 
@@ -464,9 +472,10 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual(["aria — Тёплый женский", "bob"], [row[0] for row in model])
         self.assertEqual("bob", w.voice_combo.get_active_id())
         self.assertEqual(1.5, w.speed_spin.get_value())
-        for widget in (w.voice_combo, w.speed_spin, w.tail_spin, w.save_button):
+        for widget in (w.voice_combo, w.speed_spin, w.tail_spin, w.duck_spin, w.save_button):
             self.assertTrue(widget.get_sensitive())
         self.assertEqual(7, w.tail_spin.get_value_as_int())
+        self.assertEqual(30, w.duck_spin.get_value_as_int())
         self.assertFalse(w.settings_status.get_visible())
         self.assertEqual("Сохранить", w.save_button.get_label())
         self.assertEqual(icon_name(w.back_button), "go-previous-symbolic")
@@ -540,7 +549,7 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual("settings", w.stack.get_visible_child_name())
         for widget in (w.voice_combo, w.speed_spin):
             self.assertFalse(widget.get_sensitive())
-        for widget in (w.tail_spin, w.save_button):
+        for widget in (w.tail_spin, w.duck_spin, w.save_button):
             self.assertTrue(widget.get_sensitive())
         self.assertTrue(w.settings_status.get_visible())
         self.assertEqual("config.json не прочитан", w.settings_status.get_text())
@@ -548,13 +557,14 @@ class SettingsScreenTest(unittest.TestCase):
         w.back_button.clicked()
         self.assertEqual("main", w.stack.get_visible_child_name())
 
-    def test_load_error_save_writes_only_tail(self) -> None:
+    def test_load_error_save_writes_only_player_prefs(self) -> None:
         w = self.window
         self.settings.load_error = SettingsError("config.json не прочитан")
         w.settings_button.clicked()
         w.tail_spin.set_value(9)
+        w.duck_spin.set_value(55)
         w.save_button.clicked()
-        expected = Prefs(tail=9, autoplay=True)
+        expected = Prefs(tail=9, autoplay=True, duck=55)
         self.assertEqual(("save", expected), self.prefs.calls[-1])
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
         self.assertEqual([("load",)], self.settings.calls)
@@ -579,8 +589,9 @@ class SettingsScreenTest(unittest.TestCase):
         w.voice_combo.set_active_id("aria")
         w.speed_spin.set_value(2.3)
         w.tail_spin.set_value(4)
+        w.duck_spin.set_value(60)
         w.save_button.clicked()
-        expected = Prefs(tail=4, autoplay=False)
+        expected = Prefs(tail=4, autoplay=False, duck=60)
         self.assertEqual(("save", expected), self.prefs.calls[-1])
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
         self.assertEqual(("save", "aria", 2.3), self.settings.calls[-1])
@@ -588,6 +599,46 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertTrue(w.settings_status.get_visible())
         self.assertEqual("Настройки сохранены", w.settings_status.get_text())
         self.assertEqual({"success"}, css_classes(w.settings_status))
+
+    def test_duck_spin_range_and_label(self) -> None:
+        spin = self.window.duck_spin
+        self.assertEqual((0.0, 100.0), spin.get_range())
+        self.assertEqual(5.0, spin.get_increments()[0])
+        self.assertEqual(0, spin.get_digits())
+        labels = []
+
+        def collect(widget) -> None:
+            if isinstance(widget, Gtk.Label):
+                labels.append(widget.get_text())
+            if isinstance(widget, Gtk.Container):
+                widget.forall(collect)
+
+        collect(self.window.stack.get_child_by_name("settings"))
+        self.assertIn("Приглушать другие звуки до, %", labels)
+
+    def test_duck_spin_reloaded_on_each_open(self) -> None:
+        w = self.window
+        self.prefs.loaded = Prefs(tail=7, autoplay=True, duck=80)
+        w.settings_button.clicked()
+        self.assertEqual(80, w.duck_spin.get_value_as_int())
+        w.duck_spin.set_value(10)
+        w.back_button.clicked()
+        w.settings_button.clicked()
+        self.assertEqual(80, w.duck_spin.get_value_as_int())
+
+    def test_save_takes_typed_duck_without_focus_loss(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        w.duck_spin.set_text("45")
+        w.save_button.clicked()
+        self.assertEqual(45, self.prefs.calls[-1][1].duck)
+
+    def test_save_keeps_loaded_duck_when_untouched(self) -> None:
+        w = self.window
+        self.prefs.loaded = Prefs(tail=7, autoplay=True, duck=65)
+        w.settings_button.clicked()
+        w.save_button.clicked()
+        self.assertEqual(Prefs(tail=7, autoplay=True, duck=65), self.prefs.calls[-1][1])
 
     def test_save_error_keeps_screen_and_shows_reason(self) -> None:
         w = self.window

@@ -14,6 +14,7 @@ import uuid
 import wave
 from pathlib import Path
 
+from test_ducking import STUB as PACTL_STUB, sink_input
 from test_history import SCHEMA
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +24,7 @@ QUIET = 1.0
 RATE = 8000
 SECONDS = 0.25
 PROTOCOL = ("playing ", "error ", "complete ", "ended ", "switched ")
+FOREIGN = sink_input(7, 4242, [60000, 50000])  # чужой поток в выдаче заглушки pactl
 
 
 def make_wav(path: Path, seconds: float = SECONDS) -> Path:
@@ -36,7 +38,8 @@ def make_wav(path: Path, seconds: float = SECONDS) -> Path:
 
 class PlayerProcessCase(unittest.TestCase):
     """Процесс плеера во временном окружении: свой XDG_RUNTIME_DIR, свой XDG_CONFIG_HOME
-    (настройки плеера пользователя не читаются), своя история демона."""
+    (настройки плеера пользователя не читаются), своя история демона, заглушка pactl первой
+    в PATH (громкость настоящих потоков пользователя не меняется ни в одном e2e)."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -58,12 +61,41 @@ class PlayerProcessCase(unittest.TestCase):
         conn.close()
         self.lines: queue.Queue[str] = queue.Queue()
         self.proc: subprocess.Popen | None = None
+        self.pactl_bin = self.tmp / "bin"
+        self.pactl_bin.mkdir()
+        stub = self.pactl_bin / "pactl"
+        stub.write_text(PACTL_STUB)
+        stub.chmod(0o755)
+        self.pactl_log = self.tmp / "pactl.log"
+        self.pactl_fixture = self.tmp / "sink-inputs.json"
+        self.pactl_fixture.write_text(json.dumps([FOREIGN]))
 
     def env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
         env["XDG_RUNTIME_DIR"] = str(self.runtime)
         env["XDG_CONFIG_HOME"] = str(self.config)
+        env["PATH"] = f"{self.pactl_bin}{os.pathsep}{env.get('PATH', '')}"
+        env["PACTL_LOG"] = str(self.pactl_log)
+        env["PACTL_FIXTURE"] = str(self.pactl_fixture)
+        for name in ("PACTL_SLEEP", "PACTL_EXIT"):
+            env.pop(name, None)
         return env
+
+    def volume_sets(self) -> list[list[str]]:
+        """Вызовы `pactl set-sink-input-volume` из журнала заглушки, по порядку."""
+        if not self.pactl_log.exists():
+            return []
+        argvs = [line.split("|", 1)[1].split() for line in self.pactl_log.read_text().splitlines()]
+        return [argv for argv in argvs if argv[:1] == ["set-sink-input-volume"]]
+
+    def wait_volume_sets(self, count: int) -> list[list[str]]:
+        """Ждёт count вызовов set-sink-input-volume; таймаут — провал теста."""
+        deadline = time.monotonic() + WAIT
+        while len(sets := self.volume_sets()) < count:
+            if time.monotonic() > deadline:
+                self.fail(f"нет {count} вызовов set-sink-input-volume за {WAIT} с: {sets}")
+            time.sleep(0.05)
+        return sets
 
     @staticmethod
     def command(*args: str) -> list[str]:
@@ -247,12 +279,89 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assert_quiet()
         self.assertIsNone(self.proc.poll())
 
+    def test_foreign_stream_ducked_while_playing_and_restored_after_end(self) -> None:
+        """Первое сообщение — чужой поток до 30 %; склейка демона завершает сообщение,
+        плеер уходит в idle — чужому потоку возвращается исходная громкость."""
+        session = uuid.uuid4().hex
+        self.start_player()
+        sentence = self.sentence(session, "aaaaaa", 0)
+        self.drop(sentence)
+        self.played(1)
+        self.assertEqual([["set-sink-input-volume", "7", "18000", "15000"]],
+                         self.wait_volume_sets(1))
+        self.daemon_saves(session, sentence)
+        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"],
+                         self.wait_volume_sets(2)[1])
+        self.assertFalse((self.runtime / "tts-player" / "duck.json").exists())
+
+    def test_orphan_stream_is_repaired_after_end(self) -> None:
+        """Приглушённый чужой поток исчезает во время речи; после конца появляется новый
+        поток того же приложения со сниженной громкостью — ему возвращается исходная."""
+        session = uuid.uuid4().hex
+        orphans = self.runtime / "tts-player" / "duck-orphans.json"
+        self.start_player()
+        sentence = self.sentence(session, "aaaaaa", 0)
+        self.drop(sentence)
+        self.played(1)
+        self.wait_volume_sets(1)
+        self.pactl_fixture.write_text("[]")
+        deadline = time.monotonic() + WAIT
+        while not orphans.exists():
+            self.assertLess(time.monotonic(), deadline, "сирота не записана")
+            time.sleep(0.05)
+        self.daemon_saves(session, sentence)
+        state = self.runtime / "tts-player" / "duck.json"
+        deadline = time.monotonic() + WAIT
+        while state.exists():
+            self.assertLess(time.monotonic(), deadline, "громкость не возвращена")
+            time.sleep(0.05)
+        self.pactl_fixture.write_text(json.dumps([sink_input(9, 4242, [18000, 15000])]))
+        sets = self.wait_volume_sets(2)
+        self.assertEqual(["set-sink-input-volume", "9", "60000", "50000"], sets[1])
+        deadline = time.monotonic() + WAIT
+        while orphans.exists():
+            self.assertLess(time.monotonic(), deadline, "сирота не снята")
+            time.sleep(0.05)
+
+    def daemon_saves(self, session: str, sentence: Path) -> None:
+        """Склейка из одного предложения в speech_history и строка базы, как у демона."""
+        created_at = time.time()
+        name = f"tts-{created_at:.3f}-{session[:40]}.wav"
+        (self.history / name).write_bytes(sentence.read_bytes())
+        conn = sqlite3.connect(str(self.db))
+        conn.execute(
+            "INSERT INTO speech_history (file_name, created_at, session_id, project,"
+            " persona, text, speed, tone, duration_seconds) VALUES (?,?,?,?,?,?,?,?,?)",
+            (name, created_at, session, "proj", "p", "t", 1.0, "neutral", SECONDS),
+        )
+        conn.commit()
+        conn.close()
+
     def test_sigterm_exits_0(self) -> None:
         self.start_player()
         self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0))
         self.played(1)
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
+
+    def test_sighup_exits_0_and_restores_volumes(self) -> None:
+        self.start_player()
+        self.drop(self.sentence(uuid.uuid4().hex, "aaaaaa", 0, seconds=3.0))
+        self.wait_volume_sets(1)
+        self.proc.send_signal(signal.SIGHUP)
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"], self.volume_sets()[-1])
+        self.assertFalse((self.runtime / "tts-player" / "duck.json").exists())
+
+    def test_leftover_duck_state_is_restored_at_start(self) -> None:
+        state = self.runtime / "tts-player" / "duck.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"inputs": {"7": {
+            "volumes": [60000, 50000], "name": "app4242", "pid": "4242"}}}))
+        self.start_player()
+        sets = self.wait_volume_sets(1)
+        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"], sets[0])
+        self.assertFalse(state.exists())
 
 
 BIN = ROOT / "bin" / "tts-player"

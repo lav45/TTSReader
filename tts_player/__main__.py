@@ -23,6 +23,7 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
+from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.instance import Instance, is_locked, send_play, send_stop  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="хук, который кнопка выключения зовёт как `<хук> off`")
     parser.add_argument("--settings-file",
                         default=str(PlayerSettings.default_path(os.environ)),
-                        help="файл настроек плеера: хвост и автовоспроизведение")
+                        help="файл настроек плеера: хвост, автовоспроизведение, приглушение")
     parser.add_argument("--no-gui", action="store_true",
                         help="без окна и трея: только плеер в цикле GLib")
     parser.add_argument("--show", action="store_true", help="показать окно сразу при запуске")
@@ -85,8 +86,13 @@ def main(argv: list[str] | None = None) -> int:
               " (без окна — --no-gui)", file=sys.stderr)
         return 1
 
+    # после блокировки: второй экземпляр не возвращает громкости, приглушённые первым
+    ducker = Ducker(Path(runtime) / "tts-player" / "duck.json", os.getpid(),
+                    Path(runtime) / "tts-player" / "duck-orphans.json")
+    ducker.recover()  # остаток после падения — до первого duck в player.start()
     player = Player(Path(runtime), args.audio_sink,
-                    Path(args.history_dir).expanduser(), Path(args.history_db).expanduser())
+                    Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
+                    ducker)
     prefs = PlayerSettings(Path(args.settings_file).expanduser())
     player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
     if args.no_gui:
@@ -141,13 +147,14 @@ def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings, voi
 
 
 def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None]) -> None:
-    """Плеер в главном цикле; SIGTERM/SIGINT — выход, незаконченное — обратно в inbox/."""
+    """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, незаконченное — обратно в inbox/."""
     def on_signal() -> bool:
         quit_loop()
         return GLib.SOURCE_REMOVE
 
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, on_signal)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, on_signal)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGHUP, on_signal)  # закрытие терминала
 
     def on_stop() -> bool:
         log.info("stop requested")
@@ -161,8 +168,8 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
         return GLib.SOURCE_CONTINUE
 
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR2, on_play)
-    player.start()
     try:
+        player.start()
         main_loop()
     finally:
         player.shutdown()
