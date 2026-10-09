@@ -278,8 +278,9 @@ class PlayerE2ETest(PlayerProcessCase):
         self.drop(self.sentence(session, "bbbbbb", 0))
         self.assertTrue(self.next_line("playing ").endswith("bbbbbb_s0.wav"))
 
-    def test_sigterm_deletes_unfinished(self) -> None:
-        """id задач этого запуска следующему чужие: незаконченное не возвращается в inbox/."""
+    def test_sigterm_keeps_unheard_and_restart_plays_them(self) -> None:
+        """Выход сохраняет сообщения в messages.json, их файлы остаются в store/; следующий
+        запуск их восстанавливает и играет."""
         session = uuid.uuid4().hex
         self.start_player()
         self.drop(self.sentence(session, "aaaaaa", 0, seconds=3.0))
@@ -288,7 +289,24 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertTrue(self.played(1)[0].endswith("aaaaaa_s0.wav"))
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
-        self.assertEqual(([], []), (list(self.inbox.iterdir()), list(self.store.iterdir())))
+        self.assertEqual([], list(self.inbox.iterdir()))
+        kept = sorted(p.name for p in self.store.iterdir())
+        self.assertEqual(3, len(kept))
+        self.assertTrue((self.runtime / "tts-player" / "messages.json").exists())
+        self.start_player()
+        self.assertEqual(kept, self.played(3))
+        self.assertFalse((self.runtime / "tts-player" / "messages.json").exists())
+
+    def test_sentence_of_task_queued_before_exit_plays_after_restart(self) -> None:
+        session = uuid.uuid4().hex
+        self.start_player()
+        self.task_ids["aaaaaa"] = self.hook_task(session, "text aaaaaa")["id"]
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(0, self.proc.wait(timeout=WAIT))
+        self.start_player()
+        self.drop(self.sentence(session, "aaaaaa", 0))
+        self.assertTrue(self.next_line("playing ").endswith(
+            f"_{self.task_ids['aaaaaa']}_tts_queue_{session}_aaaaaa_s0.wav"))
 
     def test_output_error_keeps_sentence_and_reports_once(self) -> None:
         session = uuid.uuid4().hex
@@ -463,7 +481,8 @@ class SingleInstanceTest(PlayerProcessCase):
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
         self.start_player()
         self.drop(self.sentence(uuid.uuid4().hex, "bbbbbb", 0))
-        self.assertTrue(self.played(1)[0].endswith("bbbbbb_s0.wav"))
+        names = self.played(2)  # недоигранное aaaaaa сохранено при выходе и играет снова
+        self.assertTrue(names[0].endswith("aaaaaa_s0.wav") and names[1].endswith("bbbbbb_s0.wav"))
 
     def test_stop_without_player_exits_0_silently(self) -> None:
         result = self.run_bin("stop")

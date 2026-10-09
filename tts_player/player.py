@@ -20,6 +20,7 @@ from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.queue import MessageQueue  # noqa: E402
+from tts_player.saved_messages import SavedMessages  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
 
 log = logging.getLogger("tts_player.player")
@@ -109,6 +110,8 @@ class Player:
         self._playback.on_error = self._on_error
         self._playback.on_started = self._on_started
         self._inbox = Inbox(runtime_dir, self._on_sentence)
+        self._saved = SavedMessages(Path(runtime_dir) / "tts-player" / "messages.json",
+                                    self._inbox.store)
         self._daemon_queue = daemon_queue
         self._daemon_settings = daemon_settings
         self._hook_tasks = None
@@ -167,17 +170,33 @@ class Player:
         """История — раньше inbox/: накопленное в inbox/ начинает играть уже в start(),
         и склейка, записанная после первой строки playing, не должна считаться
         существовавшей до запуска. Колбэки обеих частей идут из цикла GLib, поэтому
-        такой порядок ничего не теряет."""
+        такой порядок ничего не теряет.
+
+        Сообщения прошлого запуска (messages.json) восстанавливаются до inbox/ и задач хука:
+        поздние предложения их задач — их, а не чужие; файлы store/, на которые они не
+        ссылаются, удаляет Inbox. Непрослушанное играет само, если включено
+        автовоспроизведение."""
         if self._history is not None:
             try:
                 self._history.start()
             except OSError as error:
                 log.warning("история %s недоступна (%s), работаю без склеек",
                             self._history_dir, error)
-        self._inbox.start()
+        self._queue.restore(self._saved.load())
+        self._inbox.start(self._store_files())
         if self._hook_tasks is not None:
             self._hook_tasks.start()
+        if self._status == "idle" and self._starts_by_itself():
+            message = self._queue.first_unheard()
+            if message is not None:
+                self._begin(message)
         self._changed()
+
+    def _store_files(self) -> frozenset[Path]:
+        """Файлы store/, которые держат сообщения очереди: предложения и склейки."""
+        files = {s.path for m in self._queue.messages for s in m.sentences}
+        files.update(m.audio for m in self._queue.messages if m.audio is not None)
+        return frozenset(files)
 
     def _on_hook_task(self, task: HookTask) -> None:
         """Задача хука забрана (строка журнала — её читает e2e): её поля как есть уходят в
@@ -201,8 +220,9 @@ class Player:
         self._queue.link(message, task_id)
 
     def shutdown(self) -> None:
-        """Выход процесса: громкость чужих потоков — обратно; файлы всех сообщений удалены —
-        id их задач следующему запуску чужие (контракт (13)), текст и кэш временные."""
+        """Выход процесса: громкость чужих потоков — обратно; сообщения — в messages.json
+        для следующего запуска (файлы непрослушанных остаются в store/, прослушанных —
+        удаляются), вместе с id их задач: предложения, пришедшие после выхода, — их."""
         self._unduck()
         self._stop_watch()
         self._inbox.stop()
@@ -211,7 +231,7 @@ class Player:
         if self._history is not None:
             self._history.stop()
         self._halt()
-        self._queue.clear()
+        self._saved.save(self._queue.release())
 
     def state(self) -> PlayerState:
         current = self._current

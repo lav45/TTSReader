@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from tts_player.model import Message, Sentence
-from tts_player.queue import MessageQueue
+from tts_player.queue import MessageQueue, QueueSnapshot
 
 
 class MessageQueueTest(unittest.TestCase):
@@ -382,6 +382,85 @@ class MessageQueueTest(unittest.TestCase):
         self.assertEqual([], self.queue.messages)
         self.start_messages(6)
         self.assertEqual(5, len(self.queue.messages))
+
+
+
+class SnapshotTest(unittest.TestCase):
+    """Выход и старт плеера: release() отдаёт снимок очереди, restore() его принимает."""
+
+    setUp = MessageQueueTest.setUp
+    message = MessageQueueTest.message
+    sentence = MessageQueueTest.sentence
+    add = MessageQueueTest.add
+    tasks = MessageQueueTest.tasks
+
+    def test_release_keeps_unheard_files_and_deletes_heard(self):
+        heard = self.add(1, task="t1")
+        unheard = self.add(2, task="t2")
+        first, second = self.queue.messages
+        self.queue.start(first)
+        self.queue.mark_heard(first)
+        snapshot = self.queue.release()
+        self.assertEqual([first, second], snapshot.messages)
+        self.assertEqual([first], snapshot.started)
+        self.assertFalse(heard.path.exists())
+        self.assertEqual([], first.sentences)
+        self.assertTrue(unheard.path.exists())
+        self.assertEqual([unheard], second.sentences)
+        self.assertEqual([], self.queue.messages)
+
+    def test_release_keeps_task_order_and_delivered(self):
+        self.add(1, task="t1")
+        self.message("t2")
+        snapshot = self.queue.release()
+        self.assertEqual({"t1": 1, "t2": 2}, snapshot.task_order)
+        self.assertEqual(1, snapshot.delivered)
+
+    def test_restore_round_trip_keeps_completeness_and_takes_late_sentences(self):
+        """Предложения задачи, поставленной до выхода, после старта — её сообщения."""
+        self.add(1, task="t1")
+        self.message("t2")
+        self.add(2, task="t3")
+        snapshot = self.queue.release()
+        queue = MessageQueue(tail=5)
+        queue.restore(snapshot)
+        first, second, third = queue.messages
+        self.assertEqual([True, True, False], [queue.is_complete(m) for m in queue.messages])
+        late = self.sentence(9, task="t3", index=1)
+        queue.add(late)
+        self.assertEqual(2, len(third.sentences))
+        fresh = Message("s1")
+        queue.append(fresh)
+        queue.link(fresh, "t4")
+        self.assertEqual("t4", queue.task_of(fresh))
+        self.assertFalse(queue.is_complete(third))
+        queue.add(self.sentence(10, task="t4"))
+        self.assertTrue(queue.is_complete(third))
+
+    def test_restore_goes_before_messages_already_queued(self):
+        self.add(1, task="t1")
+        snapshot = self.queue.release()
+        queue = MessageQueue(tail=5)
+        newer = Message("s1")
+        queue.append(newer)
+        queue.link(newer, "t9")
+        queue.restore(snapshot)
+        self.assertEqual(["t1", "t9"], [queue.task_of(m) for m in queue.messages])
+
+    def test_restore_applies_tail_to_started(self):
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, 4)]
+        for message in self.queue.messages:
+            self.queue.start(message)
+        snapshot = self.queue.release()
+        queue = MessageQueue(tail=2)
+        queue.restore(snapshot)
+        self.assertEqual(["t2", "t3"], [queue.task_of(m) for m in queue.messages])
+        self.assertFalse(sentences[0].path.exists())
+        self.assertTrue(all(queue.is_started(m) for m in queue.messages))
+
+    def test_empty_snapshot_restores_nothing(self):
+        self.queue.restore(QueueSnapshot([], [], {}, 0))
+        self.assertEqual([], self.queue.messages)
 
 
 if __name__ == "__main__":

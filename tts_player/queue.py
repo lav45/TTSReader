@@ -4,6 +4,7 @@ import itertools
 import logging
 import shutil
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,19 @@ if TYPE_CHECKING:
 log = logging.getLogger("tts_player.queue")
 
 
+@dataclass
+class QueueSnapshot:
+    """Очередь между запусками плеера (MessageQueue.release → messages.json → restore).
+
+    started — начатые (хвост) из messages, от старых к новым; task_order — порядок
+    постановки задач демону для id задач этих сообщений; delivered — наибольший порядок
+    задачи, от которой пришло предложение: по ним restore восстанавливает завершённость."""
+    messages: list[Message]
+    started: list[Message]
+    task_order: dict[str, int]
+    delivered: int
+
+
 class MessageQueue:
     """Сообщения в порядке прихода задач хука; хвост из tail начатых сообщений.
 
@@ -22,10 +36,11 @@ class MessageQueue:
     связывает предложения с сообщениями по id задач демона (link), отвечает на вопросы о
     порядке (following/preceding/first_unheard), длине и завершённости сообщения, отображает
     позицию в файл (locate) и владеет файлами своих сообщений: удаляет их при вытеснении из
-    хвоста, в forget_audio() и clear().
+    хвоста, в forget_audio() и clear(); на выходе плеера отдаёт их вместе с сообщениями
+    снимком (release), на старте принимает снимок прошлого запуска (restore).
 
     following/preceding/is_complete принимают только живые сообщения — из messages;
-    сообщение, вытесненное или забытое после clear(), им не передаётся.
+    сообщение, вытесненное или забытое после clear()/release(), им не передаётся.
 
     tail задаёт снаружи Player (настройки плеера) и может меняться на ходу: start()
     подгоняет хвост к нему постепенно (см. start).
@@ -156,6 +171,35 @@ class MessageQueue:
                 self._unlink(sentence)
             self._unlink_audio(message)
         self._forget()
+
+    def release(self) -> QueueSnapshot:
+        """Выход плеера: файлы прослушанных удалены (их текст остаётся), файлы остальных
+        остаются в store/; очередь забывает всё и отдаёт снимок для следующего запуска."""
+        for message in self._messages:
+            if message.heard:
+                for sentence in message.sentences:
+                    self._unlink(sentence)
+                self._unlink_audio(message)
+                message.sentences = []
+                message.audio = None
+                message.duration_s = None
+        task_order = {task_id: self._task_order[task_id]
+                      for message in self._messages for task_id in message.task_ids}
+        snapshot = QueueSnapshot(self._messages, self._started, task_order, self._delivered)
+        self._forget()
+        return snapshot
+
+    def restore(self, snapshot: QueueSnapshot) -> None:
+        """Старт плеера: сообщения прошлого запуска — перед уже пришедшими, с их задачами
+        (поздние предложения этих задач — их) и завершённостью; хвост начатых подгоняется
+        к tail, лишние удаляются, самые старые первыми."""
+        self._task_order.update(snapshot.task_order)
+        self._sequence = itertools.count(max(self._task_order.values(), default=0) + 1)
+        self._delivered = max(self._delivered, snapshot.delivered)
+        self._messages[:0] = snapshot.messages
+        self._started[:0] = snapshot.started
+        while len(self._started) > self.tail:
+            self._drop(self._started.pop(0))
 
     def _find(self, task_id: str) -> Message | None:
         return next((m for m in self._messages if task_id in m.task_ids), None)

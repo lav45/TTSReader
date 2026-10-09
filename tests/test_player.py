@@ -214,6 +214,18 @@ class PlayerCase(unittest.TestCase):
     def state(self) -> PlayerState:
         return self.player.state()
 
+    def saved_file(self) -> Path:
+        return self.runtime / "tts-player" / "messages.json"
+
+    def restart(self) -> None:
+        """Новый процесс плеера в том же $XDG_RUNTIME_DIR (после shutdown прежнего)."""
+        self.player = Player(self.runtime, None, self.history_dir,
+                             self.runtime / "handy_analysis.db", daemon_queue=self.daemon,
+                             daemon_settings=self.settings)
+        self.playback = self.player._playback
+        self.player.on_change = self.states.append
+        self.player.start()
+
     def task(self) -> str | None:
         """id задачи демона текущего сообщения (последней, если их несколько)."""
         current = self.state().current
@@ -286,23 +298,58 @@ class PlayerHistoryTest(PlayerCase):
         self.assertEqual("aa", self.task())
         self.assertTrue(self.state().current.heard)
 
-    def test_shutdown_during_joined_file_deletes_all(self) -> None:
-        """Выход: id задач этого запуска следующему чужие (контракт (13)) — в inbox/ ничего
-        не возвращается, store/ пуст."""
+    def test_shutdown_during_joined_file_keeps_its_files(self) -> None:
+        """Выход: непрослушанное сохраняется в messages.json, его файлы и склейка — в store/."""
         self.switch_on_a1()
         self.player.shutdown()
         self.assertEqual([], list(self.inbox_dir.iterdir()))
-        self.assertEqual([], list(self.store_dir.iterdir()))
+        self.assertEqual(sorted([A0, A1, N0, JOINED]),
+                         sorted(p.name for p in self.store_dir.iterdir()))
+        self.assertTrue(self.saved_file().exists())
 
     def test_store_is_taken_from_inbox(self) -> None:
         self.assertEqual(self.store_dir, self.player._inbox.store)
 
-    def test_shutdown_deletes_playing_and_unplayed(self) -> None:
+    def test_shutdown_saves_messages_and_restart_plays_unheard(self) -> None:
         self.start_with(A0, A1, B0)
         self.assertEqual([A0], self.playback.played)
         self.playback.at = 0.3
         self.player.shutdown()
         self.assertEqual([], list(self.inbox_dir.iterdir()))
+        self.assertEqual(sorted([A0, A1, B0]), sorted(p.name for p in self.store_dir.iterdir()))
+        self.restart()
+        self.assertFalse(self.saved_file().exists())
+        self.assertEqual(["aa", "bb"], [self.task_of(m) for m in self.state().messages])
+        self.assertEqual(["text aa", "text bb"], [m.text for m in self.state().messages])
+        self.assertEqual([(A0, 0.0)], self.playback.starts)
+        self.finish()
+        self.finish()
+        self.assertEqual([A0, A1, B0], self.playback.played)
+        self.assertEqual(1, len(self.daemon.puts) - 1)  # переозвучки нет: кэш актуален
+
+    def test_heard_message_is_saved_without_files(self) -> None:
+        self.start_with(A0, B0)
+        self.finish()
+        self.player.shutdown()
+        self.assertEqual([B0], [p.name for p in self.store_dir.iterdir()])
+        self.restart()
+        heard, unheard = self.state().messages
+        self.assertEqual((True, [], "text aa"), (heard.heard, heard.sentences, heard.text))
+        self.assertEqual([self.path(B0)], [s.path for s in unheard.sentences])
+
+    def test_sentence_of_task_queued_before_exit_plays_after_restart(self) -> None:
+        self.player.start()
+        self.announce("aa")
+        self.player.shutdown()
+        self.restart()
+        self.arrive(A0)
+        self.assertEqual([A0], self.playback.played)
+
+    def test_store_leftovers_not_in_saved_messages_are_deleted_at_start(self) -> None:
+        self.store_dir.mkdir(parents=True)
+        write_wav(self.store_dir / B0, SECONDS)
+        with self.assertLogs("tts_player.inbox", "WARNING"):
+            self.player.start()
         self.assertEqual([], list(self.store_dir.iterdir()))
 
     def test_file_error_skips_to_next(self) -> None:
