@@ -233,6 +233,14 @@ class PlayerProcessCase(unittest.TestCase):
             if line.startswith(prefix):
                 return line
 
+    def wait_lock(self) -> None:
+        """Плеер взял замок: старт прошёл, восстановление и inbox/ разобраны."""
+        lock = self.runtime / "tts-player" / "player.lock"
+        deadline = time.monotonic() + WAIT
+        while not (lock.exists() and lock.read_text().strip()):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
     def played(self, count: int) -> list[str]:
         return [self.next_line("playing ").removeprefix("playing ") for _ in range(count)]
 
@@ -322,6 +330,7 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertEqual(3, len(kept))
         self.assertTrue((self.runtime / "tts-player" / "messages.json").exists())
         self.start_player()
+        self.wait_lock()
         self.assert_quiet()
         self.assertFalse((self.runtime / "tts-player" / "messages.json").exists())
         self.assertEqual(kept, sorted(p.name for p in self.store.iterdir()))
@@ -511,13 +520,6 @@ class SingleInstanceTest(PlayerProcessCase):
 
     def sessions_file(self) -> dict:
         return json.loads((self.runtime / "tts-player" / "sessions.json").read_text())
-
-    def wait_lock(self) -> None:
-        lock = self.runtime / "tts-player" / "player.lock"
-        deadline = time.monotonic() + WAIT
-        while not (lock.exists() and lock.read_text().strip()):
-            self.assertLess(time.monotonic(), deadline)
-            time.sleep(0.01)
 
     def test_session_add_has_remove_cycle_through_player_process(self) -> None:
         self.start_player()

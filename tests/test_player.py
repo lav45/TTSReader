@@ -351,6 +351,17 @@ class PlayerHistoryTest(PlayerCase):
         self.assertEqual([A0, A1, B0], self.playback.played)
         self.assertEqual(1, len(self.daemon.puts) - 1)  # переозвучки нет: кэш актуален
 
+    def test_sentence_in_inbox_of_task_sent_before_exit_plays_after_restart(self) -> None:
+        """Задача ушла в демон до выхода, её предложение легло в inbox/ без плеера: после
+        старта это новый ответ — играет само."""
+        self.player.start()
+        self.announce("aa")
+        self.player.shutdown()
+        write_wav(self.inbox_dir / A0, SECONDS)
+        self.restart()
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
+        self.assertEqual([A0], self.playback.played)
+
     def test_restart_resumes_current_from_unfinished_sentence(self) -> None:
         """Как прежний возврат store/ → inbox/: доигранные до позиции предложения текущего
         удаляются при выходе, следующий запуск играет с недоигранного."""
@@ -2340,11 +2351,11 @@ class PlayerSessionsTest(PlayerCase):
         self.assertEqual([f"text {task}" for task in tasks[1:]], self.texts("S"))
 
     def test_start_restores_open_session_waiting_then_new_answer_plays(self) -> None:
-        """Открытая S восстановлена с 7 непрослушанными (синтез завершён) при tail 5: сама
-        ничего не играет — idle без фокуса, режется до 5; новый ответ играет сам."""
+        """Открытая S восстановлена с 7 непрослушанными при tail 5, последнее — растущее
+        (склейки нет): ушло в демон в прошлом запуске, фокуса не даёт. Сама ничего не играет —
+        idle без фокуса, режется до 5; новый ответ играет сам."""
         tasks = [f"e{i}" for i in range(1, 7)]
         self.paused_with(*tasks)
-        self.end_current()  # склейка привязалась к последнему: синтез завершён
         self.player.shutdown()
         self.restart()
         state = self.state()
