@@ -142,16 +142,13 @@ class MessageQueueTest(unittest.TestCase):
     def test_empty_queue(self):
         self.assertEqual([], self.queue.messages)
 
-    def test_following_and_preceding_walk_messages(self):
+    def test_following_walks_messages(self):
         for n in (1, 2, 3):
             self.add(n, task=f"t{n}")
         first, second, third = self.queue.messages
         self.assertIs(second, self.queue.following(first))
         self.assertIs(third, self.queue.following(second))
         self.assertIsNone(self.queue.following(third))
-        self.assertIs(second, self.queue.preceding(third))
-        self.assertIs(first, self.queue.preceding(second))
-        self.assertIsNone(self.queue.preceding(first))
 
     def test_new_message_is_not_heard(self):
         self.add(1)

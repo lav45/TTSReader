@@ -207,6 +207,12 @@ class PlayerCase(unittest.TestCase):
             write_wav(self.inbox_dir / name, SECONDS)
         self.player.start()
 
+    def play_at(self, index: int) -> None:
+        """Пользователь выбирает сообщение с индексом index и жмёт play/pause: клик по строке
+        покидает текущее, play/pause начинает выбранное с начала."""
+        self.player.play_message(self.player._queue.messages[index])
+        self.player.toggle_play_pause()
+
     def arrive(self, name: str, seconds: float = SECONDS) -> None:
         """Предложение, забранное inbox/ после старта; задача хука для него — заранее."""
         self.announce_names((name,))
@@ -546,10 +552,10 @@ class PlayerHistoryTest(PlayerCase):
             self.playback.fail("no output", True)
         self.assertTrue(self.state().output_down)
 
-    def test_next_during_outage_plays_and_recovers(self) -> None:
+    def test_other_message_during_outage_plays_and_recovers(self) -> None:
         self.start_with(A0, B0)
         self.playback.fail("no output", True)
-        self.player.next()
+        self.play_at(1)
         self.glib.source_remove.assert_called_once_with(42)
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
         self.playback.started()
@@ -592,7 +598,7 @@ class PlayerHistoryTest(PlayerCase):
 
         self.player.on_change = broken
         with self.assertLogs("tts_player.player", "ERROR") as logs:
-            self.player.next()
+            self.play_at(1)
         self.assertIn("window broke", logs.output[0] + "".join(
             str(r.exc_info[1]) for r in logs.records if r.exc_info))
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
@@ -717,7 +723,7 @@ class PlayerCursorTest(PlayerCase):
         self.assertEqual([A0, A1], [s.path.name for s in self.state().current.sentences])
 
     def test_tail_keeps_five_started_messages(self) -> None:
-        """Сообщения приходят, пока играет первое (фокус): копятся; next по ним вытесняет
+        """Сообщения приходят, пока играет первое (фокус): копятся; выбор каждого по очереди вытесняет
         самое старое начатое сверх хвоста."""
         names = [f"100000000000000000{i}_{t}_tts_queue_S_{t}_s0.wav"
                  for i, t in enumerate(["a1", "a2", "a3", "a4", "a5", "a6"], start=1)]
@@ -725,8 +731,9 @@ class PlayerCursorTest(PlayerCase):
         for name in names[1:]:
             self.arrive(name)
         self.assertEqual(6, len(self.state().messages))
-        for _ in range(5):
-            self.player.next()
+        for message in list(self.state().messages)[1:]:
+            self.player.play_message(message)
+            self.player.toggle_play_pause()
         self.assertEqual(["a2", "a3", "a4", "a5", "a6"], [self.task_of(m) for m in self.state().messages])
         self.assertFalse(self.path(names[0]).exists())
 
@@ -766,21 +773,21 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual(("paused", "aa"), (self.state().status, self.task()))
         self.assertEqual([A0], self.playback.played)
 
-    def test_next_plays_following_from_start_and_marks_left_heard(self) -> None:
+    def test_play_other_message_starts_it_from_beginning_and_marks_left_heard(self) -> None:
         self.start_with(A0, A1, B0)
         self.playback.at = 0.3
-        self.player.next()
+        self.play_at(1)
         state = self.state()
         self.assertEqual(("playing", "bb", 0.0), (state.status, self.task_of(state.current),
                                                   self.player._position))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
         self.assertTrue(state.messages[0].heard)
 
-    def test_prev_from_incomplete_message_keeps_it_unheard_and_sentences_arrive(self) -> None:
+    def test_leaving_incomplete_message_keeps_it_unheard_and_sentences_arrive(self) -> None:
         self.start_with(A0, B0)
-        self.player.next()
+        self.play_at(1)
         self.assertEqual("bb", self.task())
-        self.player.prev()
+        self.play_at(0)
         bb = self.state().messages[1]
         self.assertFalse(bb.heard)
         self.assertTrue(self.state().messages[0].heard)
@@ -817,7 +824,7 @@ class PlayerButtonsTest(PlayerCase):
 
     def test_play_message_heard_only_selects_it(self) -> None:
         self.start_with(A0, B0)
-        self.player.next()
+        self.play_at(1)
         self.assertTrue(self.state().messages[0].heard)
         starts = list(self.playback.starts)
         self.playback.at = 0.3
@@ -892,36 +899,15 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual(("stopped", "bb", False),
                          (self.state().status, self.task(), self.state().output_down))
 
-    def test_next_on_last_does_nothing(self) -> None:
-        self.start_with(A0, B0)
-        self.player.next()
-        played = list(self.playback.played)
-        self.player.next()
-        self.assertEqual(played, self.playback.played)
-        self.assertEqual("bb", self.task())
-
-    def test_prev_plays_preceding_from_start(self) -> None:
+    def test_play_earlier_message_starts_it_from_beginning_and_marks_left_heard(self) -> None:
         self.start_with(A0, B0, C0)
-        self.player.next()
+        self.play_at(1)
         self.playback.at = 0.3
-        self.player.prev()
+        self.play_at(0)
         state = self.state()
         self.assertEqual(("playing", "aa"), (state.status, self.task_of(state.current)))
         self.assertEqual((A0, 0.0), self.playback.starts[-1])
         self.assertTrue(state.messages[1].heard)
-
-    def test_prev_on_first_does_nothing(self) -> None:
-        self.start_with(A0, B0)
-        self.player.prev()
-        self.assertEqual([A0], self.playback.played)
-        self.assertEqual("aa", self.task())
-
-    def test_prev_while_paused_plays(self) -> None:
-        self.start_with(A0, B0)
-        self.player.next()
-        self.player.toggle_play_pause()
-        self.player.prev()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
 
     def test_seek_before_joined_plays_sentence_at_offset(self) -> None:
         self.start_with(A0, A1, B0)
@@ -977,7 +963,7 @@ class PlayerButtonsTest(PlayerCase):
     def test_on_change_after_each_command(self) -> None:
         self.start_with(A0, A1, B0)
         commands = [self.player.toggle_play_pause, self.player.toggle_play_pause,
-                    self.player.next, self.player.prev,
+                    lambda: self.player.play_message(self.player._queue.messages[1]),
                     lambda: self.player.seek(0.2), self.player.clear]
         for command in commands:
             count = len(self.states)
@@ -1180,18 +1166,18 @@ class PlayerPrefsTest(PlayerCase):
     def heard(self) -> dict[str, bool]:
         return {self.task_of(m): m.heard for m in self.state().messages}
 
-    def test_next_from_unplayed_current_keeps_it_unheard_and_out_of_tail(self) -> None:
+    def test_leaving_unplayed_current_forward_keeps_it_unheard_and_out_of_tail(self) -> None:
         self.stop_on_bb_manually(tail=1)
         bb = self.state().current
-        self.player.next()
+        self.play_at(2)
         self.assertEqual(("playing", "cc"), (self.state().status, self.task()))
         self.assertEqual({"bb": False, "cc": False}, self.heard())
         self.assertFalse(self.player._queue.is_started(bb))
 
-    def test_prev_from_unplayed_current_keeps_it_unheard(self) -> None:
+    def test_leaving_unplayed_current_backward_keeps_it_unheard(self) -> None:
         self.stop_on_bb_manually()
         bb = self.state().current
-        self.player.prev()
+        self.play_at(0)
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         self.assertFalse(bb.heard)
         self.assertFalse(self.player._queue.is_started(bb))
@@ -1309,10 +1295,12 @@ class PlayerDuckingTest(PlayerCase):
         self.finish()
         self.assertEqual([("duck", 30)], self.calls())
 
-    def test_next_while_playing_keeps_ducked(self) -> None:
+    def test_row_click_while_playing_restores_and_play_ducks_again(self) -> None:
         self.start_with(A0, B0)
-        self.player.next()
-        self.assertEqual([("duck", 30)], self.calls())
+        self.player.play_message(self.player._queue.messages[1])
+        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+        self.player.toggle_play_pause()
+        self.assertEqual([("duck", 30), ("restore",), ("duck", 30)], self.calls())
 
     def test_clear_restores(self) -> None:
         self.start_with(A0, B0)
@@ -1758,15 +1746,6 @@ class PlayerRevoiceTest(PlayerCase):
         self.player.toggle_play_pause()
         self.assertEqual(self.revoice_fields("q", 1.0), self.daemon.puts[-1])
 
-    def test_prev_into_stale_message_revoices(self) -> None:
-        self.start_with(A0, B0)
-        self.finish()
-        self.settings.persona = "q"
-        self.daemon.ids.append("ee")
-        self.player.prev()
-        self.assertEqual(self.revoice_fields("q", 1.0), self.daemon.puts[-1])
-        self.assertEqual("ee", self.task())
-
     def test_autoplay_transition_revoices_stale_next(self) -> None:
         self.start_with(A0, B0)
         self.finish()
@@ -1795,7 +1774,7 @@ class PlayerRevoiceTest(PlayerCase):
         self.assertEqual((["text aa", "text bb"], b, [B0], False),
                          ([p["text"] for p in self.daemon.puts], self.state().current,
                           self.playback.played, a.heard))
-        self.player.prev()
+        self.play_at(0)
         self.assertEqual(self.revoice_fields("p", 1.0), self.daemon.puts[-1])
         self.assertEqual((a, "ee", False), (self.state().current, self.task(), a.heard))
 

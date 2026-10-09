@@ -77,12 +77,12 @@ class MessageQueue:
 
     Очередь не знает, что играет: текущее сообщение и позицию держит Player. Очередь
     связывает предложения с сообщениями по id задач демона (link), отвечает на вопросы о
-    порядке (following/preceding), длине и завершённости сообщения, отображает
+    порядке (following), длине и завершённости сообщения, отображает
     позицию в файл (locate) и владеет файлами своих сообщений: удаляет их при вытеснении из
     хвоста, обрезке (trim), в forget_audio() и clear(); на выходе плеера отдаёт их вместе с
     сообщениями снимком (release), на старте принимает снимок прошлого запуска (restore).
 
-    following/preceding/is_complete принимают только живые сообщения — из messages;
+    following/is_complete принимают только живые сообщения — из messages;
     сообщение, вытесненное, обрезанное или забытое после clear()/release(), им не передаётся.
 
     tail задаёт снаружи Player (настройки плеера) и может меняться на ходу: start()
@@ -194,10 +194,6 @@ class MessageQueue:
     def following(self, message: Message) -> Message | None:
         index = self._messages.index(message) + 1
         return self._messages[index] if index < len(self._messages) else None
-
-    def preceding(self, message: Message) -> Message | None:
-        index = self._messages.index(message)
-        return self._messages[index - 1] if index > 0 else None
 
     def start(self, message: Message) -> None:
         """Сообщение начато: входит в хвост; лишние начатые удаляются, самые старые первыми.

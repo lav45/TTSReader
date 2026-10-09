@@ -91,7 +91,7 @@ class Player:
     SentenceCounter один раз на сообщение; ответ асинхронный (_on_count), и пришедший после
     конца полученного завершает ожидающее сообщение. Сообщение с текстом — в конец своей
     очереди, ещё без звука; предложения приходят по id задачи демона (13). Начало
-    проигрывания (_start: play/pause, автопереход, next/prev) отложенного сообщения отдаёт
+    проигрывания (_start: play/pause, автопереход) отложенного сообщения отдаёт
     его текст демону текущим голосом; сообщения, которое демон уже не озвучивает, — сверяет
     его голос с текущим из config.json: устарел — кэш удаляется и текст уходит в демон
     заново (переозвучка). В обоих случаях сообщение играет по мере прихода предложений, как
@@ -497,27 +497,11 @@ class Player:
             position = 0.0
         self._start(self._current, position, requested=True)
 
-    def next(self) -> None:
-        current = self._current
-        following = None if current is None else self._queue.following(current)
-        if following is not None:
-            self._leave(current)
-            self._begin(following, requested=True)
-        self._changed()
-
-    def prev(self) -> None:
-        current = self._current
-        preceding = None if current is None else self._queue.preceding(current)
-        if preceding is not None:
-            self._leave(current)
-            self._begin(preceding, requested=True)
-        self._changed()
-
     def play_message(self, message: Message) -> None:
         """Клик по строке списка: только выбор. Сообщение становится текущим с позиции 0 в
         статусе stopped и не начатым (в хвост входит при первом play/pause, как после
         `_stop_after`); звук играет, только когда пользователь нажмёт play/pause. Покинутое
-        прослушано, только если начато и завершено (как у next/prev); клик по текущему и по
+        прослушано, только если начато и завершено (как в _leave); клик по текущему и по
         вытесненному из очереди сообщению ничего не меняет."""
         if not any(message is queued for queued in self._queue.messages):
             return
@@ -701,7 +685,7 @@ class Player:
         self._position = 0.0
 
     def _leave(self, message: Message) -> None:
-        """Сообщение покинуто по next/prev/клику: звук стоп; прослушанным считается только
+        """Сообщение покинуто по клику на другую строку: звук стоп; прослушанным считается только
         начатое и завершённое — у растущего ещё придут предложения, а текущее, ставшее им
         без звука (конец сообщения, пока звучал свой текст), не звучало."""
         self._halt()
@@ -712,9 +696,9 @@ class Player:
         self._start(message, 0.0, requested)
 
     def _start(self, message: Message, position: float, requested: bool) -> None:
-        """Начало проигрывания — одно место для play/pause, автоперехода и next/prev:
+        """Начало проигрывания — одно место для play/pause и автоперехода:
         сообщение входит в хвост; отложенное или с устаревшим кэшем — озвучка с начала.
-        requested — команда пользователя (play/pause, next/prev); только она переозвучивает
+        requested — команда пользователя (play/pause); только она переозвучивает
         сообщение без звука, автозапуск его пропускает (_play_at: прослушано, дальше
         следующее), кроме отложенного: его текст демону ещё не отдавался."""
         self._queue.start(message)
