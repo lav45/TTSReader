@@ -1,6 +1,7 @@
 """Окно плеера и значок в трее. Что показывать — решает tts_player.view над player.state();
 команды уходят в Player только через его методы."""
 import logging
+from dataclasses import replace
 from typing import Callable
 
 import gi
@@ -95,7 +96,7 @@ class PlayerWindow(Gtk.Window):
     "main" сверху вниз: ряд служебных значков — слева «Настройки», «Очистить сообщения
     активной сессии» (активна, пока есть активная сессия), справа «Озвучить свой текст»; дерево сессий — папки (открыта одна или ни одной: открытая —
     активная), дорожки открытой — под её заголовком с отступом; ползунок позиции; ряд со
-    временем слева и play/pause справа.
+    временем слева, play/pause и ⏩ автовоспроизведения справа (⏩ — крайняя справа).
     "settings": хвост очереди и приглушение (PlayerSettings), голос и скорость claude-tts
     (DaemonSettings); «Сохранить» пишет их и остаётся на экране, итог — в блоке внизу; стрелка
     назад возвращает без записи. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
@@ -138,9 +139,17 @@ class PlayerWindow(Gtk.Window):
         self.text_button = self._icon_button("audio-volume-high-symbolic", "Озвучить свой текст",
                                              self._open_text)
 
-        # время слева, play/pause справа
+        self.autoplay_button = Gtk.ToggleButton()
+        self.autoplay_button.set_image(
+            Gtk.Image.new_from_icon_name("media-seek-forward-symbolic", Gtk.IconSize.BUTTON))
+        self.autoplay_button.set_tooltip_text(
+            "Автовоспроизведение: следующая дорожка и новые ответы")
+        self._autoplay_handler = self.autoplay_button.connect("toggled", self._on_autoplay_toggled)
+
+        # время слева, справа play/pause и за ним ⏩ автовоспроизведения (крайняя справа)
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         buttons.pack_start(self.position_label_widget, False, False, 0)
+        buttons.pack_end(self.autoplay_button, False, False, 0)
         buttons.pack_end(self.play_pause_button, False, False, 0)
 
         self.tree = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
@@ -301,6 +310,23 @@ class PlayerWindow(Gtk.Window):
         трогают."""
         self._player.toggle_play_pause()
 
+    def _on_autoplay_toggled(self, button: Gtk.ToggleButton) -> None:
+        """Клик пользователя по ⏩: положение пишется в файл плеера и применяется к плееру.
+        Сбой записи — WARNING в лог, режим всё равно применяется: до перезапуска плеер ведёт
+        себя как показано на кнопке. PlayerSettings.load не бросает (на порче — умолчания)."""
+        prefs = replace(self._prefs.load(), autoplay=button.get_active())
+        try:
+            self._prefs.save(prefs)
+        except SettingsError as e:
+            log.warning("Автовоспроизведение не сохранено: %s", e)
+        self._player.apply_prefs(prefs)
+
+    def _show_autoplay(self, active: bool) -> None:
+        """Показ состояния плеера: свой обработчик заблокирован, это не клик пользователя."""
+        self.autoplay_button.handler_block(self._autoplay_handler)
+        self.autoplay_button.set_active(active)
+        self.autoplay_button.handler_unblock(self._autoplay_handler)
+
     def _on_text_changed(self, buffer: Gtk.TextBuffer) -> None:
         start, end = buffer.get_bounds()
         self._text_speaker.set_text(buffer.get_text(start, end, False))
@@ -355,7 +381,8 @@ class PlayerWindow(Gtk.Window):
             self.tail_spin.update()  # набранный текст без потери фокуса
             self.duck_spin.update()
             prefs = Prefs(tail=self.tail_spin.get_value_as_int(),
-                          duck=self.duck_spin.get_value_as_int())
+                          duck=self.duck_spin.get_value_as_int(),
+                          autoplay=self.autoplay_button.get_active())
             self._prefs.save(prefs)
             self._player.apply_prefs(prefs)
             if self._voice_loaded:
@@ -394,6 +421,7 @@ class PlayerWindow(Gtk.Window):
         self.scale.set_sensitive(state.current is not None)
         self.slider.show(state.position_s, state.length_s)
         self.clear_button.set_sensitive(clear_enabled(state))
+        self._show_autoplay(state.autoplay)
         self._shown_messages = state.messages
         self._show_rows(tree_rows(state))
 

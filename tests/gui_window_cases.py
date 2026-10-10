@@ -8,6 +8,7 @@
 import locale
 import os
 import unittest
+from dataclasses import replace
 
 if os.environ.get("GDK_BACKEND") != "broadway" and os.environ.get("TTS_PLAYER_GUI_TESTS") != "1":
     raise unittest.SkipTest("окно открывается только на GDK_BACKEND=broadway"
@@ -71,7 +72,7 @@ class FakePlayer:
     def apply_prefs(self, prefs: Prefs) -> None:
         """Как Player: настройки применены, окно получает новый снимок."""
         self.calls.append(("apply_prefs", prefs))
-        self.change(self.snapshot)
+        self.change(replace(self.snapshot, autoplay=prefs.autoplay))
 
     def seek(self, position_s: float) -> None:
         self.calls.append(("seek", position_s))
@@ -414,16 +415,64 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual(play_pause_label(snapshot), w.play_pause_button.get_label())
 
     def test_transport_row_is_position_left_then_play_pause_right(self) -> None:
-        """Кнопок ⏮/⏭ нет (2026-10-10, ими не пользовались): в ряду время и play/pause."""
+        """Кнопок ⏮/⏭ нет (2026-10-10, ими не пользовались): в ряду время, play/pause и ⏩
+        автовоспроизведения — последней справа."""
         w = self.window
         row = w.play_pause_button.get_parent()
-        self.assertEqual([w.position_label_widget, w.play_pause_button], row.get_children())
+        self.assertEqual([w.position_label_widget, w.play_pause_button, w.autoplay_button],
+                         row.get_children())
+        self.assertEqual(Gtk.PackType.END,
+                         row.child_get_property(w.autoplay_button, "pack-type"))
         self.assertEqual(Gtk.PackType.START,
                          row.child_get_property(w.position_label_widget, "pack-type"))
         self.assertEqual(Gtk.PackType.END,
                          row.child_get_property(w.play_pause_button, "pack-type"))
         for name in ("pause_button", "play_stop_button", "prev_button", "next_button"):
             self.assertFalse(hasattr(w, name), name)
+
+    def test_autoplay_button_icon_tooltip_and_initial_position(self) -> None:
+        w = self.window
+        self.assertIsInstance(w.autoplay_button, Gtk.ToggleButton)
+        self.assertEqual("media-seek-forward-symbolic", w.autoplay_button.get_image().get_icon_name()[0])
+        self.assertEqual("Автовоспроизведение: следующая дорожка и новые ответы",
+                         w.autoplay_button.get_tooltip_text())
+        self.assertTrue(w.autoplay_button.get_active())  # PlayerState.autoplay по умолчанию True
+
+    def test_autoplay_click_saves_flipped_prefs_then_applies_same(self) -> None:
+        w = self.window
+        self.prefs.loaded = Prefs(tail=7, duck=65)
+        w.autoplay_button.clicked()
+        expected = Prefs(tail=7, duck=65, autoplay=False)
+        self.assertEqual([("load",), ("save", expected)], self.prefs.calls)
+        self.assertEqual([("apply_prefs", expected)], self.player.calls)
+        self.assertFalse(w.autoplay_button.get_active())
+
+    def test_autoplay_save_error_warns_once_and_still_applies(self) -> None:
+        w = self.window
+        self.prefs.save_error = SettingsError("settings.json не записан")
+        with self.assertLogs("tts_player.window", level="WARNING") as logs:
+            w.autoplay_button.clicked()
+        self.assertEqual(1, len(logs.records))
+        self.assertIn("settings.json не записан", logs.output[0])
+        self.assertEqual([("apply_prefs", Prefs(tail=7, autoplay=False))], self.player.calls)
+        self.assertFalse(w.autoplay_button.get_active())
+
+    def test_on_change_moves_autoplay_button_without_save_or_apply(self) -> None:
+        w = self.window
+        self.prefs.calls.clear()
+        self.player.change(replace(self.player.snapshot, autoplay=False))
+        self.assertFalse(w.autoplay_button.get_active())
+        self.player.change(replace(self.player.snapshot, autoplay=True))
+        self.assertTrue(w.autoplay_button.get_active())
+        self.assertEqual([], self.prefs.calls)
+        self.assertEqual([], self.player.calls)
+
+    def test_settings_save_passes_autoplay_from_button(self) -> None:
+        w = self.window
+        self.player.change(replace(self.player.snapshot, autoplay=False))
+        w.settings_button.clicked()
+        w.save_button.clicked()
+        self.assertEqual(Prefs(tail=7, autoplay=False), self.prefs.calls[-1][1])
 
     def test_main_screen_order_top_to_bottom(self) -> None:
         w = self.window
