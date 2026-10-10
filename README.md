@@ -43,19 +43,33 @@ ln -s ~/Programs/TTSReader/bin/tts-player-hook ~/.local/bin/tts-player-hook
 В `~/.claude/settings.json` два хука сессии (подробно - «Переход на хуки сессии» ниже):
 `SessionStart` зовёт `tts-player-hook start`, `SessionEnd` - `tts-player-hook end`.
 
-### Патч демона
+### Демон из форка
 
-Демон `claude-tts` читает `~/.claude-tts/playback.json` не больше 10 000 байт. Текст
-сообщения лежит там же, в `current_message`, и кириллица в JSON занимает 6 байт на символ.
-Поэтому у сообщения длиннее ≈2000 символов чтение обрезается, демон теряет
-`current_message`, обёртка `paplay` получает id `unknown`, и плеер удаляет все предложения
-как чужие: сообщение не звучит. `patches/claude-code-tts-playback-read.patch` читает файл
-целиком. Его нужно накладывать после каждой установки или `uv tool upgrade` пакета, пока
-исправления нет в upstream, и затем перезапускать демон:
+`claude-tts` ставится не из upstream (`melderan/claude-code-tts`), а из форка
+`lav45/claude-code-tts`, клон — `~/Programs/claude-code-tts`. В ветке `lav45` поверх тега
+upstream лежат правки, которых в upstream нет:
+
+| Коммит | Зачем |
+|---|---|
+| `feat: sherpa loads Supertonic models` | загрузка модели Supertonic 3 (ru+en) для персоны `supertonic-3`; без неё воркер sherpa не стартует, и демон говорит запасным английским голосом piper |
+| `feat: a Supertonic persona's speed goes through ffmpeg atempo` | модель Supertonic синтезирует на скорости 1.0, скорость персоны задаёт `ffmpeg atempo`: на быстром синтезе Supertonic смазывает последние слова |
+
+Установка — с ветки клона; `uv tool upgrade` берёт её же, поэтому правки им не стираются:
 
 ```bash
-patch -p3 -d "$(ls -d ~/.local/share/uv/tools/claude-code-tts/lib/python3*/site-packages/claude_code_tts)" \
-    < ~/Programs/TTSReader/patches/claude-code-tts-playback-read.patch
+uv tool install --force "claude-code-tts @ git+file://$HOME/Programs/claude-code-tts@lav45"
+```
+
+Обновление на новый релиз upstream: правки переставляются на его тег (`rebase`, а не `merge`:
+upstream переписывает историю), затем установка и перезапуск демона с `daemon-bin` первым в
+`PATH`:
+
+```bash
+cd ~/Programs/claude-code-tts
+git fetch upstream --tags
+git rebase --onto <новый тег> <тег, от которого стоит ветка> lav45
+uv tool install --force "claude-code-tts @ git+file://$HOME/Programs/claude-code-tts@lav45"
+PATH="$HOME/Programs/TTSReader/daemon-bin:$PATH" setsid claude-tts daemon restart < /dev/null > /dev/null 2>&1 &
 ```
 
 ### Правка хуков речи
@@ -461,6 +475,15 @@ stderr плеера (`player.log`), в `~/.claude-tts/daemon.log` и в
   обычно;
 - громкость остаётся сниженной и между предложениями растущего сообщения, и пока звуковой выход
   недоступен (статус при этом playing).
+
+## Тишина перед звуком
+
+WirePlumber усыпляет устройство вывода через 5 с без звука (`session.suspend-timeout-seconds`
+по умолчанию), и проснувшаяся Bluetooth-колонка съедает начало первого слова. Поэтому, если
+вывод плеера молчал дольше 5 с, перед звуком идёт 0,5 с тишины: новое сообщение после паузы
+в разговоре, ▶ после паузы, клик по строке, свой текст. Между предложениями одного сообщения
+тишины нет. Простой общий для очереди и своего текста. Звуки других программ плеер не видит:
+если колонку не дали усыпить они, тишина всё равно будет, только лишняя.
 
 ## Тесты
 

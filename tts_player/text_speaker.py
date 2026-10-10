@@ -16,6 +16,7 @@ gi.require_version("GLib", "2.0")
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+from tts_player.output_idle import OutputIdle  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.synth_worker import EXIT_IMPORT_FAILED  # noqa: E402
@@ -150,13 +151,13 @@ class TextSpeaker:
     """
 
     def __init__(self, runtime_dir: Path, python: Path, worker: Path, player: Player,
-                 audio_sink: str | None = None) -> None:
+                 audio_sink: str | None = None, output: OutputIdle | None = None) -> None:
         self.on_change: Callable[[TextState], None] = lambda state: None
         self._text_root = Path(runtime_dir) / "tts-player" / "text"
         self._python = python
         self._worker = worker
         self._player = player
-        self._playback = Playback(audio_sink)
+        self._playback = Playback(audio_sink, output)
         self._playback.on_finished = self._on_finished
         self._playback.on_error = self._on_playback_error
         self._text = ""

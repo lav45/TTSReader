@@ -17,6 +17,7 @@ from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
 from tts_player.hook_tasks import HookTasks  # noqa: E402
 from tts_player.model import UNKNOWN_TASK, HookTask, Message, Sentence  # noqa: E402
+from tts_player.output_idle import OutputIdle  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.queue import MessageQueue, QueueSnapshot, TaskOrder  # noqa: E402
@@ -122,7 +123,8 @@ class Player:
                  daemon_settings: DaemonSettings,
                  sessions: Sessions,
                  control_dir: Path | None = None,
-                 sentence_counter: SentenceCounter | None = None) -> None:
+                 sentence_counter: SentenceCounter | None = None,
+                 output: OutputIdle | None = None) -> None:
         """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
         hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
         очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки;
@@ -130,7 +132,9 @@ class Player:
         сообщения прошлого запуска раскладывает по ним start(); control_dir — control/
         (контракт (14)), None — без запросов session add/remove;
         sentence_counter — счётчик предложений, плеер его владелец (останавливает в shutdown);
-        None — число предложений неизвестно, конец сообщения по запасным признакам."""
+        None — число предложений неизвестно, конец сообщения по запасным признакам;
+        output — простой вывода, общий со своим текстом (Playback), None — без тишины
+        пробуждения."""
         self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
@@ -140,7 +144,7 @@ class Player:
         # по session_id, сессии из Sessions; нет активной — курсор ходит по пустой
         self._queues = {session.id: self._new_queue() for session in sessions.sessions}
         self._no_session = self._new_queue()
-        self._playback = Playback(audio_sink)
+        self._playback = Playback(audio_sink, output)
         self._playback.on_finished = self._on_finished
         self._playback.on_error = self._on_error
         self._playback.on_started = self._on_started

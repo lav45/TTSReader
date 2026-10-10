@@ -7,7 +7,8 @@ from pathlib import Path
 
 from gi.repository import GLib
 
-from tts_player.playback import Playback
+from tts_player.output_idle import OutputIdle
+from tts_player.playback import WAKE_SILENCE_S, Playback
 
 RATE = 8000
 TOLERANCE = 0.05
@@ -212,6 +213,114 @@ class PlaybackTest(unittest.TestCase):
         self.assertEqual(1, len(self.errors))
         self.assertEqual(wav, self.errors[0][0])
         self.assertTrue(self.errors[0][2])
+
+
+class FrozenClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class WakeSilenceTest(unittest.TestCase):
+    """Простой вывода дольше SUSPEND_AFTER_S — перед файлом WAKE_SILENCE_S тишины."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.loop = GLib.MainLoop()
+        self.finished: list[Path] = []
+        self.errors: list[tuple[Path, str, bool]] = []
+        self.started: list[Path] = []
+        self.clock = FrozenClock()
+        self.output = OutputIdle(self.clock)
+
+    def make_playback(self, sink: str = "fakesink") -> Playback:
+        playback = Playback(sink, self.output)
+        self.addCleanup(playback.stop)
+        playback.on_finished = self._finished
+        playback.on_error = self._errored
+        playback.on_started = self.started.append
+        return playback
+
+    def _finished(self, path: Path) -> None:
+        self.finished.append(path)
+        self.loop.quit()
+
+    def _errored(self, path: Path, text: str, output_failed: bool) -> None:
+        self.errors.append((path, text, output_failed))
+        self.loop.quit()
+
+    def run_loop(self, ms: int = LOOP_LIMIT_MS) -> None:
+        GLib.timeout_add(ms, self.loop.quit)
+        self.loop.run()
+
+    def timed_play(self, playback: Playback, wav: Path) -> float:
+        started = time.monotonic()
+        playback.play(wav)
+        self.run_loop()
+        return time.monotonic() - started
+
+    def test_asleep_output_gets_silence_before_file(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 0.2)
+        elapsed = self.timed_play(self.make_playback(), wav)
+        self.assertEqual([wav], self.finished)
+        self.assertEqual([], self.errors)
+        self.assertGreaterEqual(elapsed, WAKE_SILENCE_S + 0.2 - TOLERANCE)
+
+    def test_awake_output_plays_file_at_once(self) -> None:
+        self.output.begin()
+        self.output.end()
+        wav = make_wav(self.dir / "a.wav", 0.2)
+        elapsed = self.timed_play(self.make_playback(), wav)
+        self.assertEqual([wav], self.finished)
+        self.assertLess(elapsed, WAKE_SILENCE_S)
+
+    def test_sound_of_one_playback_wakes_the_other(self) -> None:
+        first, second = self.make_playback(), self.make_playback()
+        self.timed_play(first, make_wav(self.dir / "a.wav", 0.2))
+        elapsed = self.timed_play(second, make_wav(self.dir / "b.wav", 0.2))
+        self.assertEqual(2, len(self.finished))
+        self.assertLess(elapsed, WAKE_SILENCE_S)
+
+    def test_started_once_when_silence_sounds(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 0.2)
+        playback = self.make_playback()
+        playback.on_started = lambda path: self.started.append((path, list(self.finished)))
+        playback.play(wav)
+        self.run_loop()
+        self.assertEqual([(wav, [])], self.started)
+
+    def test_position_during_silence_is_start_offset(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 2.0)
+        playback = self.make_playback()
+        samples: list[float | None] = []
+        playback.play(wav, start_s=1.0)
+        GLib.timeout_add(250, lambda: samples.append(playback.position()) or False)
+        self.run_loop(400)
+        self.assertEqual([1.0], samples)
+
+    def test_stop_during_silence_suppresses_file(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 0.2)
+        playback = self.make_playback()
+        playback.play(wav)
+        GLib.timeout_add(200, lambda: playback.stop() or False)
+        self.run_loop(1200)
+        self.assertEqual([], self.finished)
+        self.assertEqual([], self.errors)
+        self.assertIsNone(playback.position())
+        self.assertFalse(self.output.asleep())
+
+    def test_output_error_on_silence_is_output_error_of_file(self) -> None:
+        wav = make_wav(self.dir / "a.wav", 0.2)
+        playback = self.make_playback("filesink")
+        playback.play(wav)
+        self.run_loop()
+        self.assertEqual([], self.finished)
+        self.assertEqual([], self.started)
+        self.assertEqual([(wav, True)], [(p, out) for p, _, out in self.errors])
 
 
 if __name__ == "__main__":

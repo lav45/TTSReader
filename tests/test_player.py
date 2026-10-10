@@ -45,7 +45,7 @@ def write_wav(path: Path, seconds: float) -> None:
 class FakePlayback:
     """Подменяет Playback: запоминает play(), колбэки зовёт тест."""
 
-    def __init__(self, audio_sink: str | None = None) -> None:
+    def __init__(self, audio_sink: str | None = None, output: object = None) -> None:
         self.on_finished: Callable[[Path], None] = lambda path: None
         self.on_error: Callable[[Path, str, bool], None] = lambda path, text, output_failed: None
         self.on_started: Callable[[Path], None] = lambda path: None

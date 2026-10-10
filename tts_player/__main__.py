@@ -27,6 +27,7 @@ from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance  # noqa: E402
+from tts_player.output_idle import OutputIdle  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
 from tts_player.sentence_counter import SentenceCounter  # noqa: E402
@@ -97,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     sessions = Sessions(sessions_path(Path(runtime)))
     sessions.load()  # сессии прошлого запуска — до player.start()
     tts_python = Path(args.tts_python).expanduser()
+    output = OutputIdle()  # один на процесс: звук очереди и своего текста будит вывод для обоих
     try:
         player = Player(Path(runtime), args.audio_sink, ducker,
                         hook_tasks_dir=hook_home.queue_dir,
@@ -104,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
                         daemon_settings=settings, sessions=sessions,
                         control_dir=control_dir(Path(runtime)),
                         # процесс — с первым запросом, остановит Player.shutdown
-                        sentence_counter=SentenceCounter(tts_python, SENTENCE_COUNT_WORKER))
+                        sentence_counter=SentenceCounter(tts_python, SENTENCE_COUNT_WORKER),
+                        output=output)
         prefs = PlayerSettings(Path(args.settings_file).expanduser())
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:
@@ -112,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             run(player, loop.run, loop.quit, hook_home=hook_home)
         else:
             text_speaker = TextSpeaker(Path(runtime), tts_python, SYNTH_WORKER, player,
-                                       args.audio_sink)
+                                       args.audio_sink, output)
             run_gui(player, settings, prefs, text_speaker, args.show, hook_home)
     finally:
         hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
