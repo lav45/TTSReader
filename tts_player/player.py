@@ -599,6 +599,7 @@ class Player:
         current = self._current
         if not self._queue.is_complete(current):
             return  # ждём предложение: статус playing, звук молчит
+        log.info("ended %s %s", current.session_id, self._queue.task_of(current))
         self._queue.mark_heard(current)
         if not self._starts_by_itself():
             self._stop_after(current)
