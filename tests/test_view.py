@@ -37,8 +37,8 @@ def sentence(recv_s: float) -> Sentence:
 
 class RowsTest(unittest.TestCase):
     def test_order_index_current_and_heard(self):
-        a = message("a", created_at=CREATED_AT, duration_s=5, heard=True)
-        b = message("b", created_at=CREATED_AT, duration_s=5)
+        a = message("a", heard=True)
+        b = message("b")
         result = rows(state("playing", b, messages=[a, b]))
         self.assertEqual([r.index for r in result], [0, 1])
         self.assertEqual([r.current for r in result], [False, True])
@@ -69,10 +69,8 @@ class RowsTest(unittest.TestCase):
         self.assertEqual("один два три четыре пять шесть семь восемь…",
                          rows(state(messages=[m]))[0].title)
 
-    def test_time_is_first_sentence_even_with_created_at(self):
-        m = message(sentences=[sentence(CREATED_AT)], created_at=CREATED_AT + 500, project="p")
-        self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
-        m.created_at = CREATED_AT + 900
+    def test_time_without_hook_task_arrival_is_first_sentence(self):
+        m = message(sentences=[sentence(CREATED_AT), sentence(CREATED_AT + 500)], project="p")
         self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
 
     def test_time_is_hook_task_arrival_before_and_after_sentences(self):
@@ -81,10 +79,6 @@ class RowsTest(unittest.TestCase):
         m = message(received_at=CREATED_AT, project="p")
         self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
         m.sentences.append(sentence(CREATED_AT + 700))
-        self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
-
-    def test_time_from_created_at_without_sentences(self):
-        m = message(created_at=CREATED_AT, project="p")
         self.assertEqual(hms(CREATED_AT), rows(state(messages=[m]))[0].time)
 
     def test_time_unknown(self):
@@ -96,7 +90,7 @@ class RowsTest(unittest.TestCase):
         self.assertEqual([r.duration for r in result], ["0:04", "0:00"])
 
     def test_duration_hours(self):
-        m = message(created_at=CREATED_AT, duration_s=3725)
+        m = message()
         self.assertEqual(rows(state(messages=[m], lengths=[3725.0]))[0].duration, "1:02:05")
 
 

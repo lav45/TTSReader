@@ -1,7 +1,6 @@
 """Тесты Player: задачи хука в демон и переозвучка (заглушки DaemonQueue и DaemonSettings),
 воспроизведение по курсору, кнопки, снимок состояния, выход процесса, повтор при отказе вывода
-звука, переход играющего сообщения на склейку демона, приглушение чужих звуков на время
-playing (заглушка Ducker)."""
+звука, приглушение чужих звуков на время playing (заглушка Ducker)."""
 import json
 import sys
 import tempfile
@@ -18,7 +17,6 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
 from tts_player.daemon_settings import ActiveVoice  # noqa: E402
-from tts_player.history import HistoryEntry  # noqa: E402
 from tts_player.inbox import NAME_PATTERN  # noqa: E402
 from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
@@ -27,13 +25,11 @@ from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sentence_counter import SentenceCounter  # noqa: E402
 from tts_player.sessions import Session, Sessions  # noqa: E402
 
-# <recv_ns>_<id задачи демона>_<имя WAV демона>; id задачи = token, кроме N0
+# <recv_ns>_<id задачи демона>_<имя WAV демона>; id задачи = token
 A0 = "1000000000000000001_aa_tts_queue_S_aa_s0.wav"
 A1 = "1000000000000000002_aa_tts_queue_S_aa_s1.wav"
 B0 = "1000000000000000003_bb_tts_queue_S_bb_s0.wav"
-N0 = "2000000000000000004_dd_tts_queue_S_dd_s0.wav"  # пришло после склейки: склейка S его не берёт
 C0 = "1000000000000000005_cc_tts_queue_S_cc_s0.wav"
-JOINED = "tts-2000000000.000-S.wav"
 RATE = 1000
 SECONDS = 0.5
 
@@ -164,9 +160,6 @@ class PlayerCase(unittest.TestCase):
         self.inbox_dir = self.runtime / "tts-player" / "inbox"
         self.store_dir = self.runtime / "tts-player" / "store"
         self.inbox_dir.mkdir(parents=True)
-        history_dir = self.runtime / "speech_history"
-        history_dir.mkdir()
-        self.history_dir = history_dir
         patcher = mock.patch("tts_player.player.Playback", FakePlayback)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -176,8 +169,7 @@ class PlayerCase(unittest.TestCase):
         self.glib.timeout_add_seconds.return_value = 42
         self.daemon = FakeDaemonQueue()
         self.settings = FakeSettings()
-        self.player = Player(self.runtime, None, history_dir, self.runtime / "handy_analysis.db",
-                             sessions=Sessions(self.runtime / "sessions.json"),
+        self.player = Player(self.runtime, None, sessions=Sessions(self.runtime / "sessions.json"),
                              daemon_queue=self.daemon, daemon_settings=self.settings)
         self.player.add_session("S", "/w/proj")  # сессия задач хука тестов, открыта
         self.player.select_session("S")
@@ -236,11 +228,12 @@ class PlayerCase(unittest.TestCase):
         self.assertEqual(2, seconds)
         callback(*data)
 
-    def joined(self, seconds: float = 1.0) -> HistoryEntry:
-        """Склейка A0+A1 сессии S, как её пишет демон."""
-        path = self.history_dir / JOINED
-        write_wav(path, seconds)
-        return HistoryEntry(path, 2_000_000_000.0, "S", "proj", seconds)
+    def end_by_count(self, task_id: str = "aa") -> None:
+        """Счётчик ответил: у текста сообщения задачи task_id столько предложений, сколько их
+        уже пришло, — сообщение завершено (MessageQueue.is_complete по числу)."""
+        message = next(m for queue in self.player._queues.values() for m in queue.messages
+                       if task_id in m.task_ids)
+        self.player._on_count(message, len({s.index for s in message.sentences}))
 
     def state(self) -> PlayerState:
         return self.player.state()
@@ -253,8 +246,7 @@ class PlayerCase(unittest.TestCase):
         прошлого запуска — из sessions.json, как в __main__."""
         sessions = Sessions(self.runtime / "sessions.json")
         sessions.load()
-        self.player = Player(self.runtime, None, self.history_dir,
-                             self.runtime / "handy_analysis.db", sessions=sessions,
+        self.player = Player(self.runtime, None, sessions=sessions,
                              daemon_queue=self.daemon, daemon_settings=self.settings)
         self.playback = self.player._playback
         self.player.on_change = self.states.append
@@ -278,79 +270,15 @@ class PlayerCase(unittest.TestCase):
         return self.player._queue.task_of(message)
 
 
-class PlayerHistoryTest(PlayerCase):
-    """Склейка, отказ вывода, выход процесса — прежнее поведение."""
-
-    def switch_on_a1(self) -> None:
-        """Играет A1 (0,2 с от начала), приходит склейка A — переход на неё."""
-        self.start_with(A0, A1, N0)
-        self.finish()
-        self.playback.at = 0.2
-        self.player._on_entry(self.joined())
-
-    def test_entry_switches_playing_message_at_its_position(self) -> None:
-        with self.assertLogs("tts_player", "INFO") as logs:
-            self.switch_on_a1()
-        self.assertEqual([(A0, 0.0), (A1, 0.0), (JOINED, 0.7)], self.playback.starts)
-        self.assertEqual(["complete S aa 1.00s", f"switched {JOINED} at 0.70"],
-                         [r.getMessage() for r in logs.records
-                          if r.getMessage().startswith(("complete", "switched"))])
-        self.finish()
-        self.assertEqual([A0, A1, JOINED, N0], self.playback.played)
+class PlayerOutputAndExitTest(PlayerCase):
+    """Длина сообщений, отказ вывода, выход процесса и восстановление."""
 
     def test_state_lengths_match_queue_length_per_message(self) -> None:
-        self.start_with(A0, A1, N0)
-        self.player._on_entry(self.joined())
+        self.start_with(A0, A1, B0)
         state = self.state()
         self.assertEqual(len(state.messages), len(state.lengths))
         self.assertEqual([self.player._queue.length(m) for m in state.messages], state.lengths)
         self.assertAlmostEqual(1.0, state.lengths[0])
-
-    def test_entry_during_outage_waits_for_retry_of_joined_file(self) -> None:
-        self.start_with(A0, A1, N0)
-        self.finish()
-        self.playback.fail("no output", True)
-        self.player._on_entry(self.joined())
-        self.assertEqual([A0, A1], self.playback.played)
-        self.retry()
-        self.assertEqual((JOINED, 0.5), self.playback.starts[-1])
-        self.finish()
-        self.assertEqual([A0, A1, JOINED, N0], self.playback.played)
-
-    def test_entry_while_paused_is_remembered_and_resume_plays_joined(self) -> None:
-        self.start_with(A0, A1, N0)
-        self.finish()
-        self.playback.at = 0.2
-        self.player.toggle_play_pause()
-        with self.assertLogs("tts_player", "INFO") as logs:
-            self.player._on_entry(self.joined())
-        self.assertEqual([], [r.getMessage() for r in logs.records
-                              if r.getMessage().startswith("switched")])
-        self.assertEqual("paused", self.state().status)
-        self.player.toggle_play_pause()
-        self.assertEqual(JOINED, self.playback.starts[-1][0])
-        self.assertAlmostEqual(0.7, self.playback.starts[-1][1])
-
-    def test_entry_of_message_waiting_at_its_end_moves_on(self) -> None:
-        self.start_with(A0, A1)
-        self.finish()
-        self.finish()
-        self.assertEqual("playing", self.state().status)
-        self.player._on_entry(self.joined())
-        self.assertEqual("idle", self.state().status)
-        self.assertEqual("aa", self.task())
-        self.assertTrue(self.state().current.heard)
-
-    def test_shutdown_during_joined_file_keeps_unfinished_sentences(self) -> None:
-        """Выход на 0,7 с склейки: непрослушанное — в messages.json; доигранное A0 и склейка
-        удалены, недоигранное A1 и следующее N0 — в store/."""
-        self.switch_on_a1()
-        self.playback.at = 0.7  # склейка играет с 0,7 с
-        self.player.shutdown()
-        self.assertEqual([], list(self.inbox_dir.iterdir()))
-        self.assertEqual(sorted([A1, N0]),
-                         sorted(p.name for p in self.store_dir.iterdir()))
-        self.assertTrue(self.saved_file().exists())
 
     def test_store_is_taken_from_inbox(self) -> None:
         self.assertEqual(self.store_dir, self.player._inbox.store)
@@ -437,6 +365,21 @@ class PlayerHistoryTest(PlayerCase):
         self.restart()
         self.arrive(A0)
         self.assertEqual([A0], self.playback.played)
+
+    def test_joined_file_of_older_saved_messages_is_deleted_at_start(self) -> None:
+        """messages.json до отказа от склейки демона: ключ audio не читается, его файл в store/
+        ничей — удаляется на старте, предложения остаются у восстановленного сообщения."""
+        self.start_with(A0, A1)
+        self.player.shutdown()
+        data = json.loads(self.saved_file().read_text())
+        data["messages"][0].update({"audio": "tts-1.wav", "created_at": 7.0, "duration_s": 1.0})
+        self.saved_file().write_text(json.dumps(data))
+        write_wav(self.store_dir / "tts-1.wav", 1.0)
+        with self.assertLogs("tts_player.inbox", "WARNING"):
+            self.restart()
+        self.assertEqual(sorted([A0, A1]), sorted(p.name for p in self.store_dir.iterdir()))
+        [message] = self.state().messages
+        self.assertEqual([self.path(A0), self.path(A1)], [s.path for s in message.sentences])
 
     def test_store_leftovers_not_in_saved_messages_are_deleted_at_start(self) -> None:
         self.store_dir.mkdir(parents=True)
@@ -604,18 +547,6 @@ class PlayerHistoryTest(PlayerCase):
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
-    def test_without_history_plays(self) -> None:
-        player = Player(self.runtime, None, None, None,
-                        sessions=Sessions(self.runtime / "sessions.json"),
-                        daemon_queue=self.daemon, daemon_settings=self.settings)
-        player.add_session("S", "/w/proj")
-        player.select_session("S")
-        self.announce("aa", player=player)
-        write_wav(self.inbox_dir / A0, SECONDS)
-        player.start()
-        self.assertEqual([A0], player._playback.played)
-        player.shutdown()
-
 
 class PlayerCursorTest(PlayerCase):
     """Автопереход и снимок состояния."""
@@ -665,7 +596,7 @@ class PlayerCursorTest(PlayerCase):
     def test_idle_keeps_finished_current_and_new_message_plays(self) -> None:
         self.start_with(A0)
         self.finish()
-        self.player._on_entry(self.joined(seconds=3.0))  # другая длина: конец без склейки
+        self.end_by_count()
         state = self.state()
         self.assertEqual(("idle", "aa"), (state.status, self.task_of(state.current)))
         self.arrive(B0)
@@ -883,7 +814,7 @@ class PlayerButtonsTest(PlayerCase):
     def test_play_message_current_while_idle_changes_nothing(self) -> None:
         self.start_with(A0)
         self.finish()
-        self.player._on_entry(self.joined(seconds=3.0))  # другая длина: конец без склейки
+        self.end_by_count()
         self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
         starts = list(self.playback.starts)
         self.player.play_message(self.player._queue.messages[0])
@@ -909,7 +840,7 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual((A0, 0.0), self.playback.starts[-1])
         self.assertTrue(state.messages[1].heard)
 
-    def test_seek_before_joined_plays_sentence_at_offset(self) -> None:
+    def test_seek_plays_sentence_at_offset(self) -> None:
         self.start_with(A0, A1, B0)
         self.player.seek(0.7)
         name, start = self.playback.starts[-1]
@@ -941,13 +872,6 @@ class PlayerButtonsTest(PlayerCase):
         self.assertAlmostEqual(1.0, self.state().position_s)
         self.player.seek(-1)
         self.assertEqual(0.0, self.state().position_s)
-
-    def test_seek_after_joined_plays_joined_at_position(self) -> None:
-        self.start_with(A0, A1, N0)
-        self.player._on_entry(self.joined())
-        self.player.seek(0.3)
-        self.assertEqual(JOINED, self.playback.starts[-1][0])
-        self.assertAlmostEqual(0.3, self.playback.starts[-1][1])
 
     def test_clear_empties_store_and_next_sentence_plays(self) -> None:
         self.start_with(A0, A1, B0)
@@ -1019,18 +943,18 @@ class PlayerPrefsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         name, start = self.playback.starts[-1]
-        self.assertEqual(JOINED, name)
+        self.assertEqual(A0, name)
         self.assertAlmostEqual(0.3, start)
 
     def test_play_pause_when_idle_at_end_plays_current_from_start(self) -> None:
         self.start_with(A0, A1)
         self.finish()
         self.finish()
-        self.player._on_entry(self.joined())
+        self.end_by_count()
         self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
         self.player.toggle_play_pause()
         self.assertEqual("playing", self.state().status)
-        self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
 
     def test_play_pause_without_current_plays_last_message(self) -> None:
         self.manual()
@@ -1073,7 +997,7 @@ class PlayerPrefsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.finish()
         self.finish()
-        self.player._on_entry(self.joined())
+        self.end_by_count()
         state = self.state()
         self.assertEqual(("stopped", "aa"), (state.status, self.task()))
         self.assertAlmostEqual(state.length_s, state.position_s)
@@ -1087,7 +1011,7 @@ class PlayerPrefsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.finish()
         self.finish()
-        self.player._on_entry(self.joined())
+        self.end_by_count()
 
     def test_play_pause_after_last_ended_plays_message_arrived_since(self) -> None:
         self.end_last_manually()
@@ -1102,14 +1026,14 @@ class PlayerPrefsTest(PlayerCase):
         self.end_last_manually()
         self.player.toggle_play_pause()
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
-        self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
 
     def test_play_pause_in_idle_after_end_plays_message_arrived_since(self) -> None:
         """Сам перестал начинать после конца (idle): новое не играет само, play/pause — играет."""
         self.start_with(A0, A1)
         self.finish()
         self.finish()
-        self.player._on_entry(self.joined())
+        self.end_by_count()
         self.manual()
         self.arrive(B0)
         self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
@@ -1138,7 +1062,7 @@ class PlayerPrefsTest(PlayerCase):
         self.start_with(A0, A1)
         self.finish()
         self.finish()
-        self.player._on_entry(self.joined())
+        self.end_by_count()
         self.manual()
         self.arrive(B0)
         self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
@@ -1190,22 +1114,6 @@ class PlayerPrefsTest(PlayerCase):
         self.assertFalse(bb.heard)
         self.assertFalse(self.player._queue.is_started(bb))
 
-    def test_play_pause_after_joined_longer_than_sentences_plays_new(self) -> None:
-        """Склейка длиннее предложений (в пределах допуска): курсор доигранного — в её конце."""
-        self.manual()
-        self.start_with(A0, A1)
-        self.player.toggle_play_pause()
-        self.finish()
-        self.finish()
-        self.player._on_entry(self.joined(1.04))
-        state = self.state()
-        self.assertEqual("stopped", state.status)
-        self.assertAlmostEqual(1.04, state.position_s)
-        self.arrive(B0)
-        self.player.toggle_play_pause()
-        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
-        self.assertEqual((B0, 0.0), self.playback.starts[-1])
-
     def test_manual_new_message_in_idle_only_appears_in_list(self) -> None:
         self.manual()
         self.player.start()
@@ -1249,8 +1157,7 @@ class PlayerDuckingTest(PlayerCase):
         super().setUp()
         self.ducker = FakeDucker()
         self.now = 0.0
-        self.player = Player(self.runtime, None, self.history_dir,
-                             self.runtime / "handy_analysis.db", ducker=self.ducker,
+        self.player = Player(self.runtime, None, ducker=self.ducker,
                              clock=lambda: self.now,
                              sessions=Sessions(self.runtime / "sessions.json"),
                              daemon_queue=self.daemon, daemon_settings=self.settings)
@@ -1283,7 +1190,7 @@ class PlayerDuckingTest(PlayerCase):
     def test_end_without_following_restores(self) -> None:
         self.start_with(A0)
         self.finish()
-        self.player._on_entry(self.joined(seconds=3.0))
+        self.end_by_count()
         self.assertEqual("idle", self.state().status)
         self.assertEqual([("duck", 30), ("restore",)], self.calls())
 
@@ -1475,7 +1382,7 @@ class PlayerHoldTest(PlayerCase):
         self.start_with(A0, B0)
         self.player.hold()
         self.player.toggle_play_pause()  # пользователь сам продолжил главный
-        self.player._on_entry(self.joined(seconds=SECONDS))
+        self.end_by_count()
         self.finish()
         state = self.state()
         self.assertEqual(("stopped", "bb"), (state.status, self.task()))
@@ -1594,7 +1501,7 @@ class PlayerHookTasksTest(PlayerCase):
         (queue_dir / "1.json").write_text('{"id": "z", "session_id": "S", "text": "xy"}')
         sessions = Sessions(self.runtime / "sessions.json")
         sessions.load()  # S из setUp
-        player = Player(self.runtime, None, None, None, hook_tasks_dir=queue_dir,
+        player = Player(self.runtime, None, hook_tasks_dir=queue_dir,
                         sessions=sessions,
                         daemon_queue=self.daemon, daemon_settings=self.settings)
         self.daemon.ids.append("aa")
@@ -1625,7 +1532,7 @@ class PlayerHookTasksTest(PlayerCase):
         queue_dir = self.runtime / "hook-queue"
         queue_dir.mkdir()
         (queue_dir / "1.json").write_text('{"id": "z", "session_id": "u1", "text": "xy"}')
-        player = Player(self.runtime, None, None, None, hook_tasks_dir=queue_dir,
+        player = Player(self.runtime, None, hook_tasks_dir=queue_dir,
                         sessions=Sessions(self.runtime / "sessions2.json"),
                         control_dir=control_dir,
                         daemon_queue=self.daemon, daemon_settings=self.settings)
@@ -1644,7 +1551,7 @@ class PlayerHookTasksTest(PlayerCase):
 
     def test_shutdown_stops_control_monitor(self) -> None:
         control_dir = self.runtime / "tts-player" / "control"
-        player = Player(self.runtime, None, None, None,
+        player = Player(self.runtime, None,
                         sessions=Sessions(self.runtime / "sessions2.json"),
                         control_dir=control_dir,
                         daemon_queue=self.daemon, daemon_settings=self.settings)
@@ -1678,11 +1585,11 @@ class PlayerRevoiceTest(PlayerCase):
     NEW0 = "1000000000000000010_ee_tts_queue_S_ff_s0.wav"
 
     def heard_a(self) -> Message:
-        """A0+A1 доиграны, склейка привязана: сообщение aa прослушано, плеер idle."""
+        """A0+A1 доиграны, счётчик ответил: сообщение aa прослушано, плеер idle."""
         self.start_with(A0, A1)
         self.finish()
         self.finish()
-        self.player._on_entry(self.joined())
+        self.end_by_count()
         self.assertEqual("idle", self.state().status)
         return self.state().current
 
@@ -1695,20 +1602,18 @@ class PlayerRevoiceTest(PlayerCase):
         self.heard_a()
         self.player.toggle_play_pause()
         self.assertEqual(1, len(self.daemon.puts))
-        self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
 
     def test_stale_persona_revoices_with_current_persona(self) -> None:
         message = self.heard_a()
-        audio = message.audio
         self.settings.persona = "q"
         self.daemon.ids.append("ee")
         self.player.toggle_play_pause()
         self.assertEqual(self.revoice_fields("q", 1.0), self.daemon.puts[-1])
         self.assertFalse(any(self.path(name).exists() for name in (A0, A1)))
-        self.assertFalse(audio.exists())
-        self.assertEqual(({"aa", "ee"}, "q", 1.0, [], None, False),
+        self.assertEqual(({"aa", "ee"}, "q", 1.0, [], False),
                          (message.task_ids, message.persona, message.speed, message.sentences,
-                          message.audio, message.heard))
+                          message.heard))
         self.assertEqual(("playing", 0.0), (self.state().status, self.state().position_s))
         played = list(self.playback.played)
         self.arrive(self.NEW0)
@@ -1755,7 +1660,7 @@ class PlayerRevoiceTest(PlayerCase):
         self.player.play_message(self.state().messages[0])
         self.player.toggle_play_pause()
         self.arrive(self.NEW0)
-        self.player._on_entry(self.joined(seconds=SECONDS))
+        self.end_by_count("ee")
         self.daemon.ids.append("ff")
         self.finish()
         self.assertEqual(self.revoice_fields("q", 1.0, "bb"), self.daemon.puts[-1])
@@ -1820,7 +1725,7 @@ class PlayerRevoiceTest(PlayerCase):
             self.player.toggle_play_pause()
         self.assertIn("config.json не JSON", logs.output[0])
         self.assertEqual(1, len(self.daemon.puts))
-        self.assertEqual((JOINED, 0.0), self.playback.starts[-1])
+        self.assertEqual((A0, 0.0), self.playback.starts[-1])
 
 
 class PlayerSessionsTest(PlayerCase):
@@ -1905,7 +1810,7 @@ class PlayerSessionsTest(PlayerCase):
         control_dir = self.runtime / "tts-player" / "control"
         control_dir.mkdir(parents=True)
         (control_dir / "1.json").write_text('{"op": "add", "session": "C", "cwd": "/p/X"}')
-        player = Player(self.runtime, None, None, None,
+        player = Player(self.runtime, None,
                         sessions=Sessions(self.runtime / "sessions2.json"),
                         control_dir=control_dir,
                         daemon_queue=self.daemon, daemon_settings=self.settings)
@@ -1942,7 +1847,7 @@ class PlayerSessionsTest(PlayerCase):
 
     def play_last_deferred_to_end(self) -> tuple[Message, Message]:
         """B копила ответы закрытой (b1, b2 отложены); папка открыта, клик по последнему b2,
-        b2 озвучено и доиграло до конца (склейка другой длины — конец без неё)."""
+        b2 озвучено и доиграло до конца (конец — по ответу счётчика)."""
         self.player.start()
         self.hook("b1", "B")
         self.hook("b2", "B")
@@ -1953,9 +1858,7 @@ class PlayerSessionsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.deliver(self.B2)
         self.finish()
-        path = self.history_dir / "tts-2000000000.000-B.wav"
-        write_wav(path, 3.0)
-        self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "B", "proj", 3.0))
+        self.end_by_count("b2")
         return b1, b2
 
     def test_end_of_last_waits_and_does_not_go_back_to_earlier_unheard(self) -> None:
@@ -1986,7 +1889,7 @@ class PlayerSessionsTest(PlayerCase):
         self.finish()
         deferred = self.state().messages[1]
         self.daemon.ids.append("ab")
-        self.player._on_entry(self.joined(seconds=SECONDS))
+        self.end_by_count()
         self.assertEqual(self.voiced("ab", "S"), self.daemon.puts[-1])
         self.assertEqual((deferred, "playing", False, False),
                          (self.state().current, self.state().status, deferred.heard,
@@ -2092,17 +1995,6 @@ class PlayerSessionsTest(PlayerCase):
         [b1] = self.messages("B")
         self.assertEqual(([], True, True), (self.daemon.puts, b1.heard, b1.deferred))
 
-    def test_entry_of_session_not_in_list_is_not_attached(self) -> None:
-        self.start_with(A0, A1)
-        self.player.remove_session("B")
-        path = self.history_dir / "tts-2000000000.000-B.wav"
-        write_wav(path, 1.0)
-        with self.assertLogs("tts_player.player", "INFO") as logs:
-            self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "B", "proj", 1.0))
-        self.assertEqual([f"для склейки {path.name} нет сессии B в списке"],
-                         [r.getMessage() for r in logs.records])
-        self.assertEqual([None], [m.created_at for m in self.messages("S")])
-
     def test_select_clears_output_failure(self) -> None:
         self.start_with(A0)
         self.playback.fail("no output", True)
@@ -2114,7 +2006,7 @@ class PlayerSessionsTest(PlayerCase):
     def test_remove_session_before_start_does_not_raise(self) -> None:
         sessions = Sessions(self.runtime / "sessions.json")
         sessions.load()  # S и B из setUp
-        player = Player(self.runtime, None, None, None, sessions=sessions,
+        player = Player(self.runtime, None, sessions=sessions,
                         daemon_queue=self.daemon, daemon_settings=self.settings)
         player.remove_session("B")
         player._on_hook_task(HookTask("h1", 1.0, "S", "proj", "x", "p", 1.0, {"id": "h1"}))
@@ -2260,10 +2152,8 @@ class PlayerSessionsTest(PlayerCase):
         return [m.text for m in self.messages(session)]
 
     def end_current(self) -> None:
-        """Склейка S другой длины: текущее, доигранное по предложениям, кончается без неё."""
-        path = self.history_dir / JOINED
-        write_wav(path, 3.0)
-        self.player._on_entry(HistoryEntry(path, 2_000_000_000.0, "S", "proj", 3.0))
+        """Счётчик ответил: текущее, доигранное до конца полученного, кончается."""
+        self.end_by_count(self.task())
 
     def finished_aa(self, tail: int) -> None:
         """S открыта, tail задан, aa доиграно: idle, текущее — aa."""
@@ -2401,7 +2291,7 @@ class PlayerSessionsTest(PlayerCase):
 
     def test_start_restores_open_session_waiting_then_new_answer_plays(self) -> None:
         """Открытая S восстановлена с 7 непрослушанными при tail 5, последнее — растущее
-        (склейки нет): ушло в демон в прошлом запуске, фокуса не даёт. Сама ничего не играет —
+        (конец не пришёл): ушло в демон в прошлом запуске, фокуса не даёт. Сама ничего не играет —
         idle без фокуса, режется до 5; новый ответ играет сам."""
         tasks = [f"e{i}" for i in range(1, 7)]
         self.paused_with(*tasks)
@@ -2430,7 +2320,7 @@ A2 = "1000000000000000006_aa_tts_queue_S_aa_s2.wav"
 
 class PlayerSentenceCountTest(PlayerCase):
     """Конец сообщения по числу предложений (SentenceCounter): сообщение завершено, когда у его
-    задачи пришли все индексы 0…n−1, — без склейки и без предложения следующей задачи."""
+    задачи пришли все индексы 0…n−1, — без предложения следующей задачи."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -2442,9 +2332,9 @@ class PlayerSentenceCountTest(PlayerCase):
         self.player.start()
 
     def make_player(self, sessions: Sessions) -> Player:
-        player = Player(self.runtime, None, self.history_dir, self.runtime / "handy_analysis.db",
-                        ducker=self.ducker, sessions=sessions, daemon_queue=self.daemon,
-                        daemon_settings=self.settings, sentence_counter=self.counter)
+        player = Player(self.runtime, None, ducker=self.ducker, sessions=sessions,
+                        daemon_queue=self.daemon, daemon_settings=self.settings,
+                        sentence_counter=self.counter)
         self.playback = player._playback
         player.on_change = self.states.append
         return player
@@ -2487,15 +2377,11 @@ class PlayerSentenceCountTest(PlayerCase):
             self.announce("aa")
         self.assertEqual(["text aa"], [put["text"] for put in self.daemon.puts])
 
-    def test_single_sentence_ends_when_joined_file_came_before_it(self) -> None:
-        """Случай из журнала: склейка пришла раньше, чем inbox/ отдал предложение, — «для
-        склейки … нет сообщения сессии», и сообщение без счётчика оставалось «растущим» с
-        приглушением. С числом предложений оно кончается сразу после своего предложения."""
+    def test_single_sentence_ends_right_after_it(self) -> None:
+        """Число пришло раньше предложения: сообщение из одного предложения кончается сразу
+        после него, громкость возвращается — «растущим» с приглушением оно не остаётся."""
         self.announce("aa")
         self.counter.answer(1)
-        with self.assertLogs("tts_player.queue", "INFO") as logs:
-            self.player._on_entry(self.joined(seconds=SECONDS))
-        self.assertIn(f"для склейки {JOINED} нет сообщения сессии S", logs.output[0])
         self.arrive(A0)
         self.assertEqual([A0], self.playback.played)
         self.finish()
@@ -2538,15 +2424,17 @@ class PlayerSentenceCountTest(PlayerCase):
         self.assertEqual("idle", self.state().status)
 
     def test_unavailable_counter_keeps_old_signals(self) -> None:
-        """Счётчик не ответил: доигранное сообщение ждёт, конец — по склейке."""
+        """Счётчик не ответил: доигранное сообщение ждёт, конец — по предложению поздней
+        задачи."""
         self.announce("aa")
         self.arrive(A0)
         self.finish()
         self.assertEqual("playing", self.state().status)
         self.assertEqual([("duck", 30)], self.calls())
-        self.player._on_entry(self.joined(seconds=SECONDS))
-        self.assertEqual("idle", self.state().status)
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+        self.arrive(B0)
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
+        self.assertTrue(self.state().messages[0].heard)
+        self.assertEqual([A0, B0], self.playback.played)
 
     def test_shutdown_stops_counter_and_keeps_count(self) -> None:
         self.announce("aa")

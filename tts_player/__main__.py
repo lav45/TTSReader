@@ -1,7 +1,6 @@
 """Процесс плеера: разбор аргументов и главный цикл; устройство — в tts_player.player.
 
-Запуск: python3 -m tts_player [--audio-sink NAME] [--history-dir DIR] [--history-db FILE]
-                              [--tts-config-dir DIR] [--settings-file FILE]
+Запуск: python3 -m tts_player [--audio-sink NAME] [--tts-config-dir DIR] [--settings-file FILE]
                               [--tts-python FILE]
                               [--no-gui] [--show] [--tray]
        python3 -m tts_player session add UUID CWD | remove UUID | clear UUID CWD | has UUID
@@ -45,10 +44,6 @@ def main(argv: list[str] | None = None) -> int:
         return session_command.main(argv[1:])
     parser = argparse.ArgumentParser(prog="tts_player")
     parser.add_argument("--audio-sink", default=None, help="элемент GStreamer для вывода звука")
-    parser.add_argument("--history-dir", default="~/.claude-tts/speech_history",
-                        help="каталог склеек демона")
-    parser.add_argument("--history-db", default="~/.claude-tts/handy_analysis.db",
-                        help="база истории демона (только чтение)")
     parser.add_argument("--tts-config-dir", default="~/.claude-tts",
                         help="каталог claude-tts: голос и скорость (экран настроек,"
                              " переозвучка), очередь демона queue/")
@@ -103,9 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     sessions.load()  # сессии прошлого запуска — до player.start()
     tts_python = Path(args.tts_python).expanduser()
     try:
-        player = Player(Path(runtime), args.audio_sink,
-                        Path(args.history_dir).expanduser(), Path(args.history_db).expanduser(),
-                        ducker, hook_tasks_dir=hook_home.queue_dir,
+        player = Player(Path(runtime), args.audio_sink, ducker,
+                        hook_tasks_dir=hook_home.queue_dir,
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
                         daemon_settings=settings, sessions=sessions,
                         control_dir=control_dir(Path(runtime)),

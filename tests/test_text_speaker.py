@@ -491,7 +491,7 @@ class TextSpeakerDuckingTest(TextSpeakerCase):
     def setUp(self) -> None:
         super().setUp()
         self.ducker = FakeDucker()
-        self.main = Player(self.runtime, "fakesink", None, None, ducker=self.ducker,
+        self.main = Player(self.runtime, "fakesink", ducker=self.ducker,
                            sessions=Sessions(self.runtime / "sessions.json"),
                            daemon_queue=DaemonQueue(self.runtime / "daemon-queue"),
                            daemon_settings=DaemonSettings(self.runtime / "claude-tts"))

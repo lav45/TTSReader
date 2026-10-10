@@ -1,6 +1,8 @@
 """Тесты MessageQueue: сообщения по задачам демона, порядок, навигация, хвост начатых (tail, по умолчанию 5)."""
+import logging
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from unittest import mock
 
@@ -191,7 +193,7 @@ class MessageQueueTest(unittest.TestCase):
 
     def test_is_complete_when_last_task_covers_all_indices(self):
         """Число предложений известно: сообщение завершено, когда у его последней задачи
-        есть все индексы 0…n−1, — без склейки и без предложения следующей задачи."""
+        есть все индексы 0…n−1, — без предложения следующей задачи."""
         message = self.message("t1")
         message.sentence_count = 3
         self.queue.add(self.sentence(1, "t1", 0))
@@ -256,16 +258,10 @@ class MessageQueueTest(unittest.TestCase):
     def test_forget_audio_deletes_files_and_resets_message(self):
         message = self.message()
         sentences = [self.add(n, index=n) for n in (1, 2)]
-        audio = self.dir / "joined.wav"
-        audio.write_bytes(b"wav")
-        message.audio, message.created_at, message.duration_s = audio, 5.0, 1.0
         message.heard = True
         self.queue.forget_audio(message)
         self.assertFalse(any(s.path.exists() for s in sentences))
-        self.assertFalse(audio.exists())
-        self.assertEqual(([], None, None, None, False),
-                         (message.sentences, message.audio, message.created_at,
-                          message.duration_s, message.heard))
+        self.assertEqual(([], False), (message.sentences, message.heard))
         self.assertEqual([message], self.queue.messages)
 
     def start_messages(self, count):
@@ -606,25 +602,21 @@ class SnapshotTest(unittest.TestCase):
         self.assertFalse(queue.is_complete(fresh))
 
     def test_release_drops_finished_sentences_of_current(self):
-        """Позиция текущего непрослушанного: кончившиеся до неё предложения и склейка
-        удаляются — следующий запуск продолжит с недоигранного."""
+        """Позиция текущего непрослушанного: кончившиеся до неё предложения удаляются —
+        следующий запуск продолжит с недоигранного."""
         message = self.message("t1")
         first, second, third = (self.sentence(n, "t1", n) for n in (1, 2, 3))
         for sentence in (first, second, third):
             self.queue.add(sentence)
-        audio = self.dir / "joined.wav"
-        audio.write_bytes(b"wav")
-        message.audio, message.duration_s = audio, 3.0
         with mock.patch.object(MessageQueue, "_duration", return_value=1.0):
             snapshot = self.queue.release(message, 1.5)
         self.assertEqual([second, third], snapshot.messages[0].sentences)
         self.assertFalse(first.path.exists())
-        self.assertFalse(audio.exists())
-        self.assertEqual((None, None), (message.audio, message.duration_s))
+        self.assertTrue(second.path.exists())
 
     def test_release_keeps_completeness_by_count_of_dropped_sentences(self):
         """Выход посреди сообщения: доигранные предложения удалены, но пришли — после
-        перезапуска сообщение завершено по числу предложений, без склейки."""
+        перезапуска сообщение завершено по числу предложений."""
         message = self.message("t1")
         message.sentence_count = 2
         self.queue.add(self.sentence(1, "t1", 0))
@@ -662,11 +654,9 @@ class SnapshotTest(unittest.TestCase):
     def test_release_at_zero_keeps_current_whole(self):
         message = self.message("t1")
         sentence = self.add(1, task="t1")
-        audio = self.dir / "joined.wav"
-        audio.write_bytes(b"wav")
-        message.audio, message.duration_s = audio, 1.0
         self.queue.release(message, 0.0)
-        self.assertEqual(([sentence], audio), (message.sentences, message.audio))
+        self.assertEqual([sentence], message.sentences)
+        self.assertTrue(sentence.path.exists())
 
     def test_empty_snapshot_restores_nothing(self):
         self.queue.restore(QueueSnapshot([], [], {}, 0))
@@ -736,6 +726,73 @@ class SharedTaskOrderTest(unittest.TestCase):
         self.assertGreater(order.order("c"), order.order("a"))
         self.assertGreater(order.order("c"), order.order("b"))
         self.assertTrue(queue_b.is_complete(queue_b.messages[0]))
+
+
+class LengthTest(unittest.TestCase):
+    """Длина сообщения и карта позиций по длительностям WAV предложений."""
+    RATE = 1000
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.queue = MessageQueue(tail=5, order=TaskOrder())
+        self.message = Message("s1")
+        self.queue.append(self.message)
+        self.queue.link(self.message, "t1")
+
+    def add(self, recv_ns, seconds, index=0):
+        path = self.dir / f"t1-s1-aa-{index}-{recv_ns}.wav"
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(self.RATE)
+            w.writeframes(b"\0\0" * int(seconds * self.RATE))
+        sentence = Sentence(recv_ns, "t1", "s1", "aa", index, path)
+        self.queue.add(sentence)
+        return sentence
+
+    def test_unreadable_sentence_counts_zero_with_warning(self):
+        sentence = self.add(1_000_000_000, 1.0)
+        sentence.path.write_bytes(b"garbage")
+        with self.assertLogs("tts_player.queue", logging.WARNING):
+            self.assertEqual(0, self.queue.length(self.message))
+        self.assertEqual(0, self.queue.offset_of(self.message, sentence))
+
+    def test_locate_maps_into_sentence(self):
+        self.add(1_000_000_000, 1.0, index=0)
+        second = self.add(2_000_000_000, 2.0, index=1)
+        path, offset = self.queue.locate(self.message, 1.5)
+        self.assertEqual(second.path, path)
+        self.assertAlmostEqual(0.5, offset)
+        self.assertAlmostEqual(1.0, self.queue.offset_of(self.message, second))
+
+    def test_locate_clamps(self):
+        first = self.add(1_000_000_000, 1.0, index=0)
+        second = self.add(2_000_000_000, 2.0, index=1)
+        self.assertEqual((first.path, 0), self.queue.locate(self.message, -3))
+        path, offset = self.queue.locate(self.message, 99)
+        self.assertEqual(second.path, path)
+        self.assertAlmostEqual(2.0, offset)
+
+    def test_locate_finds_zero_length_sentence_at_position(self):
+        first = self.add(1_000_000_000, 0, index=0)
+        self.add(2_000_000_000, 1.0, index=1)
+        middle = self.add(3_000_000_000, 0, index=2)
+        self.assertEqual((first.path, 0), self.queue.locate(self.message, 0))
+        self.assertEqual((middle.path, 0), self.queue.locate(self.message, 1.0))
+
+    def test_duration_read_once(self):
+        self.add(1_000_000_000, 1.0)
+        self.queue.locate(self.message, 0.5)
+        with mock.patch("tts_player.queue.wave.open", side_effect=AssertionError):
+            self.queue.locate(self.message, 0.5)
+
+    def test_length_is_sum_of_received(self):
+        self.add(1_000_000_000, 1.0, index=0)
+        self.assertAlmostEqual(1.0, self.queue.length(self.message))
+        self.add(2_000_000_000, 0.5, index=1)
+        self.assertAlmostEqual(1.5, self.queue.length(self.message))
 
 
 if __name__ == "__main__":

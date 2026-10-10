@@ -10,7 +10,6 @@ from tts_player.saved_messages import SavedMessages
 
 S0 = "1000000000000000001_aa_tts_queue_S_aa_s0.wav"
 S1 = "1000000000000000002_aa_tts_queue_S_aa_s1.wav"
-JOINED = "tts-1.wav"
 
 
 class SavedMessagesTest(unittest.TestCase):
@@ -29,13 +28,10 @@ class SavedMessagesTest(unittest.TestCase):
         return Sentence(int(name[:19]), "aa", "S", "aa", index, path)
 
     def snapshot(self) -> QueueSnapshot:
-        joined = self.store / JOINED
-        joined.write_bytes(b"wav")
         unheard = Message("S", project="/w/p", text="Привет", persona="p", speed=1.5,
                           task_ids={"aa", "bb"},
                           sentences=[self.sentence(S0, 0), self.sentence(S1, 1)],
-                          received_at=5.0, audio=joined, created_at=7.0, duration_s=1.0,
-                          sentence_count=2)
+                          received_at=5.0, sentence_count=2)
         heard = Message("N", text="пока", persona="q", speed=1.0, task_ids={"cc"},
                         received_at=6.0, heard=True, sentence_count=3,
                         played_indices={0, 2})
@@ -48,8 +44,7 @@ class SavedMessagesTest(unittest.TestCase):
     def fields(self, message: Message) -> tuple:
         return (message.session_id, message.project, message.text, message.persona,
                 message.speed, message.task_ids, message.sentences, message.received_at,
-                message.sent, message.audio, message.created_at, message.duration_s,
-                message.heard, message.deferred, message.sentence_count,
+                message.sent, message.heard, message.deferred, message.sentence_count,
                 message.played_indices)
 
     def test_round_trip_and_file_deleted_after_load(self):
@@ -90,19 +85,35 @@ class SavedMessagesTest(unittest.TestCase):
     def test_saved_file_names_are_relative_to_store(self):
         self.saved.save(self.snapshot())
         data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(([S0, S1], JOINED),
-                         (data["messages"][0]["sentences"], data["messages"][0]["audio"]))
+        self.assertEqual([S0, S1], data["messages"][0]["sentences"])
+
+    def test_joined_file_keys_are_not_written(self):
+        self.saved.save(self.snapshot())
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual([], [key for m in data["messages"] for key in m
+                              if key in ("audio", "created_at", "duration_s")])
+
+    def test_joined_file_keys_of_older_file_are_ignored(self):
+        """Файл до отказа от склейки демона: ключи audio/created_at/duration_s не мешают
+        чтению, склейка из store/ сообщению не достаётся (её удалит старт как ничью)."""
+        snapshot = self.snapshot()
+        self.saved.save(snapshot)
+        (self.store / "tts-1.wav").write_bytes(b"wav")
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        for item in data["messages"]:
+            item.update({"audio": "tts-1.wav", "created_at": 7.0, "duration_s": 1.0})
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        loaded = self.saved.load()
+        self.assertEqual([self.fields(m) for m in snapshot.messages],
+                         [self.fields(m) for m in loaded.messages])
 
     def test_missing_files_are_dropped(self):
-        """Пропавшее предложение выпадает; без склейки сообщение играет по предложениям,
-        без всего — «без звука» и при play переозвучивается."""
+        """Пропавшее предложение выпадает; без всех — «без звука» и при play
+        переозвучивается."""
         self.saved.save(self.snapshot())
         (self.store / S1).unlink()
-        (self.store / JOINED).unlink()
         message = self.saved.load().messages[0]
-        self.assertEqual(([S0], None, None),
-                         ([s.path.name for s in message.sentences], message.audio,
-                          message.duration_s))
+        self.assertEqual([S0], [s.path.name for s in message.sentences])
 
     def test_no_file_gives_empty_snapshot_silently(self):
         with self.assertNoLogs("tts_player.saved_messages", "WARNING"):
@@ -113,8 +124,7 @@ class SavedMessagesTest(unittest.TestCase):
         bad_count = json.dumps({"version": 1, "task_order": {}, "delivered": 0, "messages": [
             {"session_id": "S", "project": None, "text": None, "persona": None, "speed": None,
              "task_ids": [], "received_at": None, "sent": True, "heard": False,
-             "started": False, "created_at": None, "duration_s": None, "sentences": [],
-             "audio": None, "sentence_count": -1}]})
+             "started": False, "sentences": [], "sentence_count": -1}]})
         for text in ("{не json", "[]", '{"messages": [{"text": 1}]}', bad_count):
             self.path.write_text(text, encoding="utf-8")
             with self.assertLogs("tts_player.saved_messages", "WARNING"):

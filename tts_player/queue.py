@@ -3,16 +3,12 @@
 import bisect
 import itertools
 import logging
-import shutil
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import Iterable
 
 from tts_player.model import UNKNOWN_TASK, Message, Sentence
-
-if TYPE_CHECKING:
-    from tts_player.history import HistoryEntry
 
 log = logging.getLogger("tts_player.queue")
 
@@ -89,7 +85,6 @@ class MessageQueue:
     подгоняет хвост начатых к нему постепенно (см. start), trim() режет всю очередь сразу —
     когда её звать, решает Player (фокус).
     """
-    DURATION_TOLERANCE_S = 0.05
 
     def __init__(self, tail: int, order: TaskOrder) -> None:
         self.tail = tail
@@ -178,16 +173,12 @@ class MessageQueue:
         return True
 
     def forget_audio(self, message: Message) -> None:
-        """Кэш сообщения устарел: файлы предложений и склейки удалены, сообщение — как только
-        пришедшее (без предложений, записи истории, отметки «прослушано» и доигранных индексов;
-        число предложений остаётся — текст тот же)."""
+        """Кэш сообщения устарел: файлы предложений удалены, сообщение — как только пришедшее
+        (без предложений, отметки «прослушано» и доигранных индексов; число предложений
+        остаётся — текст тот же)."""
         for sentence in message.sentences:
             self._unlink(sentence)
-        self._unlink_audio(message)
         message.sentences = []
-        message.audio = None
-        message.created_at = None
-        message.duration_s = None
         message.heard = False
         message.played_indices = set()
 
@@ -230,20 +221,17 @@ class MessageQueue:
         message.heard = True
 
     def length(self, message: Message) -> float:
-        """Длина сообщения, с: склейки, если она есть, иначе сумма полученных предложений."""
-        if message.audio is not None:
-            return message.duration_s
+        """Длина сообщения, с: сумма полученных предложений."""
         return sum(self._duration(s) for s in message.sentences)
 
     def is_complete(self, message: Message) -> bool:
         """Сообщение больше не растёт: у его последней задачи пришли предложения со всеми
         индексами 0…n−1, где n — message.sentence_count (любого прохода; n == 0 — ждать
-        нечего). Запасные признаки — число неизвестно или демон сбился: есть склейка или запись
-        истории; его задача не ушла в демон (ждать нечего); или пришло предложение задачи,
-        поставленной позже его последней, — демон синтезирует задачи строго по одной в
-        порядке постановки.
+        нечего). Запасные признаки — число неизвестно или демон сбился: его задача не ушла в
+        демон (ждать нечего); или пришло предложение задачи, поставленной позже его последней,
+        — демон синтезирует задачи строго по одной в порядке постановки.
         """
-        if message.audio is not None or message.created_at is not None or not message.sent:
+        if not message.sent:
             return True
         task_id = self.task_of(message)
         if self._all_indices(message, task_id):
@@ -266,7 +254,6 @@ class MessageQueue:
         for message in self._messages:
             for sentence in message.sentences:
                 self._unlink(sentence)
-            self._unlink_audio(message)
         self._forget()
 
     def release(self, current: Message | None = None, position_s: float = 0.0) -> QueueSnapshot:
@@ -274,7 +261,7 @@ class MessageQueue:
         остаются в store/; очередь забывает всё и отдаёт снимок для следующего запуска.
 
         current (непрослушанное) на позиции position_s > 0: предложения, кончившиеся до
-        неё, и склейка удаляются — следующий запуск продолжит с недоигранного (предложение
+        неё, удаляются — следующий запуск продолжит с недоигранного (предложение
         нулевой длины на позиции и начинающееся на ней остаются); индексы удалённых
         предложений последней задачи остаются в played_indices для is_complete."""
         if current is not None and not current.heard and position_s > 0:
@@ -283,10 +270,7 @@ class MessageQueue:
             if message.heard:
                 for sentence in message.sentences:
                     self._unlink(sentence)
-                self._unlink_audio(message)
                 message.sentences = []
-                message.audio = None
-                message.duration_s = None
         task_ids = [task_id for message in self._messages for task_id in message.task_ids]
         task_order, delivered = self._order.snapshot(task_ids)
         snapshot = QueueSnapshot(self._messages, self._started, task_order, delivered)
@@ -299,10 +283,7 @@ class MessageQueue:
         message.played_indices |= {s.index for s in played if s.task_id == task_id}
         for sentence in played:
             self._unlink(sentence)
-        self._unlink_audio(message)
         message.sentences = [s for s in message.sentences if s not in played]
-        message.audio = None
-        message.duration_s = None
 
     def _unfinished(self, message: Message, sentence: Sentence, position_s: float) -> bool:
         start = self.offset_of(message, sentence)
@@ -328,72 +309,25 @@ class MessageQueue:
             self._started.remove(message)
         for sentence in message.sentences:
             self._unlink(sentence)
-        self._unlink_audio(message)
         log.info("сообщение %s/%s удалено из очереди", message.session_id,
                  self.task_of(message))
 
     def _unlink(self, sentence: Sentence) -> None:
         self._durations.pop(sentence.path, None)
-        self._unlink_path(sentence.path)
-
-    def _unlink_audio(self, message: Message) -> None:
-        if message.audio is not None:
-            self._unlink_path(message.audio)
-
-    @staticmethod
-    def _unlink_path(path: Path) -> None:
         try:
-            path.unlink()
+            sentence.path.unlink()
         except FileNotFoundError:
-            log.debug("файл уже удалён: %s", path)
+            log.debug("файл уже удалён: %s", sentence.path)
         except OSError:
-            log.exception("не удалось удалить файл %s", path)
-
-    def attach(self, entry: "HistoryEntry", store: Path) -> Message | None:
-        """Привязывает склейку демона к сообщению её сессии; None, если сообщения нет.
-
-        Сообщение — с наибольшим первым recv_ns среди сообщений сессии с предложениями,
-        без audio и записи истории, все предложения которых получены раньше
-        entry.created_at. При совпадении длительности (допуск DURATION_TOLERANCE_S) склейка
-        копируется в store/ и становится audio; иначе (или при сбое копирования) audio
-        остаётся None, а сообщение доигрывается по предложениям. created_at/project заполняются
-        в любом случае: сообщение считается завершённым (is_complete). Переход
-        играющего сообщения на склейку решает Player.
-        """
-        message = self._candidate(entry)
-        if message is None:
-            log.info("для склейки %s нет сообщения сессии %s", entry.path.name,
-                     entry.session_id)
-            return None
-        message.created_at = entry.created_at
-        message.project = entry.project
-        total = sum(self._duration(s) for s in message.sentences)
-        if abs(entry.duration_s - total) > self.DURATION_TOLERANCE_S + 1e-9:
-            log.warning("склейка %s: %.3f с, предложения сообщения %s/%s: %.3f с;"
-                        " играется по предложениям", entry.path.name, entry.duration_s,
-                        message.session_id, self.task_of(message), total)
-            return message
-        target = store / entry.path.name
-        try:
-            shutil.copy2(entry.path, target)
-        except OSError:
-            log.warning("не удалось скопировать склейку %s в %s; играется по"
-                        " предложениям", entry.path, target, exc_info=True)
-            target.unlink(missing_ok=True)
-            return message
-        message.audio = target
-        message.duration_s = entry.duration_s
-        return message
+            log.exception("не удалось удалить файл %s", sentence.path)
 
     def locate(self, message: Message, position_s: float) -> tuple[Path, float]:
         """Файл и смещение в нём для позиции в сообщении (за концом — конец последнего).
 
         Предложение, которое кончается после позиции или начинается на ней: предложение
-        нулевой длины (битый файл) на позиции не пропускается. Сообщение без звука
-        (ни предложений, ни склейки) сюда не передаётся.
+        нулевой длины (битый файл) на позиции не пропускается. Сообщение без предложений
+        сюда не передаётся.
         """
-        if message.audio is not None:
-            return message.audio, position_s
         remaining = max(position_s, 0.0)
         for sentence in message.sentences:
             duration = self._duration(sentence)
@@ -411,14 +345,6 @@ class MessageQueue:
                 break
             offset += self._duration(item)
         return offset
-
-    def _candidate(self, entry: "HistoryEntry") -> Message | None:
-        created_ns = entry.created_at * 1e9
-        fitting = [m for m in self._messages
-                   if m.session_id == entry.session_id and m.sentences and m.audio is None
-                   and m.created_at is None
-                   and all(s.recv_ns < created_ns for s in m.sentences)]
-        return max(fitting, key=lambda m: m.sentences[0].recv_ns, default=None)
 
     def _duration(self, sentence: Sentence) -> float:
         cached = self._durations.get(sentence.path)
