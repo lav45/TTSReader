@@ -48,6 +48,7 @@ class PlayerState:
     sessions: list[Session]  # порядок списка (Sessions.sessions)
     active: str | None  # активная сессия; None — не выбрана
     counts: list[int]  # число сообщений каждой из sessions, в том же порядке
+    autoplay: bool = True  # кнопка автовоспроизведения: последний apply_prefs
 
 
 class Player:
@@ -70,9 +71,13 @@ class Player:
     курсора начатые ограничены tail (MessageQueue.start). Режет одно место — _trim_unfocused
     из _changed (новое сообщение, конец последнего, открытие и закрытие папки, смена tail) и
     из start() после восстановления messages.json.
-    Открытая (активная) сессия играет подряд — выключателя автовоспроизведения нет; пока
-    звучит свой текст (hold), плеер сам ничего не начинает: конец сообщения — stopped на
-    следующем по порядку, новое сообщение в тишине только попадает в список.
+    Открытая (активная) сессия играет подряд, пока нажата кнопка автовоспроизведения
+    (prefs.autoplay, контракт (6)). Плеер сам начинает (_starts_by_itself), только когда
+    кнопка нажата и свой текст не звучит (hold); иначе конец сообщения — stopped на следующем
+    по порядку, новое сообщение в тишине только попадает в список, задача хука откладывается
+    (deferred), а очередь без фокуса режется до tail, как у закрытой папки. Отжатие звучащее
+    не обрывает: оно доигрывает и встаёт; нажатие звук не начинает, отложенные остаются
+    отложенными.
 
     Ошибка файла — пропуск. Отказ вывода звука — тот же файл с той же позиции через
     RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор. Отказ кончается,
@@ -172,6 +177,7 @@ class Player:
         self._output_down = False
         self._retry_id = 0
         self._held = False  # звучит свой текст: сам ничего не начинаю (hold/release)
+        self._autoplay = defaults.autoplay  # кнопка автовоспроизведения (apply_prefs)
         self._ducker = ducker
         self._duck = defaults.duck
         self._ducking = False  # duck() вызван, restore() ещё нет
@@ -186,11 +192,13 @@ class Player:
         self._sent_in_run: set[Message] = set()
 
     def apply_prefs(self, prefs: Prefs) -> None:
-        """Настройки плеера: хвост очереди каждой сессии, процент приглушения; играющее не
-        трогается. Очереди без фокуса режутся до нового tail сразу, с фокусом — хвост начатых
-        постепенно (MessageQueue.start). Новый процент во время игры — restore, затем
-        duck(новый)."""
+        """Настройки плеера: хвост очереди каждой сессии, процент приглушения, кнопка
+        автовоспроизведения; играющее не трогается. Очереди без фокуса режутся до нового tail
+        сразу, с фокусом — хвост начатых постепенно (MessageQueue.start); отжатая кнопка снимает
+        фокус (_focused), и очередь режется тут же. Нажатие звук не начинает: отсюда путь только
+        к обрезке и окну (_changed). Новый процент во время игры — restore, затем duck(новый)."""
         self._tail = prefs.tail
+        self._autoplay = prefs.autoplay
         for queue in [*self._queues.values(), self._no_session]:
             queue.tail = prefs.tail
         if prefs.duck != self._duck:
@@ -339,8 +347,9 @@ class Player:
         `tts-player-hook start` пишет add раньше, чем немедленная озвучка — задачу. Сессии
         нет в списке — задача удалена (строка «dropped»). Иначе (строка «chars» — её читает e2e)
         сообщение с её текстом — в конец очереди сессии, ещё без звука; сессия активна и
-        свой текст не звучит — поля задачи как есть уходят в очередь демона, иначе
-        сообщение отложено (строка «deferred»). Число предложений текста запрашивается после
+        плеер начинает сам (признак _starts_by_itself: кнопка автовоспроизведения нажата,
+        свой текст не звучит) — поля задачи как есть уходят в очередь демона, иначе сообщение
+        отложено (строка «deferred») до play/pause. Число предложений текста запрашивается после
         отправки (сбой счёта её не задерживает), и у отложенного тоже: текст не меняется и
         при переозвучке."""
         if self._control is not None:
@@ -354,7 +363,7 @@ class Player:
                           persona=task.persona, speed=task.speed, received_at=task.timestamp)
         queue = self._queues[session_id]
         queue.append(message)
-        if session_id == self._sessions.active and not self._held:
+        if session_id == self._sessions.active and self._autoplay and not self._held:
             self._send(queue, message, task.fields, f"задача хука {task.id}")
         else:
             message.sent = False
@@ -432,7 +441,7 @@ class Player:
         counts = [len(self._queues[s.id].messages) for s in sessions]
         return PlayerState(self._status, current, self._now(), length,
                            messages, self._output_down, lengths,
-                           sessions, self._sessions.active, counts)
+                           sessions, self._sessions.active, counts, self._autoplay)
 
     def toggle_play_pause(self) -> None:
         """Кнопка play/pause: playing — пауза с запомненной позицией; paused — с неё дальше;
@@ -615,12 +624,15 @@ class Player:
         self._begin(upcoming, requested=False)
 
     def _starts_by_itself(self) -> bool:
-        """Плеер сам начинает следующее и новое: свой текст не звучит (нет удержания)."""
-        return not self._held
+        """Плеер сам начинает следующее и новое: кнопка автовоспроизведения нажата и свой
+        текст не звучит (нет удержания). Решает конец сообщения и первое предложение в idle;
+        тот же признак откладывает задачу хука (_on_hook_task)."""
+        return self._autoplay and not self._held
 
     def _stop_after(self, message: Message) -> None:
-        """Конец сообщения, пока звучит свой текст: stopped; текущим становится следующее по
-        порядку с позиции 0, нет его — сообщение остаётся текущим с позицией в конце."""
+        """Конец сообщения, когда плеер сам не начинает (кнопка автовоспроизведения отжата
+        или звучит свой текст): stopped; текущим становится следующее по порядку с позиции 0,
+        нет его — сообщение остаётся текущим с позицией в конце."""
         self._status = "stopped"
         following = self._queue.following(message)
         if following is None:
@@ -821,15 +833,17 @@ class Player:
         self._ducker.restore()
 
     def _focused(self, queue: MessageQueue) -> bool:
-        """Фокус очереди — только у играемой (активной сессии), у закрытых папок его нет
-        никогда. Фокус: текущее есть и статус playing, paused или stopped; либо в idle есть
-        ответ, до которого дойдёт автопереход, — новее текущего (без текущего — любой),
+        """Фокус очереди — только у играемой (активной сессии) при нажатой кнопке
+        автовоспроизведения; у закрытых папок его нет никогда, у открытой с отжатой кнопкой —
+        тоже: она режется до tail, как закрытая (текущее trim не удаляет). Фокус: текущее есть
+        и статус playing, paused или stopped; либо в idle есть ответ, до которого дойдёт
+        автопереход, — новее текущего (без текущего — любой),
         отданный демону в этом запуске и ещё синтезируемый (не отложен, не прослушан, не
         завершён): его первое предложение начнёт его само, и пачка ответов быстрее синтеза не
         теряет ранние. Восстановленное из messages.json фокуса не даёт, даже растущее: иначе
         сообщение, чей конец прошёл без плеера и уже не будет замечен, держало бы очередь
         необрезанной."""
-        if queue is not self._queue:
+        if queue is not self._queue or not self._autoplay:
             return False
         if self._current is not None and self._status != "idle":
             return True

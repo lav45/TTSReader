@@ -1413,6 +1413,105 @@ class PlayerHoldTest(PlayerCase):
         self.assertEqual("playing", self.state().status)
 
 
+class PlayerAutoplayTest(PlayerCase):
+    """Кнопка автовоспроизведения (контракт (6), Prefs.autoplay): отжата — конец дорожки
+    stopped, задача хука отложена, история режется до tail; нажатие и отжатие звук не трогают."""
+
+    def autoplay(self, on: bool, tail: int = 5) -> None:
+        self.player.apply_prefs(Prefs(tail=tail, autoplay=on))
+
+    def test_state_autoplay_is_on_by_default_and_follows_apply_prefs(self) -> None:
+        self.assertTrue(self.state().autoplay)
+        self.autoplay(False)
+        self.assertFalse(self.state().autoplay)
+        self.assertFalse(self.states[-1].autoplay)
+        self.autoplay(True)
+        self.assertTrue(self.state().autoplay)
+
+    def test_off_end_of_track_stops_on_following_at_start(self) -> None:
+        self.start_with(A0, B0)
+        self.autoplay(False)
+        self.end_by_count()
+        self.finish()
+        state = self.state()
+        self.assertEqual(("stopped", "bb", 0.0), (state.status, self.task(), state.position_s))
+        self.assertEqual([A0], self.playback.played)
+        self.assertIsNone(self.playback.playing)
+
+    def test_unpressing_while_playing_keeps_sound(self) -> None:
+        self.start_with(A0, B0)
+        stops = self.playback.stops
+        self.autoplay(False)
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
+        self.assertEqual((self.path(A0), stops), (self.playback.playing, self.playback.stops))
+
+    def test_off_hook_task_of_active_session_is_deferred(self) -> None:
+        self.player.start()
+        self.autoplay(False)
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            self.announce("aa")
+        self.assertEqual([], self.daemon.puts)
+        [message] = self.state().messages
+        self.assertTrue(message.deferred)
+        self.assertIn("task hook-aa S deferred", [r.getMessage() for r in logs.records])
+
+    def test_off_trims_paused_queue_to_tail_keeping_current(self) -> None:
+        self.start_with(A0, B0, C0)
+        self.player.toggle_play_pause()
+        self.autoplay(True, tail=1)
+        self.assertEqual(["aa", "bb", "cc"], [self.task_of(m) for m in self.state().messages])
+        self.autoplay(False, tail=1)
+        state = self.state()
+        self.assertEqual(["aa", "cc"], [self.task_of(m) for m in state.messages])
+        self.assertEqual(("paused", "aa"), (state.status, self.task()))
+
+    def test_off_deferred_answers_beyond_tail_are_trimmed(self) -> None:
+        self.start_with(A0)
+        self.player.toggle_play_pause()
+        self.autoplay(False, tail=2)
+        for hook_id in ("h1", "h2", "h3"):
+            self.player._on_hook_task(HookTask(hook_id, 1.0, "S", "proj", f"text {hook_id}",
+                                               "p", 1.0, {"id": hook_id}))
+        state = self.state()
+        self.assertEqual(["text aa", "text h2", "text h3"], [m.text for m in state.messages])
+        self.assertEqual(("paused", "aa"), (state.status, self.task()))
+
+    def test_off_sentence_of_sent_answer_in_idle_does_not_start(self) -> None:
+        self.player.start()
+        self.announce("aa")
+        self.autoplay(False)
+        self.arrive(A0)
+        self.assertEqual("idle", self.state().status)
+        self.assertEqual([], self.playback.starts)
+
+    def test_pressing_in_idle_starts_nothing(self) -> None:
+        self.player.start()
+        self.announce("aa")
+        self.autoplay(False)
+        self.arrive(A0)
+        self.announce("bb")
+        self.autoplay(True)
+        state = self.state()
+        self.assertEqual("idle", state.status)
+        self.assertEqual([], self.playback.starts)
+        self.assertEqual([False, True], [m.deferred for m in state.messages])
+
+    def test_pressing_in_stopped_starts_nothing(self) -> None:
+        self.start_with(A0, B0)
+        self.autoplay(False)
+        self.end_by_count()
+        self.finish()
+        self.autoplay(True)
+        self.assertEqual(("stopped", "bb"), (self.state().status, self.task()))
+        self.assertEqual([A0], [name for name, _ in self.playback.starts])
+
+    def test_on_and_paused_new_answer_waits(self) -> None:
+        self.start_with(A0)
+        self.player.toggle_play_pause()
+        self.arrive(B0)
+        self.assertEqual(("paused", "aa"), (self.state().status, self.task()))
+        self.assertEqual(1, len(self.playback.starts))
+
 
 class PlayerHookTasksTest(PlayerCase):
     """Задача хука → задача демону и сообщение с текстом (контракты (12), (13))."""
