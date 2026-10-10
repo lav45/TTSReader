@@ -1496,6 +1496,19 @@ class PlayerAutoplayTest(PlayerCase):
         self.assertEqual([], self.playback.starts)
         self.assertEqual([False, True], [m.deferred for m in state.messages])
 
+    def test_answer_sent_before_release_starts_by_itself_when_pressed_again(self) -> None:
+        self.player.start()
+        self.announce("aa")
+        self.autoplay(False)
+        self.arrive(A0)
+        self.assertEqual("idle", self.state().status)
+        self.assertEqual([], self.playback.starts)
+        self.autoplay(True)
+        self.assertEqual([], self.playback.starts)
+        self.arrive(A1)
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
+        self.assertEqual([A0], [name for name, _ in self.playback.starts])
+
     def test_pressing_in_stopped_starts_nothing(self) -> None:
         self.start_with(A0, B0)
         self.autoplay(False)

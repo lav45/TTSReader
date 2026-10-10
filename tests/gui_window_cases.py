@@ -449,6 +449,7 @@ class PlayerWindowTest(unittest.TestCase):
 
     def test_autoplay_save_error_warns_once_and_still_applies(self) -> None:
         w = self.window
+        self.prefs.loaded = Prefs(tail=7)
         self.prefs.save_error = SettingsError("settings.json не записан")
         with self.assertLogs("tts_player.window", level="WARNING") as logs:
             w.autoplay_button.clicked()
