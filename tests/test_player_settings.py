@@ -1,4 +1,4 @@
-"""Тесты PlayerSettings: файл настроек плеера (tail, duck)."""
+"""Тесты PlayerSettings: файл настроек плеера (tail, duck, autoplay)."""
 import json
 import os
 import tempfile
@@ -50,10 +50,20 @@ class LoadTest(PlayerSettingsCase):
         self.write_raw('{"tail": 7, "duck": 55}')
         self.assertEqual(self.settings.load(), Prefs(7, 55))
 
-    def test_autoplay_of_old_versions_is_ignored_without_warning(self):
+    def test_missing_autoplay_defaults_to_true(self):
+        self.write_raw('{"tail": 7, "duck": 55}')
+        self.assertIs(self.settings.load().autoplay, True)
+
+    def test_autoplay_false_read_without_warning(self):
         self.write_raw('{"tail": 7, "autoplay": false, "duck": 55}')
         with self.assertNoLogs("tts_player.player_settings", "WARNING"):
-            self.assertEqual(self.settings.load(), Prefs(7, 55))
+            self.assertEqual(self.settings.load(), Prefs(7, 55, False))
+
+    def test_bad_autoplay_defaults_to_true_keeps_others(self):
+        for autoplay in ("0", "1", '"no"', "null", "2.5"):
+            with self.subTest(autoplay=autoplay):
+                prefs = self.load_warned('{"tail": 7, "duck": 55, "autoplay": %s}' % autoplay)
+                self.assertEqual(prefs, Prefs(7, 55, True))
 
     def test_broken_json(self):
         self.assertEqual(self.load_warned("{oops"), Prefs())
@@ -90,8 +100,13 @@ class SaveTest(PlayerSettingsCase):
     def test_roundtrip_creates_dir_without_tmp(self):
         self.settings.save(Prefs(3, 40))
         self.assertEqual(self.settings.load(), Prefs(3, 40))
-        self.assertEqual(json.loads(self.path.read_text()), {"tail": 3, "duck": 40})
+        self.assertEqual(json.loads(self.path.read_text()), {"tail": 3, "duck": 40, "autoplay": True})
         self.assertEqual([p.name for p in self.dir.iterdir()], ["settings.json"])
+
+    def test_autoplay_false_is_written(self):
+        self.settings.save(Prefs(autoplay=False))
+        self.assertEqual(json.loads(self.path.read_text()),
+                         {"tail": 5, "duck": 30, "autoplay": False})
 
     def test_bad_tail_leaves_file_untouched(self):
         self.write_raw('{"tail": 4}')
