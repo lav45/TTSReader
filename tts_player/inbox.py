@@ -61,7 +61,7 @@ class Inbox:
 
     @property
     def store(self) -> Path:
-        """Каталог предложений этого запуска; сюда же очередь копирует склейки."""
+        """Каталог предложений этого запуска."""
         return self._store
 
     def start(self, keep: frozenset[Path] = frozenset()) -> None:

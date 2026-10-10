@@ -34,9 +34,7 @@ class Message:
     озвучивается) кэш: сравниваются с текущими при начале проигрывания. received_at — время
     задачи хука, по нему строка списка. Сравнивается по идентичности: два объекта — два
     разных сообщения очереди.
-    audio — копия склейки демона в store/ (None, пока её нет или длительности
-    разошлись); created_at/duration_s — из записи истории, до неё None; project — из задачи
-    хука, запись истории его подтверждает.
+    project — из задачи хука.
     heard — сообщение прослушано (MessageQueue.mark_heard): его поздние предложения
     не добавляются.
     sentence_count — на сколько предложений демон делит text (счётчик SentenceCounter той же
@@ -53,9 +51,6 @@ class Message:
     sentences: list[Sentence] = field(default_factory=list)
     received_at: float | None = None
     sent: bool = True
-    audio: Path | None = None
-    created_at: float | None = None
-    duration_s: float | None = None
     heard: bool = False
     deferred: bool = False
     sentence_count: int | None = None

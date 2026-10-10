@@ -38,7 +38,7 @@ SESSIONS = [Session("1dd2b064-b8fd-4c1e-9a77-000000000001", "TTSReader"),
 
 
 def message(task: str) -> Message:
-    return Message("s", task_ids={task}, created_at=1_700_000_000.0, project="p", duration_s=10.0)
+    return Message("s", task_ids={task}, received_at=1_700_000_000.0, project="p")
 
 
 def state(status: str, current: Message | None, messages: list[Message],

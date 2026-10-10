@@ -19,7 +19,7 @@ VERSION = 1
 
 
 class SavedMessages:
-    """messages.json: снимок очереди; файлы предложений и склеек — по имени в store/."""
+    """messages.json: снимок очереди; файлы предложений — по имени в store/."""
 
     def __init__(self, path: Path, store: Path) -> None:
         self._path = path
@@ -41,7 +41,7 @@ class SavedMessages:
 
     def load(self) -> QueueSnapshot:
         """Снимок прошлого запуска; файл удаляется. Нет файла — пустой снимок; битый —
-        WARNING и пустой снимок. Пропавшие файлы предложений и склейки выпадают."""
+        WARNING и пустой снимок. Пропавшие файлы предложений выпадают."""
         try:
             text = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -83,20 +83,14 @@ class SavedMessages:
             "heard": message.heard,
             "deferred": message.deferred,
             "started": started,
-            "created_at": message.created_at,
-            "duration_s": message.duration_s,
             "sentences": [s.path.name for s in message.sentences],
-            "audio": None if message.audio is None else message.audio.name,
             "sentence_count": message.sentence_count,
             "played_indices": sorted(message.played_indices),
         }
 
     def _from_dict(self, item: dict) -> Message:
-        audio = None
-        duration_s = None
-        if item["audio"] is not None and (self._store / item["audio"]).is_file():
-            audio = self._store / item["audio"]
-            duration_s = float(item["duration_s"])
+        # ключи audio/created_at/duration_s файла до отказа от склейки демона не читаются:
+        # её копия в store/ без ссылки удаляется на старте, как любой лишний файл
         return Message(
             session_id=self._text(item["session_id"]),
             project=self._optional_text(item["project"]),
@@ -107,9 +101,6 @@ class SavedMessages:
             sentences=self._sentences(item["sentences"]),
             received_at=self._optional_number(item["received_at"]),
             sent=bool(item["sent"]),
-            audio=audio,
-            created_at=self._optional_number(item["created_at"]),
-            duration_s=duration_s,
             heard=bool(item["heard"]),
             deferred=bool(item.get("deferred", False)),  # файл до сессий в плеере — без ключа
             # файл до счётчика предложений — без ключа: число запросит Player.start

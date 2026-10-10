@@ -155,7 +155,7 @@ class SentenceCounter:
         if self._broken:
             return
         self._broken = True
-        log.warning("счётчик предложений недоступен (%s): конец сообщения — по склейке и"
+        log.warning("счётчик предложений недоступен (%s): конец сообщения — по"
                     " предложению следующей задачи", reason)
         self._end()
 

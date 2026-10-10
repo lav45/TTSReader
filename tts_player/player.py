@@ -14,7 +14,6 @@ from tts_player.control import ControlRequests  # noqa: E402
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import ActiveVoice, DaemonSettings  # noqa: E402
 from tts_player.ducking import Ducker  # noqa: E402
-from tts_player.history import History, HistoryEntry  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
 from tts_player.hook_tasks import HookTasks  # noqa: E402
 from tts_player.model import UNKNOWN_TASK, HookTask, Message, Sentence  # noqa: E402
@@ -81,8 +80,8 @@ class Player:
     Сессии (Sessions, вход «сессии»): у каждой сессии из списка своя MessageQueue — свой
     хвост, — все над одним TaskOrder: демон синтезирует задачи всех сессий по одной.
     Курсор ходит по очереди активной сессии (_queue); нет активной — по пустой очереди.
-    Предложение (13) идёт в очередь, которой принадлежит его задача (MessageQueue.owns),
-    склейка — в очередь своей сессии; чужое предложение удаляет играемая очередь.
+    Предложение (13) идёт в очередь, которой принадлежит его задача (MessageQueue.owns);
+    чужое предложение удаляет играемая очередь.
 
     Сообщение заводит задача хука (контракт (11)) своей сессии: сессия активна и свой текст не
     звучит — задача сразу уходит в очередь демона (12), иначе сообщение отложено (deferred) —
@@ -97,11 +96,6 @@ class Player:
     заново (переозвучка). В обоих случаях сообщение играет по мере прихода предложений, как
     растущее. Сообщение без звука (не отложенное) переозвучивает только команда пользователя;
     автозапуск его пропускает (прослушано).
-
-    Склейка играющего по предложениям сообщения подменяет их с той же позиции. Пока
-    вывод недоступен, звука нет — повтор начнёт склейку с позиции, с которой запускался
-    несыгравший файл (начало предложения или точка seek/продолжения в нём).
-    На паузе и после stop склейка лишь запоминается: следующий запуск найдёт её locate.
 
     Приглушение (ducker, контракт (9)): статус стал playing — чужие потоки до prefs.duck %,
     пока playing — refresh раз в REFRESH_SECONDS, статус ушёл из playing и выход — restore.
@@ -121,7 +115,6 @@ class Player:
     WATCH_LIMIT_SECONDS = 600  # опрос сирот вне речи — 10 минут после их последнего изменения
 
     def __init__(self, runtime_dir: Path, audio_sink: str | None,
-                 history_dir: Path | None, history_db: Path | None,
                  ducker: Ducker | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  hook_tasks_dir: Path | None = None, *,
@@ -164,15 +157,10 @@ class Player:
         self._hook_tasks = None
         if hook_tasks_dir is not None:
             self._hook_tasks = HookTasks(hook_tasks_dir, self._on_hook_task)
-        self._history = None
-        if history_dir is not None and history_db is not None:
-            self._history = History(history_dir, history_db, self._on_entry)
-        self._history_dir = history_dir
         self._status: Status = "idle"
         self._current: Message | None = None
         # Позиция, с которой запущен _file (без файла — курсор); _file_base — начало
-        # _file в сообщении. _sentence — предложение _file или последнее доигравшее,
-        # None при склейке.
+        # _file в сообщении. _sentence — предложение _file или последнее доигравшее.
         self._position = 0.0
         self._file: Path | None = None
         self._file_base = 0.0
@@ -223,23 +211,12 @@ class Player:
         self._changed()
 
     def start(self) -> None:
-        """История — раньше inbox/: накопленное в inbox/ начинает играть уже в start(),
-        и склейка, записанная после первой строки playing, не должна считаться
-        существовавшей до запуска. Колбэки обеих частей идут из цикла GLib, поэтому
-        такой порядок ничего не теряет.
-
-        Сообщения прошлого запуска (messages.json) восстанавливаются до inbox/ и задач хука,
+        """Сообщения прошлого запуска (messages.json) восстанавливаются до inbox/ и задач хука,
         каждое — в очередь своей сессии; сообщения сессий не из списка не восстанавливаются.
         Поздние предложения восстановленных задач — их, а не чужие; файлы store/, на которые
         сообщения не ссылаются, удаляет Inbox. Сам плеер ничего не начинает: открытая папка
         ждёт (idle, текущего нет), восстановленные очереди режутся до tail; новые ответы
         играют как обычно. Восстановленным без числа предложений оно запрашивается."""
-        if self._history is not None:
-            try:
-                self._history.start()
-            except OSError as error:
-                log.warning("история %s недоступна (%s), работаю без склеек",
-                            self._history_dir, error)
         self._restore(self._saved.load())
         self._trim_unfocused()
         for queue in self._queues.values():
@@ -273,11 +250,9 @@ class Player:
         return self._queues.get(self._sessions.active, self._no_session)
 
     def _store_files(self) -> frozenset[Path]:
-        """Файлы store/, которые держат сообщения очередей сессий: предложения и склейки."""
+        """Файлы store/, которые держат сообщения очередей сессий: их предложения."""
         messages = [m for queue in self._queues.values() for m in queue.messages]
-        files = {s.path for m in messages for s in m.sentences}
-        files.update(m.audio for m in messages if m.audio is not None)
-        return frozenset(files)
+        return frozenset(s.path for m in messages for s in m.sentences)
 
     def add_session(self, session_id: str, cwd: str) -> None:
         """Запрос `session add`: у новой сессии пустая очередь; активной сама не становится
@@ -427,8 +402,6 @@ class Player:
             self._control.stop()
         if self._hook_tasks is not None:
             self._hook_tasks.stop()
-        if self._history is not None:
-            self._history.stop()
         position = self._now()
         self._halt()
         self._saved.save(self._release(position))
@@ -581,27 +554,6 @@ class Player:
                  sentence.token, sentence.path.name)
         return replace(sentence, task_id=task_id)
 
-    def _on_entry(self, entry: HistoryEntry) -> None:
-        """Склейка — сообщению очереди своей сессии; сессии нет в списке — ничья."""
-        queue = self._queues.get(entry.session_id)
-        if queue is None:
-            log.info("для склейки %s нет сессии %s в списке", entry.path.name, entry.session_id)
-            return
-        message = queue.attach(entry, self._inbox.store)
-        if message is None:
-            return
-        task_id = queue.task_of(message)
-        if message.audio is None:
-            log.info("ended %s %s", message.session_id, task_id)
-        else:
-            log.info("complete %s %s %.2fs", message.session_id, task_id, message.duration_s)
-        if message is self._current and self._status == "playing":
-            if self._file is None:
-                self._message_end()
-            elif message.audio is not None:
-                self._switch(message)
-        self._changed()
-
     def _on_started(self, path: Path) -> None:
         if self._output_down:
             self._output_down = False
@@ -633,16 +585,6 @@ class Player:
         self._playback.play(self._file, start_s=self._position - self._file_base)
         return GLib.SOURCE_REMOVE
 
-    def _switch(self, message: Message) -> None:
-        position = self._now()
-        log.info("switched %s at %.2f", message.audio.name, position)
-        self._sentence = None
-        self._file = message.audio
-        self._file_base = 0.0
-        self._position = position
-        if not self._output_down:
-            self._playback.play(message.audio, start_s=position)
-
     def _after_file(self) -> None:
         """Файл доиграл или пропущен: следующее предложение или конец сообщения."""
         self._file = None
@@ -658,8 +600,6 @@ class Player:
         if not self._queue.is_complete(current):
             return  # ждём предложение: статус playing, звук молчит
         self._queue.mark_heard(current)
-        # склейка, привязанная после конца по предложениям, может быть длиннее их суммы
-        self._position = self._queue.length(current)
         if not self._starts_by_itself():
             self._stop_after(current)
             return
@@ -717,7 +657,7 @@ class Player:
         отправленное."""
         if not self._queue.is_complete(message):
             return False
-        silent = not message.sentences and message.audio is None
+        silent = not message.sentences
         if silent and not requested and not message.deferred:
             return False
         voice = self._active_voice(message)
@@ -757,7 +697,7 @@ class Player:
 
     def _play_at(self, position: float) -> None:
         current = self._current
-        if current.audio is None and not current.sentences:
+        if not current.sentences:
             # звука ещё нет: ждём предложение, как у растущего; не ждём — конец сообщения
             self._file = None
             self._sentence = None
@@ -765,9 +705,7 @@ class Player:
             self._message_end()
             return
         path, offset = self._queue.locate(current, position)
-        self._sentence = None
-        if current.audio is None:
-            self._sentence = next(s for s in current.sentences if s.path == path)
+        self._sentence = next(s for s in current.sentences if s.path == path)
         self._start_file(path, position - offset, position)
 
     def _play_sentence(self, sentence: Sentence) -> None:
@@ -884,7 +822,8 @@ class Player:
         отданный демону в этом запуске и ещё синтезируемый (не отложен, не прослушан, не
         завершён): его первое предложение начнёт его само, и пачка ответов быстрее синтеза не
         теряет ранние. Восстановленное из messages.json фокуса не даёт, даже растущее: иначе
-        склейка, не привязанная без плеера, держала бы очередь необрезанной."""
+        сообщение, чей конец прошёл без плеера и уже не будет замечен, держало бы очередь
+        необрезанной."""
         if queue is not self._queue:
             return False
         if self._current is not None and self._status != "idle":
