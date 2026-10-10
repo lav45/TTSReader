@@ -43,6 +43,21 @@ ln -s ~/Programs/TTSReader/bin/tts-player-hook ~/.local/bin/tts-player-hook
 В `~/.claude/settings.json` два хука сессии (подробно - «Переход на хуки сессии» ниже):
 `SessionStart` зовёт `tts-player-hook start`, `SessionEnd` - `tts-player-hook end`.
 
+### Патч демона
+
+Демон `claude-tts` читает `~/.claude-tts/playback.json` не больше 10 000 байт. Текст
+сообщения лежит там же, в `current_message`, и кириллица в JSON занимает 6 байт на символ.
+Поэтому у сообщения длиннее ≈2000 символов чтение обрезается, демон теряет
+`current_message`, обёртка `paplay` получает id `unknown`, и плеер удаляет все предложения
+как чужие: сообщение не звучит. `patches/claude-code-tts-playback-read.patch` читает файл
+целиком. Его нужно накладывать после каждой установки или `uv tool upgrade` пакета, пока
+исправления нет в upstream, и затем перезапускать демон:
+
+```bash
+patch -p3 -d "$(ls -d ~/.local/share/uv/tools/claude-code-tts/lib/python3*/site-packages/claude_code_tts)" \
+    < ~/Programs/TTSReader/patches/claude-code-tts-playback-read.patch
+```
+
 ### Правка хуков речи
 
 В `~/.claude/hooks/speak-response.sh` и `speak-intermediate.sh` меняется строка запуска:
