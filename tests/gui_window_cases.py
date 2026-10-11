@@ -630,6 +630,43 @@ class SettingsScreenTest(unittest.TestCase):
         w.settings_button.clicked()
         self.assertEqual(12, w.tail_spin.get_value_as_int())
 
+    def test_pause_others_check_below_tail_and_reloaded_on_each_open(self) -> None:
+        w = self.window
+        self.assertIsInstance(w.pause_others_check, Gtk.CheckButton)
+        self.assertEqual("Ставить другие плееры на паузу, пока говорю",
+                         w.pause_others_check.get_label())
+        grid = w.tail_spin.get_parent()
+        self.assertIs(grid, w.pause_others_check.get_parent())
+        tail_top = grid.child_get_property(w.tail_spin, "top-attach")
+        check_top = grid.child_get_property(w.pause_others_check, "top-attach")
+        self.assertEqual(tail_top + 1, check_top)
+        self.assertEqual(2, grid.child_get_property(w.pause_others_check, "width"))
+        self.prefs.loaded = Prefs(tail=7, pause_others=False)
+        w.settings_button.clicked()
+        self.assertFalse(w.pause_others_check.get_active())
+        w.pause_others_check.set_active(True)
+        w.back_button.clicked()
+        w.settings_button.clicked()
+        self.assertFalse(w.pause_others_check.get_active())
+
+    def test_save_with_cleared_check_passes_pause_others_false(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        self.assertTrue(w.pause_others_check.get_active())
+        w.pause_others_check.set_active(False)
+        w.save_button.clicked()
+        expected = Prefs(tail=7, pause_others=False)
+        self.assertEqual(("save", expected), self.prefs.calls[-1])
+        self.assertEqual([("apply_prefs", expected)], self.player.calls)
+
+    def test_autoplay_click_keeps_pause_others_from_file(self) -> None:
+        w = self.window
+        self.prefs.loaded = Prefs(tail=7, pause_others=False)
+        w.autoplay_button.clicked()
+        expected = Prefs(tail=7, autoplay=False, pause_others=False)
+        self.assertEqual([("load",), ("save", expected)], self.prefs.calls)
+        self.assertEqual([("apply_prefs", expected)], self.player.calls)
+
     def test_load_error_disables_voice_controls_and_shows_reason(self) -> None:
         w = self.window
         self.settings.load_error = SettingsError("config.json не прочитан")
@@ -637,7 +674,7 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual("settings", w.stack.get_visible_child_name())
         for widget in (w.voice_combo, w.speed_spin):
             self.assertFalse(widget.get_sensitive())
-        for widget in (w.tail_spin, w.save_button):
+        for widget in (w.tail_spin, w.pause_others_check, w.save_button):
             self.assertTrue(widget.get_sensitive())
         self.assertTrue(w.settings_status.get_visible())
         self.assertEqual("config.json не прочитан", w.settings_status.get_text())
@@ -650,8 +687,9 @@ class SettingsScreenTest(unittest.TestCase):
         self.settings.load_error = SettingsError("config.json не прочитан")
         w.settings_button.clicked()
         w.tail_spin.set_value(9)
+        w.pause_others_check.set_active(False)
         w.save_button.clicked()
-        expected = Prefs(tail=9)
+        expected = Prefs(tail=9, pause_others=False)
         self.assertEqual(("save", expected), self.prefs.calls[-1])
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
         self.assertEqual([("load",)], self.settings.calls)
@@ -686,7 +724,7 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual("Настройки сохранены", w.settings_status.get_text())
         self.assertEqual({"success"}, css_classes(w.settings_status))
 
-    def test_settings_screen_fields_are_voice_speed_tail(self) -> None:
+    def test_settings_screen_fields_are_voice_speed_tail_pause_others(self) -> None:
         labels = []
 
         def collect(widget) -> None:
@@ -696,7 +734,8 @@ class SettingsScreenTest(unittest.TestCase):
                 widget.forall(collect)
 
         collect(self.window.stack.get_child_by_name("settings"))
-        self.assertEqual({"Настройки", "Голос", "Скорость", "Хвост очереди", "Сохранить"},
+        self.assertEqual({"Настройки", "Голос", "Скорость", "Хвост очереди",
+                          "Ставить другие плееры на паузу, пока говорю", "Сохранить"},
                          {text for text in labels if text})
 
     def test_save_takes_typed_tail_without_focus_loss(self) -> None:

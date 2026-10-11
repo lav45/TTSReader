@@ -1,4 +1,4 @@
-"""Тесты PlayerSettings: файл настроек плеера (tail, autoplay)."""
+"""Тесты PlayerSettings: файл настроек плеера (tail, autoplay, pause_others)."""
 import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
@@ -62,6 +62,27 @@ class LoadTest(PlayerSettingsCase):
         with self.assertNoLogs("tts_player.player_settings", "WARNING"):
             self.assertEqual(self.settings.load(), Prefs(7, False))
 
+    def test_missing_pause_others_defaults_to_true_without_warning(self):
+        self.write_raw('{"tail": 3}')
+        with self.assertNoLogs("tts_player.player_settings", "WARNING"):
+            self.assertIs(self.settings.load().pause_others, True)
+
+    def test_no_file_pause_others_is_true(self):
+        self.assertIs(Prefs().pause_others, True)
+        self.assertIs(self.settings.load().pause_others, True)
+
+    def test_pause_others_false_read_without_warning(self):
+        self.write_raw('{"pause_others": false}')
+        with self.assertNoLogs("tts_player.player_settings", "WARNING"):
+            self.assertIs(self.settings.load().pause_others, False)
+
+    def test_bad_pause_others_defaults_to_true_keeps_others(self):
+        for value in ("0", '"false"', "null"):
+            with self.subTest(pause_others=value):
+                prefs = self.load_warned(
+                    '{"tail": 7, "autoplay": false, "pause_others": %s}' % value)
+                self.assertEqual(prefs, Prefs(7, False, True))
+
     def test_legacy_key_ignored_without_warning(self):
         """Ключ удалённой настройки остался в файлах прежних версий: не читается и не предупреждает."""
         self.write_raw('{"tail": 7, "%s": 55, "autoplay": false}' % LEGACY_KEY)
@@ -102,13 +123,19 @@ class SaveTest(PlayerSettingsCase):
     def test_roundtrip_creates_dir_without_tmp(self):
         self.settings.save(Prefs(3))
         self.assertEqual(self.settings.load(), Prefs(3))
-        self.assertEqual(json.loads(self.path.read_text()), {"tail": 3, "autoplay": True})
+        self.assertEqual(json.loads(self.path.read_text()),
+                         {"tail": 3, "autoplay": True, "pause_others": True})
         self.assertEqual([p.name for p in self.dir.iterdir()], ["settings.json"])
 
     def test_autoplay_false_is_written(self):
         self.settings.save(Prefs(autoplay=False))
         self.assertEqual(json.loads(self.path.read_text()),
-                         {"tail": 5, "autoplay": False})
+                         {"tail": 5, "autoplay": False, "pause_others": True})
+
+    def test_pause_others_false_is_written(self):
+        self.settings.save(Prefs(4, False, False))
+        self.assertEqual(json.loads(self.path.read_text()),
+                         {"tail": 4, "autoplay": False, "pause_others": False})
 
     def test_bad_tail_leaves_file_untouched(self):
         self.write_raw('{"tail": 4}')
