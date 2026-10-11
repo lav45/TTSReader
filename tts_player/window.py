@@ -203,7 +203,8 @@ class PlayerWindow(Gtk.Window):
         return button
 
     def _settings_screen(self) -> Gtk.Box:
-        """Экран настроек: стрелка назад, голос, скорость, хвост, «Сохранить», блок итога."""
+        """Экран настроек: стрелка назад, голос, скорость, хвост, флажок паузы других плееров,
+        «Сохранить», блок итога."""
         self.back_button = self._icon_button("go-previous-symbolic", "Назад", self._show_main)
         self.voice_combo = Gtk.ComboBoxText()
         for renderer in self.voice_combo.get_cells():
@@ -215,6 +216,8 @@ class PlayerWindow(Gtk.Window):
         self.tail_spin = Gtk.SpinButton.new_with_range(
             PlayerSettings.TAIL_MIN, PlayerSettings.TAIL_MAX, 1)
         self.tail_spin.set_digits(0)
+        self.pause_others_check = Gtk.CheckButton(
+            label="Ставить другие плееры на паузу, пока говорю")
         self.save_button = self._button("Сохранить", self._save_settings)
         self.settings_status = self._status_label()
 
@@ -229,6 +232,7 @@ class PlayerWindow(Gtk.Window):
         fields.attach(self.speed_spin, 1, 1, 1, 1)
         fields.attach(Gtk.Label(label="Хвост очереди", xalign=0.0), 0, 2, 1, 1)
         fields.attach(self.tail_spin, 1, 2, 1, 1)
+        fields.attach(self.pause_others_check, 0, 3, 2, 1)
         self.voice_combo.set_hexpand(True)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -339,11 +343,12 @@ class PlayerWindow(Gtk.Window):
 
     def _open_settings(self) -> None:
         """Каждый вход читает настройки заново: несохранённое с прошлого раза не остаётся.
-        Хвост — из файла плеера и доступны всегда; голос и скорость — только если
+        Хвост и флажок паузы — из файла плеера и доступны всегда; голос и скорость — только если
         настройки claude-tts прочитались."""
         self._hide_status()
         loaded_prefs = self._prefs.load()
         self.tail_spin.set_value(loaded_prefs.tail)
+        self.pause_others_check.set_active(loaded_prefs.pause_others)
         self.voice_combo.remove_all()
         try:
             loaded = self._settings.load()
@@ -370,12 +375,13 @@ class PlayerWindow(Gtk.Window):
             widget.set_sensitive(enabled)
 
     def _save_settings(self) -> None:
-        """Сначала хвост в файл плеера и в плеер, затем
+        """Сначала хвост и флажок паузы в файл плеера и в плеер, затем
         голос и скорость, если они прочитались. Экран остаётся, итог — в блоке внизу."""
         try:
             self.tail_spin.update()  # набранный текст без потери фокуса
             prefs = Prefs(tail=self.tail_spin.get_value_as_int(),
-                          autoplay=self.autoplay_button.get_active())
+                          autoplay=self.autoplay_button.get_active(),
+                          pause_others=self.pause_others_check.get_active())
             self._prefs.save(prefs)
             self._player.apply_prefs(prefs)
             if self._voice_loaded:
