@@ -47,7 +47,6 @@ class PlayerState:
     lengths: list[float]  # queue.length(m) для каждого из messages, в том же порядке
     sessions: list[Session]  # порядок списка (Sessions.sessions)
     active: str | None  # активная сессия; None — не выбрана
-    counts: list[int]  # число сообщений каждой из sessions, в том же порядке
     autoplay: bool = True  # кнопка автовоспроизведения: последний apply_prefs
 
 
@@ -442,10 +441,9 @@ class Player:
         messages = self._queue.messages
         lengths = [self._queue.length(m) for m in messages]
         sessions = self._sessions.sessions
-        counts = [len(self._queues[s.id].messages) for s in sessions]
         return PlayerState(self._status, current, self._now(), length,
                            messages, self._output_down, lengths,
-                           sessions, self._sessions.active, counts, self._autoplay)
+                           sessions, self._sessions.active, self._autoplay)
 
     def toggle_play_pause(self) -> None:
         """Кнопка play/pause: playing — пауза с запомненной позицией; paused — с неё дальше;

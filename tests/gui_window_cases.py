@@ -44,11 +44,10 @@ def message(task: str) -> Message:
 
 def state(status: str, current: Message | None, messages: list[Message],
           position_s: float = 0.0, sessions: tuple = (),
-          active: str | None = None, counts: tuple | None = None) -> PlayerState:
+          active: str | None = None) -> PlayerState:
     length = 0.0 if current is None else 10.0
-    counts = [0] * len(sessions) if counts is None else list(counts)
     return PlayerState(status, current, position_s, length, messages, False,
-                       [10.0] * len(messages), list(sessions), active, counts)
+                       [10.0] * len(messages), list(sessions), active)
 
 
 class FakePlayer:
@@ -210,7 +209,7 @@ class PlayerWindowTest(unittest.TestCase):
                    messages: list[Message] | None = None, position_s: float = 3.0) -> PlayerState:
         messages = [self.a, self.b, self.c] if messages is None else messages
         return state(status, current, messages, position_s, sessions=SESSIONS,
-                     active=SESSIONS[0].id, counts=(len(messages), 5))
+                     active=SESSIONS[0].id)
 
     def test_buttons_call_player_commands(self) -> None:
         w = self.window
@@ -243,8 +242,8 @@ class PlayerWindowTest(unittest.TestCase):
     def test_tree_shows_open_folder_then_its_tracks_then_closed_folder(self) -> None:
         w = self.window
         self.assertEqual(5, len(w.tree.get_children()))
-        self.assertEqual(["▾", "TTSReader · 1dd2b064", "3"], self.texts(0))
-        self.assertEqual(["▸", "— · abcdef12", "5"], self.texts(4))
+        self.assertEqual(["▾", "TTSReader · 1dd2b064"], self.texts(0))
+        self.assertEqual(["▸", "— · abcdef12"], self.texts(4))
         icons = [[child.get_icon_name()[0] for child in self.row_box(i).get_children()
                   if isinstance(child, Gtk.Image)] for i in (0, 4)]
         self.assertEqual([["folder-open-symbolic"], ["folder-symbolic"]], icons)
@@ -275,7 +274,7 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual([("close_session",)], self.player.calls)
 
     def test_all_closed_shows_only_folders(self) -> None:
-        self.player.change(state("idle", None, [], sessions=SESSIONS, counts=(3, 5)))
+        self.player.change(state("idle", None, [], sessions=SESSIONS))
         self.assertEqual(["▸", "▸"], [self.texts(i)[0] for i in (0, 1)])
         self.assertEqual(2, len(self.window.tree.get_children()))
 

@@ -471,20 +471,17 @@ class PlayerWindow(Gtk.Window):
         label.set_attributes(attributes)
 
     def _folder_row(self, item: SessionRow) -> Gtk.Box:
-        """▾/▸, значок папки, «проект · id» (открытая — жирным), справа число дорожек."""
+        """▾/▸, значок папки, «проект · id» (открытая — жирным)."""
         arrow = Gtk.Label(label=FOLDER_OPEN_ARROW if item.open else FOLDER_CLOSED_ARROW)
         icon = Gtk.Image.new_from_icon_name(
             FOLDER_OPEN_ICON if item.open else FOLDER_CLOSED_ICON, Gtk.IconSize.MENU)
         title = Gtk.Label(label=item.title, xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
         if item.open:
             self._bold(title)
-        count = Gtk.Label(label=item.count, xalign=1.0)
-        count.get_style_context().add_class(Gtk.STYLE_CLASS_DIM_LABEL)
         line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, margin=4)
         line.pack_start(arrow, False, False, 0)
         line.pack_start(icon, False, False, 0)
         line.pack_start(title, True, True, 0)
-        line.pack_end(count, False, False, 0)
         return line
 
     def _message_row(self, item: MessageRow) -> Gtk.Box:
