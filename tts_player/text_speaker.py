@@ -222,7 +222,8 @@ class TextSpeaker:
         """Выход: синтез отменён, звук стоп, каталог удалён, главный плеер отпущен.
 
         Вызывается до Player.shutdown(): release() после него прошёл бы через Player._changed
-        уже остановленного плеера — таймер сирот и on_change окна."""
+        уже остановленного плеера — пауза других плееров (_follow_status: таймер продолжения
+        _resume_later поверх уже остановленного MprisPause) и on_change окна."""
         self._discard()
         self._status = self._rest_status()
         self._holding = False
