@@ -1,8 +1,9 @@
-"""Собственные настройки плеера: сколько последних реплик озвучивать (tail) и
-автовоспроизведение (autoplay).
+"""Собственные настройки плеера: сколько последних реплик озвучивать (tail),
+автовоспроизведение (autoplay) и пауза других проигрывателей на время речи (pause_others).
 
 Файл $XDG_CONFIG_HOME/tts-player/settings.json (иначе ~/.config/tts-player/settings.json):
-{"tail": <целое 1-20>, "autoplay": <true|false>}. Лишние ключи игнорируются. Чтение не бросает:
+{"tail": <целое 1-20>, "autoplay": <true|false>, "pause_others": <true|false>}.
+Лишние ключи игнорируются. Чтение не бросает:
 на любой порче возвращаются значения по умолчанию и пишется предупреждение в лог (stderr).
 """
 import json
@@ -24,6 +25,7 @@ FILE_NAME = "settings.json"
 class Prefs:
     tail: int = 5
     autoplay: bool = True
+    pause_others: bool = True
 
 
 class PlayerSettings:
@@ -58,14 +60,20 @@ class PlayerSettings:
             log.warning("%s: autoplay %r не true/false, взято %s",
                         self._path, autoplay, str(defaults.autoplay).lower())
             autoplay = defaults.autoplay
-        return Prefs(tail=tail, autoplay=autoplay)
+        pause_others = data.get("pause_others", defaults.pause_others)
+        if not isinstance(pause_others, bool):
+            log.warning("%s: pause_others %r не true/false, взято %s",
+                        self._path, pause_others, str(defaults.pause_others).lower())
+            pause_others = defaults.pause_others
+        return Prefs(tail=tail, autoplay=autoplay, pause_others=pause_others)
 
     def save(self, prefs: Prefs) -> None:
         if not self._tail_valid(prefs.tail):
             raise SettingsError(
                 f"tail {prefs.tail!r} вне диапазона {self.TAIL_MIN}-{self.TAIL_MAX}"
             )
-        data = {"tail": prefs.tail, "autoplay": prefs.autoplay}
+        data = {"tail": prefs.tail, "autoplay": prefs.autoplay,
+                "pause_others": prefs.pause_others}
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             atomic_json.write_json(self._path, data)
