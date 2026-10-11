@@ -97,7 +97,7 @@ class PlayerWindow(Gtk.Window):
     активной сессии» (активна, пока есть активная сессия), справа «Озвучить свой текст»; дерево сессий — папки (открыта одна или ни одной: открытая —
     активная), дорожки открытой — под её заголовком с отступом; ползунок позиции; ряд со
     временем слева, play/pause и ⏩ автовоспроизведения справа (⏩ — крайняя справа).
-    "settings": хвост очереди и приглушение (PlayerSettings), голос и скорость claude-tts
+    "settings": хвост очереди (PlayerSettings), голос и скорость claude-tts
     (DaemonSettings); «Сохранить» пишет их и остаётся на экране, итог — в блоке внизу; стрелка
     назад возвращает без записи. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
     время и play/pause; стрелка назад ставит звучащий свой текст на паузу.
@@ -109,7 +109,6 @@ class PlayerWindow(Gtk.Window):
     REFRESH_MS = 250
     TRACK_INDENT = 28  # отступ дорожки от левого края: под значком папки
     SPEED_STEP = 0.1
-    DUCK_STEP = 5
     SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
 
     def __init__(self, player, settings: DaemonSettings, prefs: PlayerSettings,
@@ -204,7 +203,7 @@ class PlayerWindow(Gtk.Window):
         return button
 
     def _settings_screen(self) -> Gtk.Box:
-        """Экран настроек: стрелка назад, голос, скорость, хвост, приглушение, «Сохранить», блок итога."""
+        """Экран настроек: стрелка назад, голос, скорость, хвост, «Сохранить», блок итога."""
         self.back_button = self._icon_button("go-previous-symbolic", "Назад", self._show_main)
         self.voice_combo = Gtk.ComboBoxText()
         for renderer in self.voice_combo.get_cells():
@@ -216,9 +215,6 @@ class PlayerWindow(Gtk.Window):
         self.tail_spin = Gtk.SpinButton.new_with_range(
             PlayerSettings.TAIL_MIN, PlayerSettings.TAIL_MAX, 1)
         self.tail_spin.set_digits(0)
-        self.duck_spin = Gtk.SpinButton.new_with_range(
-            PlayerSettings.DUCK_MIN, PlayerSettings.DUCK_MAX, self.DUCK_STEP)
-        self.duck_spin.set_digits(0)
         self.save_button = self._button("Сохранить", self._save_settings)
         self.settings_status = self._status_label()
 
@@ -233,8 +229,6 @@ class PlayerWindow(Gtk.Window):
         fields.attach(self.speed_spin, 1, 1, 1, 1)
         fields.attach(Gtk.Label(label="Хвост очереди", xalign=0.0), 0, 2, 1, 1)
         fields.attach(self.tail_spin, 1, 2, 1, 1)
-        fields.attach(Gtk.Label(label="Приглушать другие звуки до, %", xalign=0.0), 0, 3, 1, 1)
-        fields.attach(self.duck_spin, 1, 3, 1, 1)
         self.voice_combo.set_hexpand(True)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -345,12 +339,11 @@ class PlayerWindow(Gtk.Window):
 
     def _open_settings(self) -> None:
         """Каждый вход читает настройки заново: несохранённое с прошлого раза не остаётся.
-        Хвост и приглушение — из файла плеера и доступны всегда; голос и скорость — только если
+        Хвост — из файла плеера и доступны всегда; голос и скорость — только если
         настройки claude-tts прочитались."""
         self._hide_status()
         loaded_prefs = self._prefs.load()
         self.tail_spin.set_value(loaded_prefs.tail)
-        self.duck_spin.set_value(loaded_prefs.duck)
         self.voice_combo.remove_all()
         try:
             loaded = self._settings.load()
@@ -377,13 +370,11 @@ class PlayerWindow(Gtk.Window):
             widget.set_sensitive(enabled)
 
     def _save_settings(self) -> None:
-        """Сначала хвост и приглушение в файл плеера и в плеер, затем
+        """Сначала хвост в файл плеера и в плеер, затем
         голос и скорость, если они прочитались. Экран остаётся, итог — в блоке внизу."""
         try:
             self.tail_spin.update()  # набранный текст без потери фокуса
-            self.duck_spin.update()
             prefs = Prefs(tail=self.tail_spin.get_value_as_int(),
-                          duck=self.duck_spin.get_value_as_int(),
                           autoplay=self.autoplay_button.get_active())
             self._prefs.save(prefs)
             self._player.apply_prefs(prefs)

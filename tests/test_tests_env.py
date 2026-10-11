@@ -1,7 +1,7 @@
 """Окружение тестов (tests/__init__.py): GIO без GVfs при любом способе запуска."""
 import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import os
-import re
+import ast
 import unittest
 from pathlib import Path
 
@@ -18,10 +18,13 @@ class TestsEnvTest(unittest.TestCase):
         отдельно (-p, tests.X) идёт с GVfs на шине пользователя."""
         modules = [*TESTS.glob("test_*.py"), TESTS / "gui_window_cases.py"]
         for path in modules:
-            imports = [line.rstrip("\n") for line in path.read_text().splitlines()
-                       if re.match(r"(import|from) ", line)]
+            source = path.read_text()
+            imports = [node for node in ast.parse(source).body
+                       if isinstance(node, (ast.Import, ast.ImportFrom))]
             with self.subTest(module=path.name):
-                self.assertEqual(LINE, imports[0])
+                self.assertTrue(imports, f"{path.name}: в модуле нет ни одного импорта")
+                first_line = source.splitlines()[imports[0].lineno - 1]
+                self.assertEqual(LINE, first_line)
 
 
 if __name__ == "__main__":
