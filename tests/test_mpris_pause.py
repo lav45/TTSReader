@@ -171,14 +171,20 @@ class MprisPauseTest(unittest.TestCase):
         self.assertTrue(spin(lambda: player.status == "Playing"))
         self.assertEqual(["Pause", "Play"], player.calls)
 
-    def test_resume_then_stop_while_pause_pending_plays_when_pause_lands(self):
+    def test_resume_then_stop_while_pause_pending_sends_play_at_stop(self):
+        """Выход процесса: после stop цикл GLib уже не крутится, ответа на Pause() не будет —
+        Play() уходит в stop, без ответа (SILENT-плеер не отвечает никогда). Ответ, пришедший
+        позже, второго Play() не шлёт."""
         player = self.player("a", "Playing", SILENT)
         self.pause.pause_playing(self.results.append)
         self.assertTrue(spin(lambda: player.calls))
         self.pause.resume()
         self.pause.stop()
+        self.assertTrue(spin(lambda: "Play" in player.calls))
+        self.assertEqual(["Pause", "Play"], player.calls)
         player.answer_pending()
-        self.assertTrue(spin(lambda: player.status == "Playing"))
+        spin()
+        self.assertEqual(["Pause", "Play"], player.calls)
         self.assertEqual([], self.results)
 
     def test_stop_during_pending_call_means_no_done(self):

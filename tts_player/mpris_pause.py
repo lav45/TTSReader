@@ -52,7 +52,8 @@ class MprisPause:
 
         Список и так держит только стоящих на паузе: ставший Playing / Stopped или ушедший с шины
         забыт по сигналу, поэтому статус перед Play() не спрашивается. Тому, чей Pause() ещё не
-        ответил, Play() уйдёт с ответом (и после stop)."""
+        ответил, Play() уйдёт с ответом, а если раньше наступит stop — в stop, не дожидаясь
+        ответа."""
         for name in list(self._held):
             self._forget(name)
             if name in self._pausing:
@@ -62,10 +63,18 @@ class MprisPause:
 
     def stop(self) -> None:
         """Отписаться от сигналов; после stop колбэков нет. Уже отправленные Play() не отменяются:
-        соединение сбрасывается, чтобы они ушли до выхода процесса."""
+        соединение сбрасывается, чтобы они ушли до выхода процесса.
+
+        Play(), ждущий ответа на Pause() (resume до ответа), уходит здесь же: после stop главный
+        цикл при выходе уже не крутится, и ответа процесс не дождётся. Сообщения одного
+        соединения одному адресату доставляются по порядку — Play() придёт после Pause();
+        ответ, если всё же придёт, второго Play() не шлёт."""
         self._stopped = True
         for name in list(self._held):
             self._forget(name)
+        for name in self._play_on_paused:
+            self._play(name)
+        self._play_on_paused.clear()
         try:
             self._connection.flush_sync(None)
         except GLib.Error as exc:
