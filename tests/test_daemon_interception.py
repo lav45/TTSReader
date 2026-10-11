@@ -1,4 +1,5 @@
 """Приёмка стыка: плеер, найденный кодом демона через PATH, — наша обёртка daemon-bin/paplay."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import os
 import subprocess
 import tempfile

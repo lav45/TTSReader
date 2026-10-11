@@ -4,6 +4,7 @@
 Заглушки claude-tts и tts-player стоят первыми в PATH и пишут свои аргументы и PATH
 в файлы; /proc и HOME подменены переменными TTS_HOOK_PROC и TTS_HOOK_HOME.
 """
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import fcntl
 import json
 import os

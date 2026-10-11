@@ -1,6 +1,7 @@
 """Тесты SentenceCounter: постоянный процесс-счётчик в цикле GLib. Процесс — поддельный скрипт
 под текущим интерпретатором (как в test_text_speaker): настоящий интерпретатор claude-tts тестам
 не нужен."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import os
 import sys
 import tempfile

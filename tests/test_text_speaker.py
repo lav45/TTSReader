@@ -1,6 +1,7 @@
 """Тесты TextSpeaker (контракт (10)): поддельный процесс синтеза — скрипт во временном каталоге,
 звук — Playback с fakesink, главный плеер — запись hold/release или настоящий Player с
-заглушкой Ducker (pactl не зовётся)."""
+заглушкой MprisPause (D-Bus не зовётся)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import sys
@@ -17,7 +18,6 @@ from gi.repository import GLib  # noqa: E402
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.player import Player  # noqa: E402
-from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sessions import Sessions  # noqa: E402
 from tts_player.text_speaker import TextSpeaker, TextState  # noqa: E402
 
@@ -89,25 +89,24 @@ class FakePlayer:
         self.calls.append("release")
 
 
-class FakeDucker:
-    """Подменяет Ducker: запоминает вызовы, pactl не зовёт никогда."""
+class FakePause:
+    """Подменяет MprisPause: журнал вызовов; pause_playing отвечает сразу: кто-то встал."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple] = []
-        self.has_orphans = False
-        self.orphans_changed_at = None
+        self.calls: list[str] = []
+        self.holding = False
 
-    def duck(self, percent: int) -> None:
-        self.calls.append(("duck", percent))
+    def pause_playing(self, done) -> None:
+        self.calls.append("pause_playing")
+        self.holding = True
+        done(True)
 
-    def refresh(self) -> None:
-        pass
+    def resume(self) -> None:
+        self.calls.append("resume")
+        self.holding = False
 
-    def watch(self) -> None:
-        pass
-
-    def restore(self) -> None:
-        self.calls.append(("restore",))
+    def stop(self) -> None:
+        self.calls.append("stop")
 
 
 class TextSpeakerCase(unittest.TestCase):
@@ -485,41 +484,46 @@ class TextSpeakerErrorTest(TextSpeakerCase):
         self.assertIn("шум", speaker.state().error)
 
 
-class TextSpeakerDuckingTest(TextSpeakerCase):
-    """Приглушение своего текста — через главный Player в удержании и общий Ducker."""
+class TextSpeakerPauseTest(TextSpeakerCase):
+    """Пауза других плееров на свой текст — через главный Player в удержании и общий
+    MprisPause; 3 с тишины у своего текста нет: его звук идёт своим Playback."""
 
     def setUp(self) -> None:
         super().setUp()
-        self.ducker = FakeDucker()
-        self.main = Player(self.runtime, "fakesink", ducker=self.ducker,
+        self.pause = FakePause()
+        self.main = Player(self.runtime, "fakesink", pause=self.pause,
                            sessions=Sessions(self.runtime / "sessions.json"),
                            daemon_queue=DaemonQueue(self.runtime / "daemon-queue"),
                            daemon_settings=DaemonSettings(self.runtime / "claude-tts"))
-        self.addCleanup(self.main.shutdown)
-        self.main.apply_prefs(Prefs(duck=45))
+        self.main_down = False  # выход главного проверяет сам тест
+        self.addCleanup(lambda: self.main_down or self.main.shutdown())
 
-    def test_play_ducks_and_end_restores(self) -> None:
+    def test_play_pauses_others_once_and_sounds_without_gap(self) -> None:
         speaker = self.make([["count", 1], ["wav", 0, 0.2], ["done"]], player=self.main)
         speaker.set_text("Раз.")
         speaker.toggle_play_pause()
-        self.assertEqual([("duck", 45)], self.ducker.calls)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.run_until(lambda: self.plays, limit=Player.PAUSE_GAP_SECONDS - 0.5)
         self.run_until(lambda: self.status() == "stopped")
-        self.assertEqual([("duck", 45), ("restore",)], self.ducker.calls)
+        self.assertEqual(["pause_playing"], self.pause.calls)  # продолжение — через 5 с тишины
 
-    def test_pause_restores(self) -> None:
+    def test_pause_does_not_resume_at_once(self) -> None:
         speaker = self.make([["count", 1], ["wav", 0, 1.0], ["done"]], player=self.main)
         speaker.set_text("Раз.")
         speaker.toggle_play_pause()
         self.run_until(lambda: self.status() == "playing")
         speaker.toggle_play_pause()
-        self.assertEqual([("duck", 45), ("restore",)], self.ducker.calls)
+        self.assertEqual(["pause_playing"], self.pause.calls)
 
-    def test_shutdown_restores(self) -> None:
+    def test_shutdown_resumes_others(self) -> None:
         speaker = self.make([["count", 1], ["sleep", 30]], player=self.main)
         speaker.set_text("Раз.")
         speaker.toggle_play_pause()
         speaker.shutdown()
-        self.assertEqual([("duck", 45), ("restore",)], self.ducker.calls)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.main_down = True
+        self.main.shutdown()
+        self.assertEqual(["pause_playing", "resume", "stop"], self.pause.calls)
         self.assertEqual("idle", self.main.state().status)
 
 

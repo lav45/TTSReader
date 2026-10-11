@@ -1,4 +1,5 @@
 """Тесты DaemonQueue: запись задачи в очередь демона (временный каталог, не ~/.claude-tts)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import tempfile

@@ -1,5 +1,6 @@
 """Тесты sentence_count_worker: процесс-счётчик с поддельным пакетом claude_code_tts (как в
 test_synth_worker: настоящий интерпретатор claude-tts тестам не нужен)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import subprocess

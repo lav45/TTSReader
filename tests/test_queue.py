@@ -1,4 +1,5 @@
 """Тесты MessageQueue: сообщения по задачам демона, порядок, навигация, хвост начатых (tail, по умолчанию 5)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import logging
 import tempfile
 import unittest

@@ -1,3 +1,4 @@
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import os
 import tempfile
 import time

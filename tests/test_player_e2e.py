@@ -1,4 +1,5 @@
 """Приёмка плеера через стык: daemon-bin/paplay -> inbox -> процесс tts_player -> строки stderr."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import queue
@@ -13,7 +14,9 @@ import uuid
 import wave
 from pathlib import Path
 
-from test_ducking import STUB as PACTL_STUB, sink_input
+from gi.repository import GLib
+
+from tests.mpris_fake import FakeBus, FakePlayer
 
 ROOT = Path(__file__).resolve().parent.parent
 PAPLAY = ROOT / "daemon-bin" / "paplay"
@@ -22,7 +25,6 @@ QUIET = 1.0
 RATE = 8000
 SECONDS = 0.25
 PROTOCOL = ("playing ", "error ")
-FOREIGN = sink_input(7, 4242, [60000, 50000])  # чужой поток в выдаче заглушки pactl
 
 
 def make_wav(path: Path, seconds: float = SECONDS) -> Path:
@@ -36,8 +38,8 @@ def make_wav(path: Path, seconds: float = SECONDS) -> Path:
 
 class PlayerProcessCase(unittest.TestCase):
     """Процесс плеера во временном окружении: свой XDG_RUNTIME_DIR, свой XDG_CONFIG_HOME
-    (настройки плеера пользователя не читаются), заглушка pactl первой
-    в PATH (громкость настоящих потоков пользователя не меняется ни в одном e2e), свой HOME
+    (настройки плеера пользователя не читаются), своя сессионная шина D-Bus (Gio.TestDBus:
+    настоящие плееры пользователя не ставятся на паузу ни в одном e2e), свой HOME
     (обёртка paplay читает id задачи из временного .claude-tts/playback.json, а не из
     настоящего; без task() файла нет — id "unknown"; задачи демону плеер пишет во временную
     .claude-tts/queue, config.json там нет — кэш считается актуальным).
@@ -64,14 +66,8 @@ class PlayerProcessCase(unittest.TestCase):
         self.wavs.mkdir()
         self.lines: queue.Queue[str] = queue.Queue()
         self.proc: subprocess.Popen | None = None
-        self.pactl_bin = self.tmp / "bin"
-        self.pactl_bin.mkdir()
-        stub = self.pactl_bin / "pactl"
-        stub.write_text(PACTL_STUB)
-        stub.chmod(0o755)
-        self.pactl_log = self.tmp / "pactl.log"
-        self.pactl_fixture = self.tmp / "sink-inputs.json"
-        self.pactl_fixture.write_text(json.dumps([FOREIGN]))
+        self.bus = FakeBus()
+        self.addCleanup(self.bus.down)  # первым: снимается последним, после процесса плеера
         self.daemon_queue = self.home / ".claude-tts" / "queue"
         self.daemon_queue.mkdir(parents=True)
         self.hook_queue = self.runtime / "tts-player" / "hook-home" / ".claude-tts" / "queue"
@@ -89,29 +85,38 @@ class PlayerProcessCase(unittest.TestCase):
         env["XDG_RUNTIME_DIR"] = str(self.runtime)
         env["XDG_CONFIG_HOME"] = str(self.config)
         env["HOME"] = str(self.home)
-        env["PATH"] = f"{self.pactl_bin}{os.pathsep}{env.get('PATH', '')}"
-        env["PACTL_LOG"] = str(self.pactl_log)
-        env["PACTL_FIXTURE"] = str(self.pactl_fixture)
-        for name in ("PACTL_SLEEP", "PACTL_EXIT"):
-            env.pop(name, None)
+        env["DBUS_SESSION_BUS_ADDRESS"] = self.bus.address
         env.update(self.extra_env)
         return env
 
-    def volume_sets(self) -> list[list[str]]:
-        """Вызовы `pactl set-sink-input-volume` из журнала заглушки, по порядку."""
-        if not self.pactl_log.exists():
-            return []
-        argvs = [line.split("|", 1)[1].split() for line in self.pactl_log.read_text().splitlines()]
-        return [argv for argv in argvs if argv[:1] == ["set-sink-input-volume"]]
+    def other_player(self, status: str) -> FakePlayer:
+        """Поддельный MPRIS-плеер на шине процесса плеера; отвечает из своего потока с циклом
+        GLib, пока тест ждёт строки stderr."""
+        context = GLib.MainContext.new()
+        loop = GLib.MainLoop.new(context, False)
+        players: list[FakePlayer] = []
+        ready = threading.Event()
 
-    def wait_volume_sets(self, count: int) -> list[list[str]]:
-        """Ждёт count вызовов set-sink-input-volume; таймаут — провал теста."""
+        def serve() -> None:
+            context.push_thread_default()
+            players.append(FakePlayer(self.bus, "video", status))
+            ready.set()
+            loop.run()
+            context.pop_thread_default()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        ready.wait(WAIT)
+        self.addCleanup(thread.join, WAIT)
+        self.addCleanup(lambda: context.invoke_full(GLib.PRIORITY_DEFAULT, loop.quit))
+        return players[0]
+
+    def wait_status(self, player: FakePlayer, status: str) -> None:
+        """Ждёт статус поддельного плеера; таймаут — провал теста."""
         deadline = time.monotonic() + WAIT
-        while len(sets := self.volume_sets()) < count:
-            if time.monotonic() > deadline:
-                self.fail(f"нет {count} вызовов set-sink-input-volume за {WAIT} с: {sets}")
+        while player.status != status:
+            self.assertLess(time.monotonic(), deadline, f"плеер не {status}: {player.calls}")
             time.sleep(0.05)
-        return sets
 
     @staticmethod
     def command(*args: str) -> list[str]:
@@ -212,6 +217,21 @@ class PlayerProcessCase(unittest.TestCase):
             self.task_ids[key] = self.hook_task(session, f"text {key}")["id"]
         self.task(self.task_ids[key])
         subprocess.run([str(PAPLAY), str(path)], env=self.env(), check=True)
+
+    def put_hook_task(self, session: str) -> str:
+        """Задача хука в hook-home без ожидания задачи демона (отложенную и удалённую она не
+        рождает); возвращает id задачи хука."""
+        hook_id = uuid.uuid4().hex[:16]
+        task = {"id": hook_id, "timestamp": time.time(), "session_id": session,
+                "project": "/w/proj", "text": f"text {hook_id}", "persona": "p", "speed": 1.0}
+        deadline = time.monotonic() + WAIT
+        while not self.hook_queue.is_dir():
+            self.assertLess(time.monotonic(), deadline, "нет очереди hook-home")
+            time.sleep(0.02)
+        tmp = self.hook_queue / f"{hook_id}.tmp"
+        tmp.write_text(json.dumps(task))
+        tmp.rename(self.hook_queue / f"{hook_id}.json")
+        return hook_id
 
     def next_line(self, prefix: str) -> str:
         """Ближайшая строка с префиксом; чужие строки пропускаются; таймаут — провал теста."""
@@ -394,27 +414,26 @@ class PlayerE2ETest(PlayerProcessCase):
         self.assertIn("графическ", result.stderr)
         self.assertFalse(self.inbox.exists())
 
-    def assert_ducked_by_half(self) -> None:
-        """Первое сообщение приглушает чужой поток (60000/50000) до duck = 50 % из файла."""
-        self.drop(self.sentence(self.session, "aaaaaa", 0))
-        self.played(1)
-        self.assertEqual([["set-sink-input-volume", "7", "30000", "25000"]],
-                         self.wait_volume_sets(1))
+    def assert_autoplay_off(self) -> None:
+        """Кнопка автовоспроизведения отжата в файле: задача хука откладывается, а не уходит
+        в демон."""
+        hook_id = self.put_hook_task(self.session)
+        self.next_line(f"task {hook_id} {self.session} deferred")
 
     def test_settings_file_option_is_read(self) -> None:
         settings = self.tmp / "prefs" / "settings.json"
         settings.parent.mkdir()
-        settings.write_text(json.dumps({"tail": 5, "duck": 50}))
+        settings.write_text(json.dumps({"tail": 5, "autoplay": False}))
         self.start_player("fakesink", "--settings-file", str(settings))
-        self.assert_ducked_by_half()
+        self.assert_autoplay_off()
 
     def test_settings_default_to_xdg_config_home(self) -> None:
         """Без --settings-file файл берётся из XDG_CONFIG_HOME подпроцесса."""
         settings = self.config / "tts-player" / "settings.json"
         settings.parent.mkdir(parents=True)
-        settings.write_text(json.dumps({"tail": 5, "duck": 50}))
+        settings.write_text(json.dumps({"tail": 5, "autoplay": False}))
         self.start_player()
-        self.assert_ducked_by_half()
+        self.assert_autoplay_off()
 
     def counted(self) -> tuple[str, str]:
         """Счётчик предложений в окружении «claude-tts»: поддельный claude_code_tts под текущим
@@ -434,50 +453,22 @@ class PlayerE2ETest(PlayerProcessCase):
         subprocess.run([str(PAPLAY), str(self.sentence(self.session, "aaaaaa", index))],
                        env=self.env(), check=True)
 
-    def test_one_sentence_answer_ends_by_count_and_restores_volume(self) -> None:
-        """Первое сообщение — чужой поток до 30 %; ответ из одного предложения (по счётчику)
-        кончается сразу после него — без следующей задачи плеер уходит в idle, чужому потоку
-        возвращается исходная громкость."""
+    def test_one_sentence_answer_ends_by_count_and_other_player_resumes(self) -> None:
+        """Играющий другой плеер встаёт на паузу в начале речи, первое слово — после 3 с
+        тишины; ответ из одного предложения (по счётчику) кончается сразу после него — без
+        следующей задачи плеер уходит в idle, и через 5 с тишины другой плеер снова играет."""
+        other = self.other_player("Playing")
         self.start_player("fakesink", *self.counted())
         self.say(self.hook_task(self.session, "Привет")["id"], 0)
+        self.wait_status(other, "Paused")
+        paused_at = time.monotonic()
         self.played(1)
-        self.assertEqual([["set-sink-input-volume", "7", "18000", "15000"],
-                          ["set-sink-input-volume", "7", "60000", "50000"]],
-                         self.wait_volume_sets(2))
-        state = self.runtime / "tts-player" / "duck.json"
-        deadline = time.monotonic() + WAIT
-        while state.exists():
-            self.assertLess(time.monotonic(), deadline, "duck.json не удалён")
-            time.sleep(0.05)
-
-    def test_orphan_stream_is_repaired_after_end(self) -> None:
-        """Приглушённый чужой поток исчезает во время речи (ответ из двух предложений ждёт
-        второе); после конца появляется новый поток того же приложения со сниженной
-        громкостью — ему возвращается исходная."""
-        orphans = self.runtime / "tts-player" / "duck-orphans.json"
-        self.start_player("fakesink", *self.counted())
-        task_id = self.hook_task(self.session, "Один. Два.")["id"]
-        self.say(task_id, 0)
-        self.played(1)
-        self.wait_volume_sets(1)
-        self.pactl_fixture.write_text("[]")
-        deadline = time.monotonic() + WAIT
-        while not orphans.exists():
-            self.assertLess(time.monotonic(), deadline, "сирота не записана")
-            time.sleep(0.05)
-        self.say(task_id, 1)
-        state = self.runtime / "tts-player" / "duck.json"
-        deadline = time.monotonic() + WAIT
-        while state.exists():
-            self.assertLess(time.monotonic(), deadline, "громкость не возвращена")
-            time.sleep(0.05)
-        self.pactl_fixture.write_text(json.dumps([sink_input(9, 4242, [18000, 15000])]))
-        sets = self.wait_volume_sets(2)
-        self.assertEqual(["set-sink-input-volume", "9", "60000", "50000"], sets[1])
-        deadline = time.monotonic() + WAIT
-        while orphans.exists():
-            self.assertLess(time.monotonic(), deadline, "сирота не снята")
-            time.sleep(0.05)
+        self.assertGreaterEqual(time.monotonic() - paused_at, 2.5)
+        self.next_line("ended ")
+        ended_at = time.monotonic()
+        self.wait_status(other, "Playing")
+        self.assertGreaterEqual(time.monotonic() - ended_at, 4.5)
+        self.assertEqual(["Pause", "Play"], other.calls)
 
     def test_sigterm_exits_0(self) -> None:
         self.start_player()
@@ -486,24 +477,15 @@ class PlayerE2ETest(PlayerProcessCase):
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
 
-    def test_sighup_exits_0_and_restores_volumes(self) -> None:
+    def test_sighup_exits_0_and_resumes_other_player_at_once(self) -> None:
+        other = self.other_player("Playing")
         self.start_player()
         self.drop(self.sentence(self.session, "aaaaaa", 0, seconds=3.0))
-        self.wait_volume_sets(1)
+        self.wait_status(other, "Paused")
         self.proc.send_signal(signal.SIGHUP)
         self.assertEqual(0, self.proc.wait(timeout=WAIT))
-        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"], self.volume_sets()[-1])
-        self.assertFalse((self.runtime / "tts-player" / "duck.json").exists())
-
-    def test_leftover_duck_state_is_restored_at_start(self) -> None:
-        state = self.runtime / "tts-player" / "duck.json"
-        state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps({"inputs": {"7": {
-            "volumes": [60000, 50000], "name": "app4242", "pid": "4242"}}}))
-        self.start_player()
-        sets = self.wait_volume_sets(1)
-        self.assertEqual(["set-sink-input-volume", "7", "60000", "50000"], sets[0])
-        self.assertFalse(state.exists())
+        self.wait_status(other, "Playing")
+        self.assertEqual(["Pause", "Play"], other.calls)
 
 
 BIN = ROOT / "bin" / "tts-player"
@@ -677,21 +659,6 @@ class SingleInstanceTest(PlayerProcessCase):
         """`session add` через настоящий CLI; ждёт строку плеера, что сессия в списке."""
         self.assertEqual(0, self.run_bin("session", "add", session, "/w/proj").returncode)
         self.next_line(f"session add {session}")
-
-    def put_hook_task(self, session: str) -> str:
-        """Задача хука в hook-home без ожидания задачи демона (отложенную и удалённую она не
-        рождает); возвращает id задачи хука."""
-        hook_id = uuid.uuid4().hex[:16]
-        task = {"id": hook_id, "timestamp": time.time(), "session_id": session,
-                "project": "/w/proj", "text": f"text {hook_id}", "persona": "p", "speed": 1.0}
-        deadline = time.monotonic() + WAIT
-        while not self.hook_queue.is_dir():
-            self.assertLess(time.monotonic(), deadline, "нет очереди hook-home")
-            time.sleep(0.02)
-        tmp = self.hook_queue / f"{hook_id}.tmp"
-        tmp.write_text(json.dumps(task))
-        tmp.rename(self.hook_queue / f"{hook_id}.json")
-        return hook_id
 
     def daemon_tasks(self) -> set[Path]:
         return set(self.daemon_queue.glob("*.json"))

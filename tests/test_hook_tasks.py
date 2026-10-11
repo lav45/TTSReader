@@ -1,4 +1,5 @@
 """Тесты HookTasks: забор задач хука из queue/ — скан, монитор, битые файлы."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import logging
 import tempfile

@@ -1,3 +1,4 @@
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import unittest
 
 from tts_player.output_idle import SUSPEND_AFTER_S, OutputIdle

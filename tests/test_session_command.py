@@ -1,6 +1,7 @@
 """Команда `tts-player session has|add|remove`: гейт хука спрашивает, в списке ли сессия запущенного плеера;
 add и remove кладут запрос в control/.
 Подпроцесс bin/tts-player с XDG_RUNTIME_DIR во временном каталоге."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import subprocess

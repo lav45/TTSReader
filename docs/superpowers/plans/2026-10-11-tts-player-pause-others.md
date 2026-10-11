@@ -233,10 +233,10 @@ shutdown                  → таймер снят; pause.resume(); pause.stop(
 - [ ] `PlayerSettings.save` пишет ровно ключи `tail` и `autoplay`
 - [ ] на экране настроек нет поля «Приглушать другие звуки до, %»; остальные поля и «Сохранить»
       работают (GUI-тесты экрана настроек проходят)
-- [ ] `grep -rniE 'duck|приглуш' tts_player tests` — пусто
+- [ ] `grep -rniE 'duck|приглуш' tts_player tests` — пусто, кроме теста обратной совместимости в `tests/test_player_settings.py`
 
 **Verify:** `python3 -m unittest discover -s tests` → `OK`;
-`grep -rniE 'duck|приглуш' tts_player tests` → пусто
+`grep -rniE 'duck|приглуш' tts_player tests | grep -v '^tests/test_player_settings.py'` → пусто (тест обратной совместимости знает старый ключ)
 
 **Steps:**
 

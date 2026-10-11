@@ -1,4 +1,5 @@
 """Порядок выхода в run(): свой текст раньше плеера, даже если его shutdown упал."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import unittest
 
 from tts_player.__main__ import run

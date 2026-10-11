@@ -1,4 +1,5 @@
 """Тесты Sessions: реестр сессий плеера и файл sessions.json (контракт 15)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import tempfile
