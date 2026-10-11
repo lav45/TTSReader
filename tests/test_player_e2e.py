@@ -463,7 +463,10 @@ class PlayerE2ETest(PlayerProcessCase):
         paused_at = time.monotonic()
         self.played(1)
         self.assertGreaterEqual(time.monotonic() - paused_at, 2.5)
+        self.next_line("ended ")
+        ended_at = time.monotonic()
         self.wait_status(other, "Playing")
+        self.assertGreaterEqual(time.monotonic() - ended_at, 4.5)
         self.assertEqual(["Pause", "Play"], other.calls)
 
     def test_sigterm_exits_0(self) -> None:

@@ -848,12 +848,14 @@ class Player:
 
     def _on_others_paused(self, paused: bool) -> None:
         """Ответ pause_playing. Плеер звучит сам и кто-то встал — PAUSE_GAP_SECONDS тишины
-        (в удержании и в idle звука этого плеера нет — тишину выдерживать некому); замолчал,
-        пока ждал ответа, — продолжение через RESUME_DELAY_SECONDS."""
+        (в удержании и в idle звука этого плеера нет — тишину выдерживать некому); прежние 3 с
+        ещё идут (пауза пользователя и снова ▶, пока другой плеер уже не держится) — звук по
+        ним, второго отсчёта нет. Замолчал, пока ждал ответа, — продолжение через
+        RESUME_DELAY_SECONDS."""
         self._pausing = False
         if not self._speaking():
             self._resume_later()
-        elif paused and self._status == "playing":
+        elif paused and self._status == "playing" and not self._gap_id:
             self._gap_id = GLib.timeout_add_seconds(self.PAUSE_GAP_SECONDS, self._gap_over)
         self._changed()
 

@@ -1250,6 +1250,23 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual([(B0, 0.0)], self.playback.starts)
         self.assertEqual(["pause_playing"], self.pause.calls)
 
+    def test_new_pause_during_gap_keeps_same_gap(self) -> None:
+        """В тишине 3 с другой плеер больше не держится (пользователь сам его тронул), ⏸ —
+        продолжать некого; ▶ в те же 3 с — новая пауза, но отсчёт прежний."""
+        self.start_with(A0, A1)
+        self.pause.answer(True)
+        self.pause.holding = False
+        self.player.toggle_play_pause()
+        self.assertEqual([], self.timers(5))
+        self.player.toggle_play_pause()
+        self.assertEqual(["pause_playing", "pause_playing"], self.pause.calls)
+        self.pause.answer(True)
+        self.assertEqual(1, len(self.timers(3)))
+        self.fire(3)
+        self.assertEqual([(A0, 0.0)], self.playback.starts)
+        self.player.shutdown()
+        self.assertEqual([], self.removed())  # снимать нечего: единственный отсчёт кончился
+
     def test_seek_during_gap_sounds_from_new_position_after_gap(self) -> None:
         self.start_with(A0, A1)
         self.pause.answer(True)
@@ -1411,6 +1428,7 @@ class PlayerMprisTest(PlayerCase):
         self.player = Player(self.runtime, None, pause=pause,
                              sessions=Sessions(self.runtime / "sessions.json"),
                              daemon_queue=self.daemon, daemon_settings=self.settings)
+        self.addCleanup(self.player.shutdown)
         self.player.add_session("S", "/w/proj")
         self.player.select_session("S")
         self.playback = self.player._playback
@@ -1440,7 +1458,6 @@ class PlayerMprisTest(PlayerCase):
         self.fire_last(Player.RESUME_DELAY_SECONDS)
         self.spin_until(lambda: self.other.status == "Playing")
         self.assertEqual(["Pause", "Play"], self.other.calls)
-        self.player.shutdown()
 
 
 class PlayerHoldTest(PlayerCase):
