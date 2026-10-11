@@ -78,6 +78,9 @@ class Player:
     (deferred), а очередь без фокуса режется до tail, как у закрытой папки. Отжатие звучащее
     не обрывает: оно доигрывает и встаёт; нажатие звук не начинает, отложенные остаются
     отложенными.
+    Кнопка ⏹ (stop) снимает курсор: звук стоп, текущего нет, idle, как после конца
+    последнего; при нажатой кнопке сам начнётся ответ новее снятого, а снятое — нет, пока
+    не начата или не выбрана дорожка (_stopped, _after_stopped).
 
     Ошибка файла — пропуск. Отказ вывода звука — тот же файл с той же позиции через
     RETRY_SECONDS, строка error — одна на отказ, а не на каждый повтор. Отказ кончается,
@@ -168,6 +171,7 @@ class Player:
             self._hook_tasks = HookTasks(hook_tasks_dir, self._on_hook_task)
         self._status: Status = "idle"
         self._current: Message | None = None
+        self._stopped: Message | None = None  # снят кнопкой ⏹: сам не начинается (stop)
         # Позиция, с которой запущен _file (без файла — курсор); _file_base — начало
         # _file в сообщении. _sentence — предложение _file или последнее доигравшее.
         self._position = 0.0
@@ -497,10 +501,25 @@ class Player:
         if current is not None:
             self._leave(current)
         self._current = message
+        self._stopped = None
         self._sentence = None
         self._position = 0.0
         self._status = "stopped"
         self._output_down = False  # повтор снят _leave: отказ вывода больше не показывается
+        self._changed()
+
+    def stop(self) -> None:
+        """Кнопка ⏹: звук стоп, текущего нет, idle — то же состояние, что после конца
+        последнего сообщения: при нажатой кнопке автовоспроизведения сам начнётся ответ новее
+        снятого (_after_stopped), очередь без фокуса режется до tail. Снятое прослушано по
+        правилу клика на другую строку (_leave); само оно не начинается, пока не начата или
+        не выбрана дорожка. Без текущего — ничего."""
+        current = self._current
+        if current is None:
+            return
+        self._leave(current)
+        self._reset_cursor()
+        self._stopped = current
         self._changed()
 
     def seek(self, position_s: float) -> None:
@@ -526,6 +545,7 @@ class Player:
     def _reset_cursor(self) -> None:
         """Текущего нет, статус idle (после _halt): очередь очищена или сессии больше нет."""
         self._current = None
+        self._stopped = None
         self._sentence = None
         self._position = 0.0
         self._status = "idle"
@@ -546,7 +566,7 @@ class Player:
             self._end_if_waiting()
         elif self._status == "idle" and self._starts_by_itself():
             message = self._queue.message_of(sentence.task_id)
-            if message is not None and not message.heard:
+            if message is not None and not message.heard and self._after_stopped(message):
                 self._begin(message, requested=False)
         elif self._waiting():
             following = self._next_sentence()
@@ -555,6 +575,15 @@ class Player:
             else:
                 self._message_end()
         self._changed()
+
+    def _after_stopped(self, message: Message) -> bool:
+        """Сообщение новее снятого кнопкой ⏹ (или снятого нет, или его уже нет в очереди):
+        автопереход в idle идёт только вперёд от остановленного."""
+        messages = self._queue.messages
+        stopped = self._stopped
+        if not any(stopped is m for m in messages):
+            return True
+        return messages.index(message) > messages.index(stopped)
 
     def _claim_unknown(self, sentence: Sentence) -> Sentence:
         if sentence.task_id != UNKNOWN_TASK:
@@ -666,6 +695,7 @@ class Player:
         следующее), кроме отложенного: его текст демону ещё не отдавался."""
         self._queue.start(message)
         self._current = message
+        self._stopped = None
         self._status = "playing"
         if self._voice_if_due(message, requested):
             position = 0.0

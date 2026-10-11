@@ -1526,6 +1526,102 @@ class PlayerAutoplayTest(PlayerCase):
         self.assertEqual(1, len(self.playback.starts))
 
 
+class PlayerStopTest(PlayerCase):
+    """Кнопка ⏹ (Player.stop): звук стоп, текущего нет, idle; при нажатой ⏩ сам играет ответ
+    новее остановленного, а остановленный — нет, пока не начата дорожка."""
+    B1 = "1000000000000000006_bb_tts_queue_S_bb_s1.wav"
+
+    def test_stop_while_playing_halts_and_drops_cursor(self) -> None:
+        self.start_with(A0)
+        self.player.stop()
+        state = self.states[-1]
+        self.assertEqual(("idle", None, 0.0), (state.status, state.current, state.position_s))
+        self.assertIsNone(self.playback.playing)
+
+    def test_stop_without_current_changes_nothing(self) -> None:
+        self.player.start()
+        count = len(self.states)
+        self.player.stop()
+        self.assertEqual(count, len(self.states))
+
+    def test_stop_marks_started_complete_message_heard(self) -> None:
+        self.start_with(A0)
+        self.end_by_count()
+        self.player.stop()
+        self.assertTrue(self.state().messages[0].heard)
+
+    def test_stop_keeps_growing_message_unheard(self) -> None:
+        self.start_with(A0)
+        self.player.stop()
+        self.assertFalse(self.state().messages[0].heard)
+
+    def test_after_stop_on_pause_new_answer_plays_by_itself(self) -> None:
+        self.start_with(A0)
+        self.end_by_count()
+        self.player.toggle_play_pause()
+        self.player.stop()
+        self.arrive(B0)
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
+
+    def test_after_stop_with_autoplay_off_new_answer_is_deferred(self) -> None:
+        self.start_with(A0)
+        self.player.apply_prefs(Prefs(autoplay=False))
+        self.player.stop()
+        self.player._on_hook_task(HookTask("h1", 1.0, "S", "proj", "text h1", "p", 1.0,
+                                           {"id": "h1"}))
+        state = self.state()
+        self.assertEqual(("idle", None), (state.status, state.current))
+        self.assertTrue(state.messages[-1].deferred)
+        self.assertEqual(1, len(self.daemon.puts))
+
+    def test_stopped_growing_message_does_not_restart_on_its_next_sentence(self) -> None:
+        self.start_with(A0)
+        self.player.stop()
+        self.arrive(A1)
+        state = self.state()
+        self.assertEqual(("idle", None), (state.status, state.current))
+        self.assertEqual([A0], self.playback.played)
+        self.assertEqual(2, len(state.messages[0].sentences))
+        self.arrive(C0)
+        self.assertEqual(("playing", "cc"), (self.state().status, self.task()))
+
+    def test_newer_growing_message_starts_on_its_next_sentence(self) -> None:
+        self.start_with(A0, B0)
+        self.player.stop()
+        self.arrive(self.B1)
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
+        self.assertEqual([A0, B0], self.playback.played)
+
+    def test_play_after_stop_starts_last_and_it_keeps_growing(self) -> None:
+        self.start_with(A0)
+        self.player.stop()
+        self.player.toggle_play_pause()
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
+        self.finish()
+        self.arrive(A1)
+        self.assertEqual([A0, A0, A1], self.playback.played)
+
+    def test_stop_while_own_text_holds_starts_nothing_until_release(self) -> None:
+        self.start_with(A0, B0)
+        self.player.hold()
+        self.player.stop()
+        self.arrive(self.B1)
+        self.assertEqual(("idle", None), (self.state().status, self.state().current))
+        self.player.release()
+        self.assertEqual("idle", self.state().status)
+        self.arrive(C0)
+        self.assertEqual(("playing", "cc"), (self.state().status, self.task()))
+
+    def test_stop_trims_queue_to_tail(self) -> None:
+        self.start_with(A0, B0, C0)
+        self.end_by_count("cc")
+        self.player.toggle_play_pause()
+        self.player.apply_prefs(Prefs(tail=1))
+        self.assertEqual(3, len(self.state().messages))
+        self.player.stop()
+        self.assertEqual(["cc"], [self.task_of(m) for m in self.state().messages])
+
+
 class PlayerHookTasksTest(PlayerCase):
     """Задача хука → задача демону и сообщение с текстом (контракты (12), (13))."""
 
