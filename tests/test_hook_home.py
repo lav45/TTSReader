@@ -1,4 +1,5 @@
 """Тесты HookHome: runtime_dir и tts_root — временные каталоги, часы подставные."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import os
 import stat
 import tempfile

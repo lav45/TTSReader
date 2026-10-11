@@ -1,4 +1,5 @@
 """Тесты synth_worker: процесс синтеза с поддельным пакетом claude_code_tts (реальный синтез не запускается)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import subprocess

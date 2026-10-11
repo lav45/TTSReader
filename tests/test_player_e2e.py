@@ -1,4 +1,5 @@
 """Приёмка плеера через стык: daemon-bin/paplay -> inbox -> процесс tts_player -> строки stderr."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import queue

@@ -1,4 +1,5 @@
 """Тесты Ducker: заглушка pactl первой в PATH, настоящий pactl не вызывается никогда."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import tempfile

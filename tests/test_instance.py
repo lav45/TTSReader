@@ -1,4 +1,5 @@
 """Блокировка единственности (tts_player.instance) на временных каталогах."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import multiprocessing
 import os
 import threading

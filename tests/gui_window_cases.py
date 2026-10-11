@@ -5,6 +5,7 @@
 ничего не попадает. Имя не test_*.py: discover модуль не подбирает. На настоящем
 дисплее — только вручную, с TTS_PLAYER_GUI_TESTS=1. Значок XApp в тестах не создаётся.
 """
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import locale
 import os
 import unittest

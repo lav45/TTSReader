@@ -1,4 +1,5 @@
 """Тесты PlayerSettings: файл настроек плеера (tail, duck, autoplay)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import tempfile

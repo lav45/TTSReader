@@ -1,4 +1,5 @@
 """Тесты обёртки daemon-bin/paplay: предложение уходит в буфер плеера, звук не играет."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import os
 import subprocess
 import tempfile

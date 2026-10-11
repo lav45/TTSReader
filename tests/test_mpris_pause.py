@@ -1,4 +1,5 @@
 """Тесты MprisPause: поддельные плееры на временной шине Gio.TestDBus (tests/mpris_fake.py)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import time
 import unittest
 from unittest import mock

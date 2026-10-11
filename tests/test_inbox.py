@@ -1,4 +1,5 @@
 """Тесты Inbox: забор предложений из буфера плеера в store/ и выдача по порядку приёма."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import os
 import subprocess
 import tempfile

@@ -1,6 +1,7 @@
 """Тесты TextSpeaker (контракт (10)): поддельный процесс синтеза — скрипт во временном каталоге,
 звук — Playback с fakesink, главный плеер — запись hold/release или настоящий Player с
 заглушкой MprisPause (D-Bus не зовётся)."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import sys

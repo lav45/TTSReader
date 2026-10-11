@@ -4,6 +4,7 @@ broadwayd — свой дисплей в памяти с HTTP на 127.0.0.1: о
 пользователя. Подпроцесс тестов идёт без DISPLAY/WAYLAND_DISPLAY, с GDK_BACKEND=broadway
 и своим XDG_RUNTIME_DIR (там сокет broadwayd).
 """
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import os
 import select
 import shutil

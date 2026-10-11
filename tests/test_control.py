@@ -1,4 +1,5 @@
 """Тесты ControlRequests: забор запросов session add/remove из control/."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import logging
 import os

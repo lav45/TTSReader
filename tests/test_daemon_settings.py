@@ -1,4 +1,5 @@
 """Тесты DaemonSettings: голоса, активная персона и скорость из настроек claude-tts."""
+import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
 import stat
