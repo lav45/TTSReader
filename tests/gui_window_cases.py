@@ -227,7 +227,7 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual([w.settings_button, w.clear_button, w.text_button], row.get_children())
         self.assertFalse(hasattr(w, "end_session_button"))
 
-    def test_clear_button_follows_active_session(self) -> None:
+    def test_clear_button_disabled_without_active_session_even_while_playing(self) -> None:
         w = self.window
         self.assertTrue(w.clear_button.get_sensitive())
         self.player.change(state("playing", self.b, [self.a, self.b, self.c], 3.0,
