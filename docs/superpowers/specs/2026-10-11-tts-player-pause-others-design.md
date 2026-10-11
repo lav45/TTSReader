@@ -1,6 +1,6 @@
 # TTS Player — пауза других плееров вместо приглушения
 
-**Статус:** контракт (9') реализован 2026-10-11 в ветке pause-others; флажок (6) — следующий срез.
+**Статус:** реализовано 2026-10-11: (9') и (6) в ветке pause-others-checkbox.
 
 ## Задача
 
@@ -98,7 +98,7 @@ Player._follow_status ──(начал звучать / замолчал)──
 ```
 было   {"tail": <целое 1–20>, "duck": <целое 0–100>, "autoplay": <true|false>}
 стало  {"tail": <целое 1–20>, "autoplay": <true|false>, "pause_others": <true|false>}
-нет ключа / не true|false → pause_others = true, строка в stderr (как autoplay)
+нет ключа → pause_others = true без строки в журнале; не true|false → true и строка в журнале (как autoplay)
 имя ключа — моё: по образцу соседей, «pause» один спутался бы с паузой самого плеера
 ```
 
