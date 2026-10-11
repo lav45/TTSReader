@@ -1333,6 +1333,17 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual([], self.timers(3))
         self.assertEqual([(A0, 0.0)], self.playback.starts)
 
+    def test_unchecked_while_answer_pending_and_speech_stopped_resumes_on_answer(self) -> None:
+        self.start_with(A0, A1)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.player.toggle_play_pause()
+        self.player.apply_prefs(Prefs(pause_others=False))
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.pause.answer(True)
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(3))
+
     def test_checked_during_speech_pauses_from_next_speech_start(self) -> None:
         self.player.apply_prefs(Prefs(pause_others=False))
         self.start_with(A0, A1)
