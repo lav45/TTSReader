@@ -114,6 +114,11 @@ class Player:
     его звук идёт своим Playback, ворота держат только звук этого плеера. Замолчал до ответа
     pause_playing — продолжение решает ответ. Решает одно место — _follow_status из _changed,
     после которого видна каждая смена статуса.
+    Флажок pause_others (apply_prefs, контракт (6)): снят — речь других не трогает, звук сразу
+    (без pause_playing и без 3 с). Снят, пока другие стоят, — они продолжают сразу
+    (pause.resume без RESUME_DELAY_SECONDS), таймер продолжения и тишина 3 с сняты; снят, пока
+    ответ pause_playing не пришёл, — по ответу они продолжают сразу, без 3 с. Поставлен —
+    пауза со следующего начала речи, идущей речи не касается. То же значение ничего не меняет.
     Ворота звука: _start_file только запоминает файл и позицию (_due), Playback.play зовёт
     _follow_status, когда ответа не ждут и 3 с не идут. Поэтому команды в эти 3 с (⏸, клик и
     ▶, перемотка) меняют, что заиграет, а не когда: отсчёт не перезапускается, другие уже
@@ -186,6 +191,7 @@ class Player:
         self._pausing = False  # pause_playing вызван, ответа ещё нет
         self._gap_id = 0  # таймер PAUSE_GAP_SECONDS: идёт — звук ждёт
         self._resume_id = 0  # таймер RESUME_DELAY_SECONDS до pause.resume
+        self._pause_others = defaults.pause_others  # флажок паузы других (apply_prefs)
         # cwd очищенной `/clear` активной сессии: сессия оттуда станет активной вместо неё.
         # Инвариант: ожидание замены => активной сессии нет (ставится только при снятии
         # активной, любая активация его снимает)
@@ -195,13 +201,15 @@ class Player:
         self._sent_in_run: set[Message] = set()
 
     def apply_prefs(self, prefs: Prefs) -> None:
-        """Настройки плеера: хвост очереди каждой сессии, кнопка автовоспроизведения;
-        играющее не трогается. Очереди без фокуса режутся до нового tail сразу, с фокусом —
+        """Настройки плеера: хвост очереди каждой сессии, кнопка автовоспроизведения, флажок
+        паузы других плееров; играющее не трогается. Флажок снят — другие продолжают сразу, звук
+        без тишины 3 с (_follow_status); поставлен — пауза со следующего начала речи. Очереди без фокуса режутся до нового tail сразу, с фокусом —
         хвост начатых постепенно (MessageQueue.start); отжатая кнопка снимает фокус (_focused),
         и очередь режется тут же. Нажатие звук не начинает: отсюда путь только к обрезке и
         окну (_changed)."""
         self._tail = prefs.tail
         self._autoplay = prefs.autoplay
+        self._pause_others = prefs.pause_others
         for queue in [*self._queues.values(), self._no_session]:
             queue.tail = prefs.tail
         self._changed()
@@ -820,7 +828,10 @@ class Player:
     def _follow_status(self) -> None:
         """Пауза других по статусу и ворота звука: начал звучать — снять таймер продолжения
         или поставить других на паузу; замолчал — продолжение через RESUME_DELAY_SECONDS.
-        Запомненный файл звучит, когда ответа паузы не ждут и PAUSE_GAP_SECONDS не идут."""
+        Запомненный файл звучит, когда ответа паузы не ждут и PAUSE_GAP_SECONDS не идут. Флажок
+        pause_others снят — сначала другие отпущены (_release_others)."""
+        if not self._pause_others:
+            self._release_others()
         speaking = self._speaking()
         if speaking != self._spoke:
             self._spoke = speaking
@@ -837,10 +848,10 @@ class Player:
 
     def _speech_started(self) -> None:
         """Таймер продолжения идёт — другие ещё стоят: снять его. Ответа ждут — паузу не
-        повторять. Иначе — pause_playing, звук ждёт ответа."""
+        повторять. Иначе — pause_playing, звук ждёт ответа; флажок снят — другие не трогаются."""
         if self._resume_id:
             self._cancel_resume()
-        elif self._pause is not None and not self._pausing:
+        elif self._pause is not None and self._pause_others and not self._pausing:
             self._pausing = True
             self._pause.pause_playing(self._on_others_paused)
 
@@ -849,11 +860,12 @@ class Player:
         (в удержании и в idle звука этого плеера нет — тишину выдерживать некому); прежние 3 с
         ещё идут (пауза пользователя и снова ▶, пока другой плеер уже не держится) — звук по
         ним, второго отсчёта нет. Замолчал, пока ждал ответа, — продолжение через
-        RESUME_DELAY_SECONDS."""
+        RESUME_DELAY_SECONDS. Флажок снят, пока ждали, — тишины нет, другие отпускает
+        _follow_status из _changed."""
         self._pausing = False
         if not self._speaking():
             self._resume_later()
-        elif paused and self._status == "playing" and not self._gap_id:
+        elif paused and self._pause_others and self._status == "playing" and not self._gap_id:
             self._gap_id = GLib.timeout_add_seconds(self.PAUSE_GAP_SECONDS, self._gap_over)
         self._changed()
 
@@ -863,8 +875,10 @@ class Player:
         return GLib.SOURCE_REMOVE
 
     def _resume_later(self) -> None:
-        """Таймер продолжения, если пауза кого-то держит; ответа ждут — решит ответ."""
-        if self._pause is None or self._pausing or not self._pause.holding:
+        """Таймер продолжения, если пауза кого-то держит; ответа ждут — решит ответ; флажок
+        снят — другие уже отпущены (_release_others)."""
+        if (self._pause is None or not self._pause_others or self._pausing
+                or not self._pause.holding):
             return
         self._resume_id = GLib.timeout_add_seconds(self.RESUME_DELAY_SECONDS, self._resume_others)
 
@@ -872,6 +886,18 @@ class Player:
         self._resume_id = 0
         self._pause.resume()
         return GLib.SOURCE_REMOVE
+
+    def _release_others(self) -> None:
+        """Флажок pause_others снят: тишина 3 с и таймер продолжения сняты, пауза других
+        отпущена сразу. Ответа pause_playing ждут — отпустит _follow_status после ответа
+        (другие появляются в pause.holding с ответом). Повторный вызов ничего не делает."""
+        if self._gap_id:
+            GLib.source_remove(self._gap_id)
+            self._gap_id = 0
+        if self._resume_id:
+            self._cancel_resume()
+        if self._pause is not None and not self._pausing and self._pause.holding:
+            self._pause.resume()
 
     def _cancel_resume(self) -> None:
         GLib.source_remove(self._resume_id)
