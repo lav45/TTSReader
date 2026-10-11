@@ -69,6 +69,9 @@ class FakePlayer:
     def toggle_play_pause(self) -> None:
         self.calls.append(("toggle_play_pause",))
 
+    def stop(self) -> None:
+        self.calls.append(("stop",))
+
     def apply_prefs(self, prefs: Prefs) -> None:
         """Как Player: настройки применены, окно получает новый снимок."""
         self.calls.append(("apply_prefs", prefs))
@@ -414,19 +417,18 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual(position_label(snapshot), w.position_label_widget.get_text())
         self.assertEqual(play_pause_label(snapshot), w.play_pause_button.get_label())
 
-    def test_transport_row_is_position_left_then_play_pause_right(self) -> None:
-        """Кнопок ⏮/⏭ нет (2026-10-10, ими не пользовались): в ряду время, play/pause и ⏩
+    def test_transport_row_is_position_left_then_stop_play_pause_autoplay_right(self) -> None:
+        """Кнопок ⏮/⏭ нет (2026-10-10, ими не пользовались): в ряду время, ⏹, play/pause и ⏩
         автовоспроизведения — последней справа."""
         w = self.window
         row = w.play_pause_button.get_parent()
-        self.assertEqual([w.position_label_widget, w.play_pause_button, w.autoplay_button],
-                         row.get_children())
-        self.assertEqual(Gtk.PackType.END,
-                         row.child_get_property(w.autoplay_button, "pack-type"))
+        self.assertEqual([w.position_label_widget, w.stop_button, w.play_pause_button,
+                          w.autoplay_button], row.get_children())
         self.assertEqual(Gtk.PackType.START,
                          row.child_get_property(w.position_label_widget, "pack-type"))
-        self.assertEqual(Gtk.PackType.END,
-                         row.child_get_property(w.play_pause_button, "pack-type"))
+        for button in (w.autoplay_button, w.play_pause_button, w.stop_button):
+            self.assertEqual(Gtk.PackType.END, row.child_get_property(button, "pack-type"))
+        self.assertEqual("⏹", w.stop_button.get_label())
         for name in ("pause_button", "play_stop_button", "prev_button", "next_button"):
             self.assertFalse(hasattr(w, name), name)
 
@@ -501,6 +503,15 @@ class PlayerWindowTest(unittest.TestCase):
             self.player.change(snapshot)
             self.assertEqual(label, w.play_pause_button.get_label(), snapshot.status)
             self.assertEqual(enabled, w.play_pause_button.get_sensitive(), snapshot.status)
+
+    def test_stop_button_sensitive_with_current_and_click_stops(self) -> None:
+        w = self.window
+        self.player.change(state("idle", None, [self.a]))
+        self.assertFalse(w.stop_button.get_sensitive())
+        self.player.change(state("paused", self.a, [self.a]))
+        self.assertTrue(w.stop_button.get_sensitive())
+        w.stop_button.clicked()
+        self.assertEqual([("stop",)], self.player.calls)
 
     def test_close_hides_window(self) -> None:
         self.window.show_all()

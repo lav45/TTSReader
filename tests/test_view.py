@@ -8,7 +8,7 @@ from tts_player.sessions import Session
 from tts_player.text_speaker import TextState
 from tts_player.view import (MessageRow, SessionRow, clear_enabled, play_pause_enabled,
                              play_pause_label, position_label, rows, session_rows,
-                             text_play_enabled,
+                             stop_enabled, text_play_enabled,
                              text_play_pause_label, text_position_label, tree_rows)
 
 CREATED_AT = 1_700_000_000.0
@@ -164,6 +164,13 @@ class ControlsTest(unittest.TestCase):
         heard, unheard = message("a", heard=True), message("b")
         self.assertTrue(play_pause_enabled(state("idle", messages=[heard, unheard])))
         self.assertTrue(play_pause_enabled(state("idle", messages=[heard])))
+
+    def test_stop_enabled_only_with_current(self):
+        """⏹ снимает курсор: есть текущее — в любом статусе, доигранное в idle тоже."""
+        m = message(heard=True)
+        for status in ("playing", "paused", "stopped", "idle"):
+            self.assertTrue(stop_enabled(state(status, m, messages=[m])), status)
+        self.assertFalse(stop_enabled(state("idle", messages=[m])))
 
 
 if __name__ == "__main__":

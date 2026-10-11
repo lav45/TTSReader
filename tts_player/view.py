@@ -128,6 +128,11 @@ def play_pause_enabled(state: PlayerState) -> bool:
     return state.current is not None or bool(state.messages)
 
 
+def stop_enabled(state: PlayerState) -> bool:
+    """Кнопке ⏹ есть что снимать: есть текущее (Player.stop)."""
+    return state.current is not None
+
+
 def text_position_label(state: TextState) -> str:
     return _clock(state.position_s, state.length_s)
 
