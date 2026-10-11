@@ -28,6 +28,11 @@ class FakeBus:
         self._bus.up()
         self._connections: list[Gio.DBusConnection] = []
 
+    @property
+    def address(self) -> str:
+        """Адрес шины — для DBUS_SESSION_BUS_ADDRESS процесса плеера в e2e."""
+        return self._bus.get_bus_address()
+
     def connect(self) -> Gio.DBusConnection:
         flags = Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
         connection = Gio.DBusConnection.new_for_address_sync(self._bus.get_bus_address(), flags, None, None)

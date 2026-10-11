@@ -1,6 +1,7 @@
 """Тесты Player: задачи хука в демон и переозвучка (заглушки DaemonQueue и DaemonSettings),
 воспроизведение по курсору, кнопки, снимок состояния, выход процесса, повтор при отказе вывода
-звука, приглушение чужих звуков на время playing (заглушка Ducker)."""
+звука, пауза других плееров на время речи (заглушка MprisPause; сквозной — с настоящим на
+Gio.TestDBus)."""
 import json
 import sys
 import tempfile
@@ -20,10 +21,12 @@ from tts_player.daemon_settings import ActiveVoice  # noqa: E402
 from tts_player.inbox import NAME_PATTERN  # noqa: E402
 from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
+from tts_player.mpris_pause import MprisPause  # noqa: E402
 from tts_player.player import Player, PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sentence_counter import SentenceCounter  # noqa: E402
 from tts_player.sessions import Session, Sessions  # noqa: E402
+from tests.mpris_fake import FakeBus, FakePlayer  # noqa: E402
 
 # <recv_ns>_<id задачи демона>_<имя WAV демона>; id задачи = token
 A0 = "1000000000000000001_aa_tts_queue_S_aa_s0.wav"
@@ -82,25 +85,29 @@ class FakePlayback:
         self.on_error(path, text, output_failed)
 
 
-class FakeDucker:
-    """Подменяет Ducker: запоминает вызовы, pactl не зовёт никогда."""
+class FakePause:
+    """Подменяет MprisPause: журнал вызовов; ответ на pause_playing даёт тест (answer)."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple] = []
-        self.has_orphans = False
-        self.orphans_changed_at = 0.0
+        self.calls: list[str] = []
+        self.holding = False
+        self._done: list[Callable[[bool], None]] = []
 
-    def watch(self) -> None:
-        self.calls.append(("watch",))
+    def pause_playing(self, done: Callable[[bool], None]) -> None:
+        self.calls.append("pause_playing")
+        self._done.append(done)
 
-    def duck(self, percent: int) -> None:
-        self.calls.append(("duck", percent))
+    def answer(self, paused: bool) -> None:
+        """Ответ на самый ранний pause_playing: paused — кто-то встал на паузу и запомнен."""
+        self.holding = self.holding or paused
+        self._done.pop(0)(paused)
 
-    def refresh(self) -> None:
-        self.calls.append(("refresh",))
+    def resume(self) -> None:
+        self.calls.append("resume")
+        self.holding = False
 
-    def restore(self) -> None:
-        self.calls.append(("restore",))
+    def stop(self) -> None:
+        self.calls.append("stop")
 
 
 class FakeDaemonQueue:
@@ -1149,16 +1156,17 @@ class PlayerPrefsTest(PlayerCase):
 
 
 
-class PlayerDuckingTest(PlayerCase):
-    """Приглушение (контракт (9)): вход в playing — duck(prefs.duck), выход — restore,
-    пока playing — refresh по таймеру раз в 1 с."""
+class PlayerPauseOthersTest(PlayerCase):
+    """Пауза других плееров (контракт (9')): начало речи — pause_playing, звук ждёт ответа;
+    кто-то встал — звук через 3 с, ничего не встало — сразу; тишина — resume через 5 с,
+    речь снова до них — таймер снят, новой паузы нет. Таймеры — мок GLib."""
 
     def setUp(self) -> None:
         super().setUp()
-        self.ducker = FakeDucker()
-        self.now = 0.0
-        self.player = Player(self.runtime, None, ducker=self.ducker,
-                             clock=lambda: self.now,
+        self.pause = FakePause()
+        ids = iter(range(100, 1000))
+        self.glib.timeout_add_seconds.side_effect = lambda seconds, callback, *data: next(ids)
+        self.player = Player(self.runtime, None, pause=self.pause,
                              sessions=Sessions(self.runtime / "sessions.json"),
                              daemon_queue=self.daemon, daemon_settings=self.settings)
         self.player.add_session("S", "/w/proj")
@@ -1166,190 +1174,273 @@ class PlayerDuckingTest(PlayerCase):
         self.playback = self.player._playback
         self.player.on_change = self.states.append
 
-    def calls(self) -> list[tuple]:
-        return [c for c in self.ducker.calls if c != ("refresh",)]
+    def timers(self, seconds: int) -> list[tuple[int, Callable[[], bool]]]:
+        """Таймеры на seconds секунд: (id, колбэк), в порядке постановки."""
+        calls = self.glib.timeout_add_seconds.call_args_list
+        return [(index + 100, c.args[1]) for index, c in enumerate(calls) if c.args[0] == seconds]
 
-    def refresh_timers(self) -> list:
-        """Колбэки таймеров refresh (раз в 1 с), в порядке постановки."""
-        return [c.args[1] for c in self.glib.timeout_add_seconds.call_args_list
-                if c.args[0] == 1]
+    def removed(self) -> list[int]:
+        return [c.args[0] for c in self.glib.source_remove.call_args_list]
 
-    def test_start_of_playback_ducks_once_with_default_percent(self) -> None:
-        self.start_with(A0, A1, B0)
+    def fire(self, seconds: int) -> None:
+        """Срабатывание последнего таймера на seconds секунд."""
+        timer_id, callback = self.timers(seconds)[-1]
+        self.assertNotIn(timer_id, self.removed(), "таймер уже снят")
+        self.assertEqual(self.glib.SOURCE_REMOVE, callback())
+
+    def speak_after_gap(self, *names: str) -> None:
+        """Старт с предложениями names: кто-то встал на паузу, 3 с прошли, звук пошёл."""
+        self.start_with(*names)
+        self.pause.answer(True)
+        self.fire(Player.PAUSE_GAP_SECONDS)
+
+    def test_constants(self) -> None:
+        self.assertEqual((3, 5), (Player.PAUSE_GAP_SECONDS, Player.RESUME_DELAY_SECONDS))
+
+    def test_start_of_speech_pauses_once_and_sound_waits_for_answer(self) -> None:
+        self.start_with(A0, A1)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual([], self.playback.played)
+
+    def test_paused_someone_sound_after_gap_from_message_position(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(True)
+        self.assertEqual([], self.playback.played)
+        self.assertEqual(1, len(self.timers(3)))
+        self.fire(3)
+        self.assertEqual([(A0, 0.0)], self.playback.starts)
         self.finish()
-        self.finish()
-        self.assertEqual([("duck", 30)], self.calls())
+        self.assertEqual([A0, A1], self.playback.played)
+        self.assertEqual(["pause_playing"], self.pause.calls)
 
-    def test_pause_restores_and_resume_ducks(self) -> None:
+    def test_nobody_paused_sound_at_once(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(False)
+        self.assertEqual([(A0, 0.0)], self.playback.starts)
+        self.assertEqual([], self.timers(3))
+
+    def test_state_during_gap_is_playing_at_message_start(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(True)
+        self.playback.at = 0.4  # не звучит: позиция — курсор
+        state = self.state()
+        self.assertEqual(("playing", "aa", 0.0), (state.status, self.task(), state.position_s))
+        self.assertEqual(self.states[-1], state)
+
+    def test_user_pause_during_gap_no_sound_and_others_resume_after_5s(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(True)
+        self.player.toggle_play_pause()
+        self.assertEqual("paused", self.state().status)
+        self.fire(3)
+        self.assertEqual([], self.playback.played)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.fire(5)
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+
+    def test_row_click_and_play_during_gap_sounds_after_same_gap(self) -> None:
         self.start_with(A0, B0)
-        self.player.toggle_play_pause()
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
-        self.player.toggle_play_pause()
-        self.assertEqual([("duck", 30), ("restore",), ("duck", 30)], self.calls())
+        self.pause.answer(True)
+        self.play_at(1)
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
+        self.assertEqual([], self.playback.played)
+        self.assertEqual(1, len(self.timers(3)))
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.fire(3)
+        self.assertEqual([(B0, 0.0)], self.playback.starts)
+        self.assertEqual(["pause_playing"], self.pause.calls)
 
-    def test_end_without_following_restores(self) -> None:
-        self.start_with(A0)
+    def test_seek_during_gap_sounds_from_new_position_after_gap(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(True)
+        self.player.seek(0.7)
+        self.assertEqual([], self.playback.played)
+        self.assertAlmostEqual(0.7, self.state().position_s)
+        self.fire(3)
+        self.assertEqual(A1, self.playback.starts[-1][0])
+        self.assertAlmostEqual(0.2, self.playback.starts[-1][1])
+
+    def test_pause_then_resume_timer_and_speech_again_cancels_it(self) -> None:
+        self.speak_after_gap(A0, A1)
+        self.player.toggle_play_pause()
+        self.assertEqual(1, len(self.timers(5)))
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.player.toggle_play_pause()
+        self.assertIn(self.timers(5)[0][0], self.removed())
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual([A0, A0], self.playback.played)
+
+    def test_end_of_last_message_resumes_after_5s(self) -> None:
+        self.speak_after_gap(A0)
         self.finish()
         self.end_by_count()
         self.assertEqual("idle", self.state().status)
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.fire(5)
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
-    def test_waiting_for_next_sentence_keeps_ducked(self) -> None:
-        self.start_with(A0)
+    def test_new_answer_within_5s_sounds_at_once_without_new_pause(self) -> None:
+        self.speak_after_gap(A0)
+        self.finish()
+        self.end_by_count()
+        self.arrive(B0)
+        self.assertEqual([A0, B0], self.playback.played)
+        self.assertIn(self.timers(5)[0][0], self.removed())
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual(1, len(self.timers(3)))
+
+    def test_stop_button_resumes_after_5s(self) -> None:
+        self.speak_after_gap(A0, B0)
+        self.player.stop()
+        self.fire(5)
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+
+    def test_row_click_stops_and_resumes_after_5s(self) -> None:
+        self.speak_after_gap(A0, B0)
+        self.player.play_message(self.player._queue.messages[1])
+        self.assertEqual("stopped", self.state().status)
+        self.fire(5)
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+
+    def test_speech_after_resume_pauses_again(self) -> None:
+        self.speak_after_gap(A0, A1)
+        self.player.toggle_play_pause()
+        self.fire(5)
+        self.player.toggle_play_pause()
+        self.assertEqual(["pause_playing", "resume", "pause_playing"], self.pause.calls)
+
+    def test_nothing_held_no_resume_timer(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(False)
+        self.player.toggle_play_pause()
+        self.assertEqual([], self.timers(5))
+
+    def test_waiting_for_sentence_of_growing_message_keeps_others_paused(self) -> None:
+        self.speak_after_gap(A0)
         self.finish()
         self.assertEqual("playing", self.state().status)
+        self.assertEqual([], self.timers(5))
         self.arrive(A1)
-        self.finish()
-        self.assertEqual([("duck", 30)], self.calls())
+        self.assertEqual([A0, A1], self.playback.played)
+        self.assertEqual(["pause_playing"], self.pause.calls)
 
-    def test_row_click_while_playing_restores_and_play_ducks_again(self) -> None:
-        self.start_with(A0, B0)
-        self.player.play_message(self.player._queue.messages[1])
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+    def test_speech_stops_before_answer_then_answer_starts_resume_timer(self) -> None:
+        self.start_with(A0, A1)
         self.player.toggle_play_pause()
-        self.assertEqual([("duck", 30), ("restore",), ("duck", 30)], self.calls())
+        self.assertEqual([], self.timers(5))
+        self.pause.answer(True)
+        self.assertEqual([], self.timers(3))
+        self.fire(5)
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
-    def test_clear_restores(self) -> None:
-        self.start_with(A0, B0)
-        self.player.clear()
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
-
-    def test_shutdown_while_playing_restores(self) -> None:
-        self.start_with(A0)
-        self.player.shutdown()
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
-        self.glib.source_remove.assert_called_with(42)
-
-    def test_shutdown_when_idle_does_not_restore_again(self) -> None:
-        self.player.start()
-        self.player.shutdown()
-        self.assertEqual([], self.calls())
-
-    def test_refresh_timer_only_while_playing(self) -> None:
-        self.player.start()
-        self.assertEqual([], self.refresh_timers())
-        self.arrive(A0)
-        self.arrive(B0)
-        timers = self.refresh_timers()
-        self.assertEqual(1, len(timers))
-        timers[0]()
-        self.assertEqual(("refresh",), self.ducker.calls[-1])
-        self.glib.source_remove.assert_not_called()
+    def test_speech_restarts_before_answer_no_second_pause(self) -> None:
+        self.start_with(A0, A1)
         self.player.toggle_play_pause()
-        self.glib.source_remove.assert_called_once_with(42)
         self.player.toggle_play_pause()
-        self.assertEqual(2, len(self.refresh_timers()))
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual([], self.playback.played)
+        self.pause.answer(False)
+        self.assertEqual([A0], self.playback.played)
+        self.assertEqual([], self.timers(5))
 
-    def watch_timers(self) -> list:
-        """Колбэки таймеров watch (раз в 2 с), в порядке постановки."""
-        return [c.args[1] for c in self.glib.timeout_add_seconds.call_args_list
-                if c.args[0] == 2]
+    # Удержание (контракт (10)): свой текст ставит других на паузу тем же путём, без 3 с.
 
-    def test_watch_timer_while_orphans_and_not_playing(self) -> None:
-        self.start_with(A0, B0)
-        self.ducker.has_orphans = True
-        self.assertEqual([], self.watch_timers())
-        self.player.toggle_play_pause()
-        timers = self.watch_timers()
-        self.assertEqual(1, len(timers))
-        self.assertEqual(self.glib.SOURCE_CONTINUE, timers[0]())
-        self.assertEqual(("watch",), self.ducker.calls[-1])
-        self.player.toggle_play_pause()
-        self.assertEqual(1, len(self.watch_timers()))
-        self.glib.source_remove.assert_any_call(42)
-
-    def test_watch_timer_removed_when_orphans_gone(self) -> None:
-        self.ducker.has_orphans = True
-        self.player.start()
-        timers = self.watch_timers()
-        self.assertEqual(1, len(timers))
-        self.ducker.has_orphans = False
-        self.assertEqual(self.glib.SOURCE_REMOVE, timers[0]())
-
-    def test_watch_stops_ten_minutes_after_last_orphan_change(self) -> None:
-        self.ducker.has_orphans = True
-        self.player.start()
-        timer = self.watch_timers()[0]
-        self.now = 599.0
-        self.assertEqual(self.glib.SOURCE_CONTINUE, timer())
-        self.now = 600.0
-        self.assertEqual(self.glib.SOURCE_REMOVE, timer())
-        self.player.apply_prefs(Prefs(duck=30))
-        self.assertEqual(1, len(self.watch_timers()))
-
-    def test_watch_not_started_when_orphans_are_old(self) -> None:
-        self.ducker.has_orphans = True
-        self.now = 700.0
-        self.player.start()
-        self.assertEqual([], self.watch_timers())
-
-    def test_watch_restarts_when_orphans_change(self) -> None:
-        self.ducker.has_orphans = True
-        self.now = 700.0
-        self.player.start()
-        self.ducker.orphans_changed_at = 690.0
-        self.player.apply_prefs(Prefs(duck=30))
-        self.assertEqual(1, len(self.watch_timers()))
-
-    def test_no_watch_timer_without_orphans(self) -> None:
-        self.player.start()
-        self.assertEqual([], self.watch_timers())
-
-    def test_shutdown_removes_watch_timer(self) -> None:
-        self.ducker.has_orphans = True
-        self.player.start()
-        self.player.shutdown()
-        self.glib.source_remove.assert_called_with(42)
-
-    def test_apply_prefs_new_duck_while_playing_reducks(self) -> None:
-        self.start_with(A0, B0)
-        self.player.apply_prefs(Prefs(duck=30))
-        self.assertEqual([("duck", 30)], self.calls())
-        self.player.apply_prefs(Prefs(duck=50))
-        self.assertEqual([("duck", 30), ("restore",), ("duck", 50)], self.calls())
-
-    def test_apply_prefs_while_paused_ducks_with_new_on_resume(self) -> None:
-        self.start_with(A0, B0)
-        self.player.toggle_play_pause()
-        self.player.apply_prefs(Prefs(duck=60))
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
-        self.player.toggle_play_pause()
-        self.assertEqual([("duck", 30), ("restore",), ("duck", 60)], self.calls())
-
-    # Удержание (контракт (10)): свой текст приглушает чужие потоки тем же Ducker с
-    # prefs.duck; у главного, ушедшего в hold из playing, приглушение не прерывается.
-
-    def test_hold_when_idle_ducks_and_release_restores(self) -> None:
-        self.player.start()
-        self.player.apply_prefs(Prefs(duck=40))
-        self.player.hold()
-        self.assertEqual([("duck", 40)], self.calls())
-        self.assertEqual(1, len(self.refresh_timers()))
-        self.player.release()
-        self.assertEqual([("duck", 40), ("restore",)], self.calls())
-
-    def test_hold_while_playing_keeps_one_duck(self) -> None:
-        self.start_with(A0, B0)
+    def test_hold_while_playing_does_not_pause_again(self) -> None:
+        self.speak_after_gap(A0, B0)
         self.player.hold()
         self.assertEqual("paused", self.state().status)
-        self.assertEqual([("duck", 30)], self.calls())
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual([], self.timers(5))
         self.player.release()
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+        self.fire(5)
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
-    def test_no_orphan_watch_while_held(self) -> None:
-        self.ducker.has_orphans = True
-        self.player.start()
-        self.assertEqual(1, len(self.watch_timers()))
-        self.player.hold()
-        self.glib.source_remove.assert_any_call(42)
-        self.player.release()
-        self.assertEqual(2, len(self.watch_timers()))
-
-    def test_shutdown_while_held_restores(self) -> None:
+    def test_hold_when_idle_pauses_once_without_gap(self) -> None:
         self.player.start()
         self.player.hold()
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.pause.answer(True)
+        self.assertEqual([], self.timers(3))
+        self.player.release()
+        self.fire(5)
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+
+    def test_shutdown_resumes_at_once_and_stops(self) -> None:
+        self.speak_after_gap(A0)
         self.player.shutdown()
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
+        self.assertEqual(["pause_playing", "resume", "stop"], self.pause.calls)
+        self.assertEqual([], self.timers(5))
+
+    def test_shutdown_removes_resume_timer(self) -> None:
+        self.speak_after_gap(A0, A1)
+        self.player.toggle_play_pause()
+        self.player.shutdown()
+        self.assertIn(self.timers(5)[0][0], self.removed())
+        self.assertEqual(["pause_playing", "resume", "stop"], self.pause.calls)
+
+    def test_shutdown_removes_gap_timer(self) -> None:
+        self.start_with(A0)
+        self.pause.answer(True)
+        self.player.shutdown()
+        self.assertIn(self.timers(3)[0][0], self.removed())
+        self.assertEqual([], self.playback.played)
+
+    def test_without_pause_sound_at_once(self) -> None:
+        self.player = Player(self.runtime, None, sessions=Sessions(self.runtime / "s2.json"),
+                             daemon_queue=self.daemon, daemon_settings=self.settings)
+        self.player.add_session("S", "/w/proj")
+        self.player.select_session("S")
+        self.playback = self.player._playback
+        self.start_with(A0)
+        self.assertEqual([A0], self.playback.played)
+        self.player.toggle_play_pause()
+        self.player.shutdown()
+        self.glib.timeout_add_seconds.assert_not_called()
+
+
+class PlayerMprisTest(PlayerCase):
+    """Сквозной: настоящий MprisPause и поддельный плеер на Gio.TestDBus; таймеры плеера —
+    мок GLib, шина — настоящий цикл GLib."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.bus = FakeBus()
+        self.addCleanup(self.bus.down)
+        self.other = FakePlayer(self.bus, "video", "Playing")
+        pause = MprisPause(self.bus.connect())
+        self.player = Player(self.runtime, None, pause=pause,
+                             sessions=Sessions(self.runtime / "sessions.json"),
+                             daemon_queue=self.daemon, daemon_settings=self.settings)
+        self.player.add_session("S", "/w/proj")
+        self.player.select_session("S")
+        self.playback = self.player._playback
+
+    def spin_until(self, predicate: Callable[[], bool]) -> None:
+        context = GLib.MainContext.default()
+        deadline = time.monotonic() + 5.0
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline, "не дождался")
+            if not context.iteration(False):
+                time.sleep(0.005)
+
+    def fire_last(self, seconds: int) -> None:
+        call = [c for c in self.glib.timeout_add_seconds.call_args_list if c.args[0] == seconds][-1]
+        call.args[1]()
+
+    def test_other_paused_at_start_and_playing_again_5s_after_end(self) -> None:
+        self.start_with(A0)
+        self.spin_until(lambda: self.other.status == "Paused")
+        self.spin_until(lambda: self.glib.timeout_add_seconds.called)
+        self.assertEqual([], self.playback.played)
+        self.fire_last(Player.PAUSE_GAP_SECONDS)
+        self.assertEqual([A0], self.playback.played)
+        self.finish()
+        self.end_by_count()
+        self.assertEqual("idle", self.state().status)
+        self.fire_last(Player.RESUME_DELAY_SECONDS)
+        self.spin_until(lambda: self.other.status == "Playing")
+        self.assertEqual(["Pause", "Play"], self.other.calls)
+        self.player.shutdown()
 
 
 class PlayerHoldTest(PlayerCase):
@@ -2533,22 +2624,18 @@ class PlayerSentenceCountTest(PlayerCase):
     def setUp(self) -> None:
         super().setUp()
         self.counter = FakeCounter()
-        self.ducker = FakeDucker()
         self.player = self.make_player(Sessions(self.runtime / "sessions.json"))
         self.player.add_session("S", "/w/proj")
         self.player.select_session("S")
         self.player.start()
 
     def make_player(self, sessions: Sessions) -> Player:
-        player = Player(self.runtime, None, ducker=self.ducker, sessions=sessions,
+        player = Player(self.runtime, None, sessions=sessions,
                         daemon_queue=self.daemon, daemon_settings=self.settings,
                         sentence_counter=self.counter)
         self.playback = player._playback
         player.on_change = self.states.append
         return player
-
-    def calls(self) -> list[tuple]:
-        return [c for c in self.ducker.calls if c != ("refresh",)]
 
     def test_hook_task_asks_count_of_its_text_once(self) -> None:
         self.announce("aa")
@@ -2587,7 +2674,7 @@ class PlayerSentenceCountTest(PlayerCase):
 
     def test_single_sentence_ends_right_after_it(self) -> None:
         """Число пришло раньше предложения: сообщение из одного предложения кончается сразу
-        после него, громкость возвращается — «растущим» с приглушением оно не остаётся."""
+        после него — «растущим», ждущим предложения, оно не остаётся."""
         self.announce("aa")
         self.counter.answer(1)
         self.arrive(A0)
@@ -2596,7 +2683,6 @@ class PlayerSentenceCountTest(PlayerCase):
         state = self.state()
         self.assertEqual("idle", state.status)
         self.assertTrue(state.current.heard)
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
 
     def test_long_message_ends_at_last_index(self) -> None:
         self.announce("aa")
@@ -2608,7 +2694,6 @@ class PlayerSentenceCountTest(PlayerCase):
         self.assertEqual([A0, A1, A2], self.playback.played)
         self.assertEqual("idle", self.state().status)
         self.assertTrue(self.state().current.heard)
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
 
     def test_count_after_last_sentence_ends_waiting_message(self) -> None:
         """Ответ счётчика асинхронный: пришёл, когда сообщение уже доиграно и ждёт, — конец."""
@@ -2619,7 +2704,6 @@ class PlayerSentenceCountTest(PlayerCase):
         self.counter.answer(1)
         self.assertEqual("idle", self.state().status)
         self.assertTrue(self.state().current.heard)
-        self.assertEqual([("duck", 30), ("restore",)], self.calls())
 
     def test_count_of_unfinished_message_keeps_waiting(self) -> None:
         self.announce("aa")
@@ -2638,7 +2722,6 @@ class PlayerSentenceCountTest(PlayerCase):
         self.arrive(A0)
         self.finish()
         self.assertEqual("playing", self.state().status)
-        self.assertEqual([("duck", 30)], self.calls())
         self.arrive(B0)
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertTrue(self.state().messages[0].heard)

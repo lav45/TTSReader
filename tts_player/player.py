@@ -1,6 +1,5 @@
 """Плеер-контроллер: курсор по очереди, команды кнопок, снимок состояния для окна."""
 import logging
-import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Literal
@@ -13,10 +12,10 @@ from gi.repository import GLib  # noqa: E402
 from tts_player.control import ControlRequests  # noqa: E402
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import ActiveVoice, DaemonSettings  # noqa: E402
-from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
 from tts_player.hook_tasks import HookTasks  # noqa: E402
 from tts_player.model import UNKNOWN_TASK, HookTask, Message, Sentence  # noqa: E402
+from tts_player.mpris_pause import MprisPause  # noqa: E402
 from tts_player.output_idle import OutputIdle  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
@@ -106,26 +105,27 @@ class Player:
     растущее. Сообщение без звука (не отложенное) переозвучивает только команда пользователя;
     автозапуск его пропускает (прослушано).
 
-    Приглушение (ducker, контракт (9)): статус стал playing — чужие потоки до prefs.duck %,
-    пока playing — refresh раз в REFRESH_SECONDS, статус ушёл из playing и выход — restore.
-    Ожидание предложения растущего сообщения — тоже playing: громкость не дрожит. Решает
-    одно место — _follow_status из _changed, после которого видна каждая смена статуса.
-    Удержание (hold, контракт (10)) — звучит свой текст: плеер на паузе, а приглушение идёт
-    так же, как при playing; ушедший в hold из playing громкость не возвращает и не глушит
-    заново. Звучит ли плеер для чужих потоков — _speaking, одно на duck и на сирот.
-    Сироты (громкость приложения, поток которого закончился приглушённым): вне playing,
-    пока ducker.has_orphans и не прошло WATCH_LIMIT_SECONDS с их последнего изменения
-    (ducker.orphans_changed_at) — watch раз в WATCH_SECONDS; решает _follow_orphans рядом с
-    _follow_status.
+    Пауза других плееров (pause, контракт (9')): плеер начал звучать (_speaking стал True) —
+    pause.pause_playing, и звук ждёт ответа: кто-то встал на паузу — первый звук через
+    PAUSE_GAP_SECONDS, никто — сразу. Замолчал, и пауза кого-то держит, — pause.resume через
+    RESUME_DELAY_SECONDS тишины; речь снова до них — таймер снят, новой паузы нет, звук сразу
+    (если 3 с уже прошли). Ожидание предложения растущего сообщения — тоже playing: другие
+    стоят. Удержание (hold, контракт (10)) — звучит свой текст: плеер на паузе, а для других
+    звучит (_speaking); ушедший в hold из playing паузу не повторяет, а 3 с у своего текста нет:
+    его звук идёт своим Playback, ворота держат только звук этого плеера. Замолчал до ответа
+    pause_playing — продолжение решает ответ. Решает одно место — _follow_status из _changed,
+    после которого видна каждая смена статуса.
+    Ворота звука: _start_file только запоминает файл и позицию (_due), Playback.play зовёт
+    _follow_status, когда ответа не ждут и 3 с не идут. Поэтому команды в эти 3 с (⏸, клик и
+    ▶, перемотка) меняют, что заиграет, а не когда: отсчёт не перезапускается, другие уже
+    стоят; окно видит playing на позиции курсора.
     """
     RETRY_SECONDS = 2
-    REFRESH_SECONDS = 1
-    WATCH_SECONDS = 2
-    WATCH_LIMIT_SECONDS = 600  # опрос сирот вне речи — 10 минут после их последнего изменения
+    PAUSE_GAP_SECONDS = 3  # тишина перед первым словом, если кто-то встал на паузу
+    RESUME_DELAY_SECONDS = 5  # тишина плеера, после которой другие продолжают
 
     def __init__(self, runtime_dir: Path, audio_sink: str | None,
-                 ducker: Ducker | None = None,
-                 clock: Callable[[], float] = time.monotonic,
+                 pause: MprisPause | None = None,
                  hook_tasks_dir: Path | None = None, *,
                  daemon_queue: DaemonQueue,
                  daemon_settings: DaemonSettings,
@@ -133,7 +133,7 @@ class Player:
                  control_dir: Path | None = None,
                  sentence_counter: SentenceCounter | None = None,
                  output: OutputIdle | None = None) -> None:
-        """ducker None — без приглушения чужих звуков; clock — часы Ducker.orphans_changed_at;
+        """pause None — других плееров не трогать; плеер её владелец (останавливает в shutdown);
         hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
         очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки;
         sessions — список сессий, уже загруженный: его сессиям очереди заводятся здесь, а
@@ -143,7 +143,6 @@ class Player:
         None — число предложений неизвестно, конец сообщения по запасным признакам;
         output — простой вывода, общий со своим текстом (Playback), None — без тишины
         пробуждения."""
-        self._clock = clock
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
         self._tail = defaults.tail
@@ -182,11 +181,12 @@ class Player:
         self._retry_id = 0
         self._held = False  # звучит свой текст: сам ничего не начинаю (hold/release)
         self._autoplay = defaults.autoplay  # кнопка автовоспроизведения (apply_prefs)
-        self._ducker = ducker
-        self._duck = defaults.duck
-        self._ducking = False  # duck() вызван, restore() ещё нет
-        self._refresh_id = 0
-        self._watch_id = 0
+        self._due = False  # _file запомнен, Playback.play ещё не звали (ворота звука)
+        self._pause = pause
+        self._spoke = False  # _speaking() на прошлом _follow_status
+        self._pausing = False  # pause_playing вызван, ответа ещё нет
+        self._gap_id = 0  # таймер PAUSE_GAP_SECONDS: идёт — звук ждёт
+        self._resume_id = 0  # таймер RESUME_DELAY_SECONDS до pause.resume
         # cwd очищенной `/clear` активной сессии: сессия оттуда станет активной вместо неё.
         # Инвариант: ожидание замены => активной сессии нет (ставится только при снятии
         # активной, любая активация его снимает)
@@ -196,18 +196,15 @@ class Player:
         self._sent_in_run: set[Message] = set()
 
     def apply_prefs(self, prefs: Prefs) -> None:
-        """Настройки плеера: хвост очереди каждой сессии, процент приглушения, кнопка
-        автовоспроизведения; играющее не трогается. Очереди без фокуса режутся до нового tail
-        сразу, с фокусом — хвост начатых постепенно (MessageQueue.start); отжатая кнопка снимает
-        фокус (_focused), и очередь режется тут же. Нажатие звук не начинает: отсюда путь только
-        к обрезке и окну (_changed). Новый процент во время игры — restore, затем duck(новый)."""
+        """Настройки плеера: хвост очереди каждой сессии, кнопка автовоспроизведения;
+        играющее не трогается. Очереди без фокуса режутся до нового tail сразу, с фокусом —
+        хвост начатых постепенно (MessageQueue.start); отжатая кнопка снимает фокус (_focused),
+        и очередь режется тут же. Нажатие звук не начинает: отсюда путь только к обрезке и
+        окну (_changed)."""
         self._tail = prefs.tail
         self._autoplay = prefs.autoplay
         for queue in [*self._queues.values(), self._no_session]:
             queue.tail = prefs.tail
-        if prefs.duck != self._duck:
-            self._duck = prefs.duck
-            self._unduck()  # _changed приглушит заново, если статус playing
         self._changed()
 
     def hold(self) -> None:
@@ -406,12 +403,18 @@ class Player:
         self._changed()
 
     def shutdown(self) -> None:
-        """Выход процесса: громкость чужих потоков — обратно; счётчик предложений остановлен;
-        сообщения — в messages.json для следующего запуска (файлы непрослушанных остаются в
-        store/, прослушанных — удаляются), вместе с id их задач: предложения, пришедшие после
-        выхода, — их."""
-        self._unduck()
-        self._stop_watch()
+        """Выход процесса: другие плееры продолжают сразу, без RESUME_DELAY_SECONDS; счётчик
+        предложений остановлен; сообщения — в messages.json для следующего запуска (файлы
+        непрослушанных остаются в store/, прослушанных — удаляются), вместе с id их задач:
+        предложения, пришедшие после выхода, — их."""
+        if self._gap_id:
+            GLib.source_remove(self._gap_id)
+            self._gap_id = 0
+        if self._resume_id:
+            self._cancel_resume()
+        if self._pause is not None:
+            self._pause.resume()
+            self._pause.stop()
         if self._counter is not None:
             self._counter.stop()
         self._inbox.stop()
@@ -767,13 +770,19 @@ class Player:
         self._start_file(sentence.path, base, base)
 
     def _start_file(self, path: Path, base: float, position: float) -> None:
+        """Файл и позиция запомнены; звук пускает _follow_status (ворота звука)."""
         self._file = path
         self._file_base = base
         self._position = position
-        log.info("playing %s", path.name)
-        self._playback.play(path, start_s=position - base)
+        self._due = True
+
+    def _sound(self) -> None:
+        self._due = False
+        log.info("playing %s", self._file.name)
+        self._playback.play(self._file, start_s=self._position - self._file_base)
 
     def _halt(self) -> None:
+        self._due = False
         self._playback.stop()
         if self._retry_id:
             GLib.source_remove(self._retry_id)
@@ -811,62 +820,62 @@ class Player:
         return self._position if at is None else self._file_base + at
 
     def _follow_status(self) -> None:
-        """Приглушение по статусу: начал звучать — duck и таймер refresh, замолчал — restore."""
-        if self._ducker is None:
-            return
-        playing = self._speaking()
-        if playing and not self._ducking:
-            self._ducker.duck(self._duck)
-            self._ducking = True
-            self._refresh_id = GLib.timeout_add_seconds(self.REFRESH_SECONDS, self._refresh)
-        elif not playing:
-            self._unduck()
+        """Пауза других по статусу и ворота звука: начал звучать — снять таймер продолжения
+        или поставить других на паузу; замолчал — продолжение через RESUME_DELAY_SECONDS.
+        Запомненный файл звучит, когда ответа паузы не ждут и PAUSE_GAP_SECONDS не идут."""
+        speaking = self._speaking()
+        if speaking != self._spoke:
+            self._spoke = speaking
+            if speaking:
+                self._speech_started()
+            else:
+                self._resume_later()
+        if self._due and not self._pausing and not self._gap_id:
+            self._sound()
 
     def _speaking(self) -> bool:
-        """Для чужих потоков плеер звучит: играет сам или держит паузу ради своего текста."""
+        """Для других плееров плеер звучит: играет сам или держит паузу ради своего текста."""
         return self._status == "playing" or self._held
 
-    def _follow_orphans(self) -> None:
-        """Таймер watch: идёт вне playing, пока есть сироты; иначе снят."""
-        if self._ducker is None:
-            return
-        wanted = not self._speaking() and self._watching_orphans()
-        if wanted and not self._watch_id:
-            self._watch_id = GLib.timeout_add_seconds(self.WATCH_SECONDS, self._watch)
-        elif not wanted:
-            self._stop_watch()
+    def _speech_started(self) -> None:
+        """Таймер продолжения идёт — другие ещё стоят: снять его. Ответа ждут — паузу не
+        повторять. Иначе — pause_playing, звук ждёт ответа."""
+        if self._resume_id:
+            self._cancel_resume()
+        elif self._pause is not None and not self._pausing:
+            self._pausing = True
+            self._pause.pause_playing(self._on_others_paused)
 
-    def _watch(self) -> bool:
-        self._ducker.watch()
-        if self._watching_orphans():
-            return GLib.SOURCE_CONTINUE
-        self._watch_id = 0
+    def _on_others_paused(self, paused: bool) -> None:
+        """Ответ pause_playing. Плеер звучит сам и кто-то встал — PAUSE_GAP_SECONDS тишины
+        (в удержании и в idle звука этого плеера нет — тишину выдерживать некому); замолчал,
+        пока ждал ответа, — продолжение через RESUME_DELAY_SECONDS."""
+        self._pausing = False
+        if not self._speaking():
+            self._resume_later()
+        elif paused and self._status == "playing":
+            self._gap_id = GLib.timeout_add_seconds(self.PAUSE_GAP_SECONDS, self._gap_over)
+        self._changed()
+
+    def _gap_over(self) -> bool:
+        self._gap_id = 0
+        self._changed()
         return GLib.SOURCE_REMOVE
 
-    def _watching_orphans(self) -> bool:
-        """Сироты есть и менялись не позже WATCH_LIMIT_SECONDS назад; дальше — при начале речи."""
-        changed_at = self._ducker.orphans_changed_at
-        if not self._ducker.has_orphans or changed_at is None:
-            return False
-        return self._clock() - changed_at < self.WATCH_LIMIT_SECONDS
-
-    def _stop_watch(self) -> None:
-        if self._watch_id:
-            GLib.source_remove(self._watch_id)
-            self._watch_id = 0
-
-    def _refresh(self) -> bool:
-        self._ducker.refresh()
-        return GLib.SOURCE_CONTINUE
-
-    def _unduck(self) -> None:
-        """Снять таймер refresh и вернуть громкость; не приглушено — ничего."""
-        if not self._ducking:
+    def _resume_later(self) -> None:
+        """Таймер продолжения, если пауза кого-то держит; ответа ждут — решит ответ."""
+        if self._pause is None or self._pausing or not self._pause.holding:
             return
-        GLib.source_remove(self._refresh_id)
-        self._refresh_id = 0
-        self._ducking = False
-        self._ducker.restore()
+        self._resume_id = GLib.timeout_add_seconds(self.RESUME_DELAY_SECONDS, self._resume_others)
+
+    def _resume_others(self) -> bool:
+        self._resume_id = 0
+        self._pause.resume()
+        return GLib.SOURCE_REMOVE
+
+    def _cancel_resume(self) -> None:
+        GLib.source_remove(self._resume_id)
+        self._resume_id = 0
 
     def _focused(self, queue: MessageQueue) -> bool:
         """Фокус очереди — только у играемой (активной сессии) при нажатой кнопке
@@ -898,11 +907,10 @@ class Player:
         self._sent_in_run &= live
 
     def _changed(self) -> None:
-        """Каждая смена статуса доходит сюда: сначала длина очередей по фокусу, приглушение
-        по статусу, затем окно."""
+        """Каждая смена статуса доходит сюда: сначала длина очередей по фокусу, пауза других
+        и ворота звука по статусу, затем окно."""
         self._trim_unfocused()
         self._follow_status()
-        self._follow_orphans()
         try:
             self.on_change(self.state())
         except Exception:

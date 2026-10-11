@@ -19,14 +19,15 @@ from typing import Callable
 
 import gi
 
+gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")
-from gi.repository import GLib  # noqa: E402
+from gi.repository import Gio, GLib  # noqa: E402
 
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
-from tts_player.ducking import Ducker  # noqa: E402
 from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance  # noqa: E402
+from tts_player.mpris_pause import MprisPause  # noqa: E402
 from tts_player.output_idle import OutputIdle  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
@@ -50,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
                              " переозвучка), очередь демона queue/")
     parser.add_argument("--settings-file",
                         default=str(PlayerSettings.default_path(os.environ)),
-                        help="файл настроек плеера: хвост, приглушение")
+                        help="файл настроек плеера: хвост, автовоспроизведение")
     parser.add_argument("--tts-python",
                         default="~/.local/share/uv/tools/claude-code-tts/bin/python",
                         help="интерпретатор окружения claude-tts: синтез своего текста и"
@@ -84,10 +85,7 @@ def main(argv: list[str] | None = None) -> int:
               " (без окна — --no-gui)", file=sys.stderr)
         return 1
 
-    # после блокировки: второй экземпляр не возвращает громкости, приглушённые первым
-    ducker = Ducker(Path(runtime) / "tts-player" / "duck.json", os.getpid(),
-                    Path(runtime) / "tts-player" / "duck-orphans.json")
-    ducker.recover()  # остаток после падения — до первого duck в player.start()
+    pause = mpris_pause()
     # подменённый HOME хука: его queue/ плеер забирает, heartbeat держит HookHome
     tts_config_dir = Path(args.tts_config_dir).expanduser()
     hook_home = HookHome(Path(runtime) / "tts-player", tts_config_dir)
@@ -100,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     tts_python = Path(args.tts_python).expanduser()
     output = OutputIdle()  # один на процесс: звук очереди и своего текста будит вывод для обоих
     try:
-        player = Player(Path(runtime), args.audio_sink, ducker,
+        player = Player(Path(runtime), args.audio_sink, pause,
                         hook_tasks_dir=hook_home.queue_dir,
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
                         daemon_settings=settings, sessions=sessions,
@@ -120,6 +118,17 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
     return 0
+
+
+def mpris_pause() -> MprisPause | None:
+    """Пауза других плееров на сессионной шине; шины нет — строка в лог, других не трогать."""
+    try:
+        connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    except GLib.Error as error:
+        logging.warning("сессионной шины D-Bus нет, другие плееры не ставятся на паузу: %s",
+                        error.message)
+        return None
+    return MprisPause(connection)
 
 
 def gtk_ready() -> bool:
