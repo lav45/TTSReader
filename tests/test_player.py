@@ -2257,12 +2257,6 @@ class PlayerSessionsTest(PlayerCase):
             self.player.close_session()
         self.assertEqual(before, self.state())
 
-    def test_counts_are_messages_of_each_session_in_list_order(self) -> None:
-        self.start_with(A0)
-        self.hook("b1", "B")
-        self.hook("b2", "B")
-        self.assertEqual([1, 2], self.state().counts)
-
     def test_tail_is_per_session(self) -> None:
         self.player.apply_prefs(Prefs(tail=1))
         self.start_with(A0)
@@ -2493,7 +2487,6 @@ class PlayerSessionsTest(PlayerCase):
         self.hook("b4", "B")
         self.assertEqual(["text b3", "text b4"], self.texts("B"))
         self.assertFalse(b_file.exists())
-        self.assertEqual([0, 2], self.state().counts)
 
     def test_open_session_accumulates_with_focus_and_idle_trims_to_tail(self) -> None:
         """На паузе ответы сверх tail копятся; доиграли последний — idle, очередь режется до

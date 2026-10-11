@@ -24,12 +24,11 @@ def message(task="t", sentences=None, **kw) -> Message:
 
 
 def state(status="idle", current=None, position_s=0.0, length_s=0.0, messages=(),
-          lengths=None, sessions=(), active=None, counts=None) -> PlayerState:
+          lengths=None, sessions=(), active=None) -> PlayerState:
     messages = list(messages)
     lengths = [0.0] * len(messages) if lengths is None else lengths
-    counts = [0] * len(sessions) if counts is None else counts
     return PlayerState(status, current, position_s, length_s, messages, False, lengths,
-                       list(sessions), active, counts)
+                       list(sessions), active)
 
 
 def sentence(recv_s: float) -> Sentence:
@@ -99,12 +98,11 @@ class SessionRowsTest(unittest.TestCase):
     SESSIONS = [Session("1dd2b064-b8fd-4c1e-9a77-000000000001", "TTSReader"),
                 Session("abcdef12-0000-4000-8000-000000000002", "")]
 
-    def test_titles_ids_counts_and_open(self):
-        result = session_rows(state(sessions=self.SESSIONS, active=self.SESSIONS[0].id,
-                                    counts=[3, 12]))
+    def test_titles_ids_and_open(self):
+        result = session_rows(state(sessions=self.SESSIONS, active=self.SESSIONS[0].id))
         self.assertEqual(result, [
-            SessionRow("TTSReader · 1dd2b064", "3", True, self.SESSIONS[0].id),
-            SessionRow("— · abcdef12", "12", False, self.SESSIONS[1].id)])
+            SessionRow("TTSReader · 1dd2b064", True, self.SESSIONS[0].id),
+            SessionRow("— · abcdef12", False, self.SESSIONS[1].id)])
         self.assertTrue(clear_enabled(
             state(sessions=self.SESSIONS, active=self.SESSIONS[0].id)))
 
@@ -123,7 +121,7 @@ class TreeRowsTest(unittest.TestCase):
     def test_messages_follow_open_session_header(self):
         a, b = message("a", received_at=CREATED_AT), message("b", received_at=CREATED_AT)
         current = state("playing", b, messages=[a, b], lengths=[1.0, 2.0],
-                        sessions=self.SESSIONS, active=self.SESSIONS[1].id, counts=[0, 2])
+                        sessions=self.SESSIONS, active=self.SESSIONS[1].id)
         result = tree_rows(current)
         self.assertEqual([type(r) for r in result], [SessionRow, SessionRow, MessageRow, MessageRow])
         self.assertEqual(result[1:], [session_rows(current)[1], *rows(current)])

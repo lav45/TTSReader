@@ -62,7 +62,6 @@ def _subject(message: Message) -> str:
 class SessionRow:
     """Заголовок папки сессии: открыта — активна."""
     title: str  # "<project> · <id[:8]>"; project пуст — NO_PROJECT
-    count: str  # число дорожек сессии
     open: bool
     id: str
 
@@ -86,11 +85,10 @@ def session_rows(state: PlayerState) -> list[SessionRow]:
     return [
         SessionRow(
             title=f"{session.project or NO_PROJECT} · {session.id[:8]}",
-            count=str(count),
             open=session.id == state.active,
             id=session.id,
         )
-        for session, count in zip(state.sessions, state.counts)
+        for session in state.sessions
     ]
 
 
