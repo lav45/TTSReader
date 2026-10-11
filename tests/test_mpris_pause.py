@@ -1,15 +1,16 @@
 """Тесты MprisPause: поддельные плееры на временной шине Gio.TestDBus (tests/mpris_fake.py)."""
 import time
 import unittest
+from unittest import mock
 
 from gi.repository import GLib
 
-from tests.mpris_fake import ERROR, SILENT, FakeBus, FakePlayer
+from tests.mpris_fake import ANSWER, ERROR, SILENT, FakeBus, FakePlayer
 from tts_player.mpris_pause import CALL_TIMEOUT_MS, MprisPause
 
 
-def spin(until=None, limit_ms=300) -> None:
-    """Настоящий цикл GLib: до until (не дольше 5 с) или limit_ms, если until нет."""
+def spin(until=None, limit_ms=300) -> bool:
+    """Настоящий цикл GLib: до until (не дольше 5 с) или limit_ms, если until нет. Выполнено ли until."""
     loop = GLib.MainLoop()
     GLib.timeout_add(5000 if until else limit_ms, loop.quit)
     if until:
@@ -20,6 +21,7 @@ def spin(until=None, limit_ms=300) -> None:
             return True
         GLib.timeout_add(10, check)
     loop.run()
+    return bool(until and until())
 
 
 class MprisPauseTest(unittest.TestCase):
@@ -30,7 +32,7 @@ class MprisPauseTest(unittest.TestCase):
         self.addCleanup(self.pause.stop)
         self.results = []
 
-    def player(self, name, status, mode="answer"):
+    def player(self, name, status, mode=ANSWER):
         return FakePlayer(self.bus, name, status, mode)
 
     def pause_playing(self):
@@ -97,7 +99,7 @@ class MprisPauseTest(unittest.TestCase):
         player = self.player("a", "Playing")
         self.pause_playing()
         player.set_status("Playing")
-        spin(lambda: not self.pause.holding)
+        self.assertTrue(spin(lambda: not self.pause.holding))
         player.set_status("Paused")
         spin()
         self.pause.resume()
@@ -108,7 +110,7 @@ class MprisPauseTest(unittest.TestCase):
         player = self.player("a", "Playing")
         self.pause_playing()
         player.set_status("Stopped")
-        spin(lambda: not self.pause.holding)
+        self.assertTrue(spin(lambda: not self.pause.holding))
         player.set_status("Paused")
         spin()
         self.pause.resume()
@@ -119,8 +121,7 @@ class MprisPauseTest(unittest.TestCase):
         player = self.player("a", "Playing")
         self.pause_playing()
         player.vanish()
-        spin(lambda: not self.pause.holding)
-        self.assertFalse(self.pause.holding)
+        self.assertTrue(spin(lambda: not self.pause.holding))
 
     def test_resume_twice_and_without_held_makes_no_calls(self):
         player = self.player("a", "Playing")
@@ -136,21 +137,57 @@ class MprisPauseTest(unittest.TestCase):
         spin()
         self.assertEqual(["Pause", "Play"], player.calls)
 
-    def test_stop_drops_held_and_silences_callbacks(self):
+    def test_stop_unsubscribes_everything_even_after_overlapping_calls(self):
         player = self.player("a", "Playing")
-        self.pause_playing()
+        self.pause.pause_playing(self.results.append)
+        self.pause.pause_playing(self.results.append)
+        self.assertTrue(spin(lambda: len(self.results) == 2))
+        self.assertEqual(["Pause"], player.calls)
+        self.assertEqual([True, False], sorted(self.results, reverse=True))
         self.pause.stop()
         self.assertFalse(self.pause.holding)
-        player.set_status("Playing")
-        spin()
-        self.assertEqual(["Pause"], player.calls)
+        with mock.patch.object(self.pause, "_forget") as forget:
+            player.set_status("Playing")
+            player.vanish()
+            spin()
+        forget.assert_not_called()
+
+    def test_resume_then_stop_still_sends_play(self):
+        player = self.player("a", "Playing")
+        self.pause_playing()
+        self.pause.resume()
+        self.pause.stop()
+        self.assertTrue(spin(lambda: player.status == "Playing"))
+        self.assertEqual(["Pause", "Play"], player.calls)
+
+    def test_resume_while_pause_pending_plays_when_pause_lands(self):
+        player = self.player("a", "Playing", SILENT)
+        self.pause.pause_playing(self.results.append)
+        self.assertTrue(spin(lambda: player.calls))
+        self.pause.resume()
+        self.assertFalse(self.pause.holding)
+        player.answer_pending()
+        self.assertTrue(spin(lambda: player.status == "Playing"))
+        self.assertEqual(["Pause", "Play"], player.calls)
+
+    def test_resume_then_stop_while_pause_pending_plays_when_pause_lands(self):
+        player = self.player("a", "Playing", SILENT)
+        self.pause.pause_playing(self.results.append)
+        self.assertTrue(spin(lambda: player.calls))
+        self.pause.resume()
+        self.pause.stop()
+        player.answer_pending()
+        self.assertTrue(spin(lambda: player.status == "Playing"))
+        self.assertEqual([], self.results)
 
     def test_stop_during_pending_call_means_no_done(self):
         self.player("a", "Playing", SILENT)
         self.pause.pause_playing(self.results.append)
         spin()
         self.pause.stop()
-        spin(limit_ms=CALL_TIMEOUT_MS + 500)
+        with self.assertLogs("tts_player.mpris_pause", "WARNING") as logs:
+            spin(limit_ms=CALL_TIMEOUT_MS + 500)
+        self.assertIn("Pause", logs.output[0])
         self.assertEqual([], self.results)
 
 

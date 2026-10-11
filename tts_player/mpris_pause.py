@@ -30,6 +30,8 @@ class MprisPause:
     def __init__(self, connection: Gio.DBusConnection) -> None:
         self._connection = connection
         self._held: dict[str, list[int]] = {}  # имя плеера -> подписки на его сигналы
+        self._pausing: set[str] = set()  # Pause() отправлен, ответа ещё нет
+        self._play_on_paused: set[str] = set()  # resume() был до ответа на Pause(): ответ → Play()
         self._stopped = False
 
     @property
@@ -46,18 +48,28 @@ class MprisPause:
                    lambda reply: self._on_names(reply, done))
 
     def resume(self) -> None:
-        """Каждому запомненному, чей статус сейчас Paused, — Play(); запомненные забыты."""
-        names = list(self._held)
-        for name in names:
+        """Каждому запомненному — Play(); запомненные забыты.
+
+        Список и так держит только стоящих на паузе: ставший Playing / Stopped или ушедший с шины
+        забыт по сигналу, поэтому статус перед Play() не спрашивается. Тому, чей Pause() ещё не
+        ответил, Play() уйдёт с ответом (и после stop)."""
+        for name in list(self._held):
             self._forget(name)
-        for name in names:
-            self._get_status(name, lambda status, name=name: self._play_if_paused(name, status))
+            if name in self._pausing:
+                self._play_on_paused.add(name)
+                continue
+            self._play(name)
 
     def stop(self) -> None:
-        """Отписаться от сигналов; после stop колбэков нет."""
+        """Отписаться от сигналов; после stop колбэков нет. Уже отправленные Play() не отменяются:
+        соединение сбрасывается, чтобы они ушли до выхода процесса."""
         self._stopped = True
         for name in list(self._held):
             self._forget(name)
+        try:
+            self._connection.flush_sync(None)
+        except GLib.Error as exc:
+            log.warning("MPRIS: соединение не сброшено: %s", exc.message)
 
     def _on_names(self, reply: GLib.Variant | None, done: Callable[[bool], None]) -> None:
         names = [] if reply is None else [n for n in reply.unpack()[0] if n.startswith(MPRIS_PREFIX)]
@@ -76,21 +88,27 @@ class MprisPause:
             self._get_status(name, lambda status, name=name: self._pause_if_playing(name, status, finish))
 
     def _pause_if_playing(self, name: str, status: str | None, finish: Callable[[bool], None]) -> None:
-        if status != PLAYING:
+        if status != PLAYING or name in self._held or name in self._pausing:
             finish(False)
             return
         self._remember(name)
+        self._pausing.add(name)
         self._call(name, MPRIS_PATH, PLAYER_INTERFACE, "Pause", None,
-                   lambda reply: self._on_paused(name, reply, finish))
+                   lambda reply: self._on_paused(name, reply, finish), survive_stop=True)
 
     def _on_paused(self, name: str, reply: GLib.Variant | None, finish: Callable[[bool], None]) -> None:
+        self._pausing.discard(name)
         if reply is None:
             self._forget(name)
-        finish(reply is not None)
+        if name in self._play_on_paused:
+            self._play_on_paused.discard(name)
+            if reply is not None:
+                self._play(name)
+        if not self._stopped:
+            finish(reply is not None)
 
-    def _play_if_paused(self, name: str, status: str | None) -> None:
-        if status == PAUSED:
-            self._call(name, MPRIS_PATH, PLAYER_INTERFACE, "Play", None, lambda reply: None)
+    def _play(self, name: str) -> None:
+        self._call(name, MPRIS_PATH, PLAYER_INTERFACE, "Play", None, None, survive_stop=True)
 
     def _get_status(self, name: str, callback: Callable[[str | None], None]) -> None:
         """PlaybackStatus плеера; None — ответа нет или ошибка."""
@@ -99,15 +117,18 @@ class MprisPause:
                    lambda reply: callback(None if reply is None else reply.unpack()[0]))
 
     def _call(self, name: str, path: str, interface: str, method: str, params: GLib.Variant | None,
-              callback: Callable[[GLib.Variant | None], None]) -> None:
-        """Асинхронный вызов с таймаутом; callback получает ответ или None (ошибка уже в логе)."""
+              callback: Callable[[GLib.Variant | None], None] | None,
+              survive_stop: bool = False) -> None:
+        """Асинхронный вызов с таймаутом; callback получает ответ или None (ошибка уже в логе).
+
+        После stop callback не зовётся, если не survive_stop (ответ, от которого зависит Play())."""
         def finished(connection: Gio.DBusConnection, result: Gio.AsyncResult) -> None:
             try:
                 reply = connection.call_finish(result)
             except GLib.Error as exc:
-                log.warning("MPRIS %s %s: %s", name, method, exc.message)
+                log.warning("MPRIS: вызов %s к %s не удался: %s", method, name, exc.message)
                 reply = None
-            if not self._stopped:
+            if callback is not None and (survive_stop or not self._stopped):
                 callback(reply)
 
         self._connection.call(name, path, interface, method, params, None,

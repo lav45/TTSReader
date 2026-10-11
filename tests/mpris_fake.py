@@ -65,6 +65,13 @@ class FakePlayer:
             None, MPRIS_PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
             GLib.Variant("(sa{sv}as)", (PLAYER_INTERFACE, changed, [])))
 
+    def answer_pending(self) -> None:
+        """Ответить на вызовы, которые SILENT-плеер держал без ответа, как отвечал бы ANSWER."""
+        pending, self._silent = self._silent, []
+        for invocation in pending:
+            self.set_status("Paused" if invocation.get_method_name() == "Pause" else "Playing")
+            invocation.return_value(None)
+
     def vanish(self) -> None:
         """Имя уходит с шины: соединение плеера закрыто."""
         self._connection.close_sync(None)
@@ -74,7 +81,7 @@ class FakePlayer:
 
     def _on_call(self, connection, sender, path, interface, method, params, invocation) -> None:
         self.calls.append(method)
-        if self.mode == SILENT:
+        if self.mode == SILENT and method == "Pause":
             self._silent.append(invocation)  # ссылка держится, иначе GDBus ответит сам
             return
         if self.mode == ERROR:
