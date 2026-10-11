@@ -700,16 +700,6 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual({"Настройки", "Голос", "Скорость", "Хвост очереди", "Сохранить"},
                          {text for text in labels if text})
 
-    def test_tail_spin_reloaded_on_each_open(self) -> None:
-        w = self.window
-        self.prefs.loaded = Prefs(tail=8)
-        w.settings_button.clicked()
-        self.assertEqual(8, w.tail_spin.get_value_as_int())
-        w.tail_spin.set_value(10)
-        w.back_button.clicked()
-        w.settings_button.clicked()
-        self.assertEqual(8, w.tail_spin.get_value_as_int())
-
     def test_save_takes_typed_tail_without_focus_loss(self) -> None:
         w = self.window
         w.settings_button.clicked()

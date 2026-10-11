@@ -10,7 +10,7 @@ from unittest import mock
 from tts_player.settings_error import SettingsError
 from tts_player.player_settings import PlayerSettings, Prefs
 
-LEGACY_KEY = "du" + "ck"  # ключ удалённой настройки; склеен, чтобы в коде не осталось её имени
+LEGACY_KEY = "duck"  # ключ удалённой настройки приглушения
 
 
 class PlayerSettingsCase(unittest.TestCase):
