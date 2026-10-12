@@ -19,7 +19,7 @@ import gi  # noqa: E402
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from tts_player.daemon_settings import Voice, VoiceSettings  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
@@ -773,6 +773,32 @@ class SettingsScreenTest(unittest.TestCase):
                           "Ставить другие плееры на паузу, пока говорю",
                           "Пауза до и после речи, мс", "Сохранить"},
                          {text for text in labels if text})
+
+    def wait_ms(self, ms: int) -> None:
+        loop = GLib.MainLoop()
+        GLib.timeout_add(ms, loop.quit)
+        loop.run()
+
+    def test_saved_status_hides_itself(self) -> None:
+        w = self.window
+        w.SAVED_HIDE_MS = 50
+        w.settings_button.clicked()
+        w.save_button.clicked()
+        self.assertTrue(w.settings_status.get_visible())
+        self.wait_ms(150)
+        self.assertFalse(w.settings_status.get_visible())
+        self.assertEqual("", w.settings_status.get_text())
+        self.assertEqual(set(), css_classes(w.settings_status))
+
+    def test_error_after_saved_is_not_hidden_by_saved_timer(self) -> None:
+        w = self.window
+        w.SAVED_HIDE_MS = 50
+        w.settings_button.clicked()
+        w.save_button.clicked()
+        w._show_status("не удалось записать", "error")
+        self.wait_ms(150)
+        self.assertTrue(w.settings_status.get_visible())
+        self.assertEqual({"error"}, css_classes(w.settings_status))
 
     def test_settings_status_is_full_width_bar_at_bottom(self) -> None:
         w = self.window

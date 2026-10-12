@@ -110,6 +110,7 @@ class PlayerWindow(Gtk.Window):
     REFRESH_MS — позиция играющего файла сама on_change не вызывает. Закрытие прячет окно в трей.
     """
     REFRESH_MS = 250
+    SAVED_HIDE_MS = 2000  # «Настройки сохранены» гаснет само; ошибка остаётся до закрытия экрана
     TRACK_INDENT = 28  # отступ дорожки от левого края: под значком папки
     SPEED_STEP = 0.1
     SPEED_DIGITS = 2  # 1.25 из config не округляется спином при потере фокуса
@@ -124,6 +125,7 @@ class PlayerWindow(Gtk.Window):
         self._text_speaker = text_speaker
         self._voice_loaded = False  # голос и скорость прочитаны при открытии настроек
         self._refresh_id = 0
+        self._status_hide_id = 0
         self._shown_rows: list[SessionRow | MessageRow] | None = None
         # сообщения последнего состояния: строки равны по тексту, а объекты Message могут быть
         # новыми, поэтому снимок обновляется на каждом состоянии, а не только при перестройке
@@ -418,14 +420,28 @@ class PlayerWindow(Gtk.Window):
         return context
 
     def _show_status(self, text: str, kind: str) -> None:
+        self._cancel_status_hide()
         self._clear_status_classes().add_class(kind)
         self.settings_status.set_text(text)
         self.settings_status.show()
+        if kind == STATUS_SUCCESS:
+            self._status_hide_id = GLib.timeout_add(self.SAVED_HIDE_MS, self._on_status_timeout)
 
     def _hide_status(self) -> None:
+        self._cancel_status_hide()
         self._clear_status_classes()
         self.settings_status.set_text("")
         self.settings_status.hide()
+
+    def _cancel_status_hide(self) -> None:
+        if self._status_hide_id:
+            GLib.source_remove(self._status_hide_id)
+            self._status_hide_id = 0
+
+    def _on_status_timeout(self) -> bool:
+        self._status_hide_id = 0  # источник снимает SOURCE_REMOVE, remove не нужен
+        self._hide_status()
+        return GLib.SOURCE_REMOVE
 
     def _show_main(self) -> None:
         self.stack.set_visible_child_name("main")
