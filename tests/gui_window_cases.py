@@ -532,6 +532,9 @@ class SettingsScreenTest(unittest.TestCase):
                                    self.text)
         self.addCleanup(self.window.destroy)
 
+    def test_window_icon_is_tray_icon(self) -> None:
+        self.assertEqual("audio-x-generic", self.window.get_icon_name())
+
     def test_icon_buttons_without_text_first_in_one_row(self) -> None:
         w = self.window
         clear_tooltip = "Очистить сообщения активной сессии"

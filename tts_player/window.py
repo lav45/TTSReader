@@ -24,6 +24,7 @@ from tts_player.view import (MessageRow, SessionRow, clear_enabled,  # noqa: E40
 
 log = logging.getLogger(__name__)
 
+APP_ICON = "audio-x-generic"  # один значок у трея и окна: панель задач берёт значок окна
 FOLDER_OPEN_ARROW = "▾"
 FOLDER_CLOSED_ARROW = "▸"
 FOLDER_OPEN_ICON = "folder-open-symbolic"
@@ -131,6 +132,7 @@ class PlayerWindow(Gtk.Window):
         # новыми, поэтому снимок обновляется на каждом состоянии, а не только при перестройке
         self._shown_messages: list[Message] = []
         self.set_default_size(420, 360)
+        self.set_icon_name(APP_ICON)
 
         self.slider = SeekSlider(player.seek)
         self.scale = self.slider.scale
@@ -572,7 +574,6 @@ def tray_menu(quit_app: Callable[[], None]) -> Gtk.Menu:
 class TrayIcon:
     """Значок XApp в трее: левый клик показывает или прячет окно, правый — меню с «Выход»."""
     NAME = "tts-player"
-    ICON = "audio-x-generic"
     TOOLTIP = "TTS Player"
 
     def __init__(self, window: Gtk.Window, quit_app: Callable[[], None]) -> None:
@@ -580,7 +581,7 @@ class TrayIcon:
         self._menu = tray_menu(quit_app)
         self._icon = XApp.StatusIcon()
         self._icon.set_name(self.NAME)
-        self._icon.set_icon_name(self.ICON)
+        self._icon.set_icon_name(APP_ICON)
         self._icon.set_tooltip_text(self.TOOLTIP)
         self._icon.set_secondary_menu(self._menu)
         self._icon.connect("activate", self._on_activate)
