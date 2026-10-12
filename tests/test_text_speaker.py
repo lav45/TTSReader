@@ -18,6 +18,7 @@ from gi.repository import GLib  # noqa: E402
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.player import Player  # noqa: E402
+from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sessions import Sessions  # noqa: E402
 from tts_player.text_speaker import TextSpeaker, TextState  # noqa: E402
 
@@ -486,7 +487,7 @@ class TextSpeakerErrorTest(TextSpeakerCase):
 
 class TextSpeakerPauseTest(TextSpeakerCase):
     """Пауза других плееров на свой текст — через главный Player в удержании и общий
-    MprisPause; 3 с тишины у своего текста нет: его звук идёт своим Playback."""
+    MprisPause; тишины до речи (gap_ms) у своего текста нет: его звук идёт своим Playback."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -503,9 +504,9 @@ class TextSpeakerPauseTest(TextSpeakerCase):
         speaker.set_text("Раз.")
         speaker.toggle_play_pause()
         self.assertEqual(["pause_playing"], self.pause.calls)
-        self.run_until(lambda: self.plays, limit=Player.PAUSE_GAP_SECONDS - 0.5)
+        self.run_until(lambda: self.plays, limit=Prefs().gap_ms / 1000 - 0.5)
         self.run_until(lambda: self.status() == "stopped")
-        self.assertEqual(["pause_playing"], self.pause.calls)  # продолжение — через 5 с тишины
+        self.assertEqual(["pause_playing"], self.pause.calls)  # продолжение — через gap_ms тишины
 
     def test_pause_does_not_resume_at_once(self) -> None:
         speaker = self.make([["count", 1], ["wav", 0, 1.0], ["done"]], player=self.main)

@@ -454,9 +454,9 @@ class PlayerE2ETest(PlayerProcessCase):
                        env=self.env(), check=True)
 
     def test_one_sentence_answer_ends_by_count_and_other_player_resumes(self) -> None:
-        """Играющий другой плеер встаёт на паузу в начале речи, первое слово — после 3 с
+        """Играющий другой плеер встаёт на паузу в начале речи, первое слово — после gap_ms
         тишины; ответ из одного предложения (по счётчику) кончается сразу после него — без
-        следующей задачи плеер уходит в idle, и через 5 с тишины другой плеер снова играет."""
+        следующей задачи плеер уходит в idle, и через те же gap_ms другой плеер снова играет."""
         other = self.other_player("Playing")
         self.start_player("fakesink", *self.counted())
         self.say(self.hook_task(self.session, "Привет")["id"], 0)
@@ -467,7 +467,7 @@ class PlayerE2ETest(PlayerProcessCase):
         self.next_line("ended ")
         ended_at = time.monotonic()
         self.wait_status(other, "Playing")
-        self.assertGreaterEqual(time.monotonic() - ended_at, 4.5)
+        self.assertGreaterEqual(time.monotonic() - ended_at, 2.5)
         self.assertEqual(["Pause", "Play"], other.calls)
 
     def test_sigterm_exits_0(self) -> None:

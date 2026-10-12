@@ -106,27 +106,26 @@ class Player:
 
     Пауза других плееров (pause, контракт (9')): плеер начал звучать (_speaking стал True) —
     pause.pause_playing, и звук ждёт ответа: кто-то встал на паузу — первый звук через
-    PAUSE_GAP_SECONDS, никто — сразу. Замолчал, и пауза кого-то держит, — pause.resume через
-    RESUME_DELAY_SECONDS тишины; речь снова до них — таймер снят, новой паузы нет, звук сразу
-    (если 3 с уже прошли). Ожидание предложения растущего сообщения — тоже playing: другие
-    стоят. Удержание (hold, контракт (10)) — звучит свой текст: плеер на паузе, а для других
-    звучит (_speaking); ушедший в hold из playing паузу не повторяет, а 3 с у своего текста нет:
-    его звук идёт своим Playback, ворота держат только звук этого плеера. Замолчал до ответа
-    pause_playing — продолжение решает ответ. Решает одно место — _follow_status из _changed,
+    gap_ms тишины, никто — сразу. Замолчал, и пауза кого-то держит, — pause.resume через
+    те же gap_ms тишины; речь снова до них — таймер снят, новой паузы нет, звук сразу
+    (если тишина до речи уже прошла). Ожидание предложения растущего сообщения — тоже playing:
+    другие стоят. Удержание (hold, контракт (10)) — звучит свой текст: плеер на паузе, а для
+    других звучит (_speaking); ушедший в hold из playing паузу не повторяет, а тишины до речи у
+    своего текста нет: его звук идёт своим Playback, ворота держат только звук этого плеера.
+    Замолчал до ответа pause_playing — продолжение решает ответ. Решает одно место — _follow_status из _changed,
     после которого видна каждая смена статуса.
     Флажок pause_others (apply_prefs, контракт (6)): снят — речь других не трогает, звук сразу
-    (без pause_playing и без 3 с). Снят, пока другие стоят, — они продолжают сразу
-    (pause.resume без RESUME_DELAY_SECONDS), таймер продолжения и тишина 3 с сняты; снят, пока
-    ответ pause_playing не пришёл, — по ответу они продолжают сразу, без 3 с. Поставлен —
+    (без pause_playing и без тишины). Снят, пока другие стоят, — они продолжают сразу
+    (pause.resume без тишины), таймер продолжения и тишина до речи сняты; снят, пока
+    ответ pause_playing не пришёл, — по ответу они продолжают сразу, без тишины. Поставлен —
     пауза со следующего начала речи, идущей речи не касается. То же значение ничего не меняет.
+    Новое gap_ms действует с ближайшего таймера, идущий не трогается.
     Ворота звука: _start_file только запоминает файл и позицию (_due), Playback.play зовёт
-    _follow_status, когда ответа не ждут и 3 с не идут. Поэтому команды в эти 3 с (⏸, клик и
-    ▶, перемотка) меняют, что заиграет, а не когда: отсчёт не перезапускается, другие уже
-    стоят; окно видит playing на позиции курсора.
+    _follow_status, когда ответа не ждут и тишина до речи не идёт. Поэтому команды в эту тишину
+    (⏸, клик и ▶, перемотка) меняют, что заиграет, а не когда: отсчёт не перезапускается,
+    другие уже стоят; окно видит playing на позиции курсора.
     """
     RETRY_SECONDS = 2
-    PAUSE_GAP_SECONDS = 3  # тишина перед первым словом, если кто-то встал на паузу
-    RESUME_DELAY_SECONDS = 5  # тишина плеера, после которой другие продолжают
 
     def __init__(self, runtime_dir: Path, audio_sink: str | None,
                  pause: MprisPause | None = None,
@@ -150,6 +149,9 @@ class Player:
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
         self._tail = defaults.tail
+        # тишина перед первым словом, если кто-то встал на паузу, и тишина плеера, после
+        # которой другие продолжают (apply_prefs)
+        self._gap_ms = defaults.gap_ms
         self._task_order = TaskOrder()  # общий порядок задач демона для очередей сессий
         self._sessions = sessions
         # по session_id, сессии из Sessions; нет активной — курсор ходит по пустой
@@ -189,8 +191,8 @@ class Player:
         self._pause = pause
         self._spoke = False  # _speaking() на прошлом _follow_status
         self._pausing = False  # pause_playing вызван, ответа ещё нет
-        self._gap_id = 0  # таймер PAUSE_GAP_SECONDS: идёт — звук ждёт
-        self._resume_id = 0  # таймер RESUME_DELAY_SECONDS до pause.resume
+        self._gap_id = 0  # таймер тишины до речи (_gap_ms): идёт — звук ждёт
+        self._resume_id = 0  # таймер тишины после речи (_gap_ms) до pause.resume
         self._pause_others = defaults.pause_others  # флажок паузы других (apply_prefs)
         # cwd очищенной `/clear` активной сессии: сессия оттуда станет активной вместо неё.
         # Инвариант: ожидание замены => активной сессии нет (ставится только при снятии
@@ -202,14 +204,16 @@ class Player:
 
     def apply_prefs(self, prefs: Prefs) -> None:
         """Настройки плеера: хвост очереди каждой сессии, кнопка автовоспроизведения, флажок
-        паузы других плееров; играющее не трогается. Флажок снят — другие продолжают сразу, звук
-        без тишины 3 с (_follow_status); поставлен — пауза со следующего начала речи. Очереди без
+        паузы других плееров и тишина до и после речи; играющее не трогается. Флажок снят —
+        другие продолжают сразу, звук без тишины (_follow_status); поставлен — пауза со
+        следующего начала речи. Новая тишина — с ближайшего таймера. Очереди без
         фокуса режутся до нового tail сразу, с фокусом — хвост начатых постепенно
         (MessageQueue.start); отжатая кнопка снимает фокус (_focused), и очередь режется тут же. Нажатие звук не начинает: отсюда путь только к обрезке и
         окну (_changed)."""
         self._tail = prefs.tail
         self._autoplay = prefs.autoplay
         self._pause_others = prefs.pause_others
+        self._gap_ms = prefs.gap_ms
         for queue in [*self._queues.values(), self._no_session]:
             queue.tail = prefs.tail
         self._changed()
@@ -410,7 +414,7 @@ class Player:
         self._changed()
 
     def shutdown(self) -> None:
-        """Выход процесса: другие плееры продолжают сразу, без RESUME_DELAY_SECONDS; счётчик
+        """Выход процесса: другие плееры продолжают сразу, без тишины; счётчик
         предложений остановлен; сообщения — в messages.json для следующего запуска (файлы
         непрослушанных остаются в store/, прослушанных — удаляются), вместе с id их задач:
         предложения, пришедшие после выхода, — их."""
@@ -827,8 +831,8 @@ class Player:
 
     def _follow_status(self) -> None:
         """Пауза других по статусу и ворота звука: начал звучать — снять таймер продолжения
-        или поставить других на паузу; замолчал — продолжение через RESUME_DELAY_SECONDS.
-        Запомненный файл звучит, когда ответа паузы не ждут и PAUSE_GAP_SECONDS не идут. Флажок
+        или поставить других на паузу; замолчал — продолжение через _gap_ms тишины.
+        Запомненный файл звучит, когда ответа паузы не ждут и тишина до речи не идёт. Флажок
         pause_others снят — сначала другие отпущены (_release_others)."""
         if not self._pause_others:
             self._release_others()
@@ -856,17 +860,17 @@ class Player:
             self._pause.pause_playing(self._on_others_paused)
 
     def _on_others_paused(self, paused: bool) -> None:
-        """Ответ pause_playing. Плеер звучит сам и кто-то встал — PAUSE_GAP_SECONDS тишины
-        (в удержании и в idle звука этого плеера нет — тишину выдерживать некому); прежние 3 с
-        ещё идут (пауза пользователя и снова ▶, пока другой плеер уже не держится) — звук по
-        ним, второго отсчёта нет. Замолчал, пока ждал ответа, — продолжение через
-        RESUME_DELAY_SECONDS. Флажок снят, пока ждали, — тишины нет, другие отпускает
+        """Ответ pause_playing. Плеер звучит сам и кто-то встал — _gap_ms тишины
+        (в удержании и в idle звука этого плеера нет — тишину выдерживать некому); прежняя тишина
+        ещё идёт (пауза пользователя и снова ▶, пока другой плеер уже не держится) — звук по
+        ней, второго отсчёта нет. Замолчал, пока ждал ответа, — продолжение через
+        _gap_ms тишины. Флажок снят, пока ждали, — тишины нет, другие отпускает
         _follow_status из _changed."""
         self._pausing = False
         if not self._speaking():
             self._resume_later()
         elif paused and self._pause_others and self._status == "playing" and not self._gap_id:
-            self._gap_id = GLib.timeout_add_seconds(self.PAUSE_GAP_SECONDS, self._gap_over)
+            self._gap_id = GLib.timeout_add(self._gap_ms, self._gap_over)
         self._changed()
 
     def _gap_over(self) -> bool:
@@ -880,7 +884,7 @@ class Player:
         if (self._pause is None or not self._pause_others or self._pausing
                 or not self._pause.holding):
             return
-        self._resume_id = GLib.timeout_add_seconds(self.RESUME_DELAY_SECONDS, self._resume_others)
+        self._resume_id = GLib.timeout_add(self._gap_ms, self._resume_others)
 
     def _resume_others(self) -> bool:
         self._resume_id = 0
@@ -888,7 +892,7 @@ class Player:
         return GLib.SOURCE_REMOVE
 
     def _release_others(self) -> None:
-        """Флажок pause_others снят: тишина 3 с и таймер продолжения сняты, пауза других
+        """Флажок pause_others снят: тишина до речи и таймер продолжения сняты, пауза других
         отпущена сразу. Ответа pause_playing ждут — отпустит _follow_status после ответа
         (к ответу состав pause.holding окончательный). Повторный вызов ничего не делает."""
         if self._gap_id:

@@ -667,6 +667,41 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual([("load",), ("save", expected)], self.prefs.calls)
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
 
+    def test_gap_spin_range_in_ms(self) -> None:
+        spin = self.window.gap_spin
+        self.assertEqual((0.0, 10000.0), tuple(spin.get_range()))
+        self.assertEqual(100.0, spin.get_increments()[0])
+        self.assertEqual(0, spin.get_digits())
+
+    def test_gap_spin_below_pause_others_check_and_reloaded_on_each_open(self) -> None:
+        w = self.window
+        grid = w.pause_others_check.get_parent()
+        self.assertIs(grid, w.gap_spin.get_parent())
+        check_top = grid.child_get_property(w.pause_others_check, "top-attach")
+        self.assertEqual(check_top + 1, grid.child_get_property(w.gap_spin, "top-attach"))
+        self.prefs.loaded = Prefs(tail=7, gap_ms=1500)
+        w.settings_button.clicked()
+        self.assertEqual(1500, w.gap_spin.get_value_as_int())
+        w.gap_spin.set_value(4000)
+        w.back_button.clicked()
+        w.settings_button.clicked()
+        self.assertEqual(1500, w.gap_spin.get_value_as_int())
+
+    def test_save_takes_typed_gap_ms_without_focus_loss(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        w.gap_spin.set_text("2500")
+        w.save_button.clicked()
+        expected = Prefs(tail=7, gap_ms=2500)
+        self.assertEqual(("save", expected), self.prefs.calls[-1])
+        self.assertEqual([("apply_prefs", expected)], self.player.calls)
+
+    def test_autoplay_click_keeps_gap_ms_from_file(self) -> None:
+        w = self.window
+        self.prefs.loaded = Prefs(tail=7, gap_ms=1500)
+        w.autoplay_button.clicked()
+        self.assertEqual(("save", Prefs(tail=7, autoplay=False, gap_ms=1500)), self.prefs.calls[-1])
+
     def test_load_error_disables_voice_controls_and_shows_reason(self) -> None:
         w = self.window
         self.settings.load_error = SettingsError("config.json не прочитан")
@@ -674,7 +709,7 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual("settings", w.stack.get_visible_child_name())
         for widget in (w.voice_combo, w.speed_spin):
             self.assertFalse(widget.get_sensitive())
-        for widget in (w.tail_spin, w.pause_others_check, w.save_button):
+        for widget in (w.tail_spin, w.pause_others_check, w.gap_spin, w.save_button):
             self.assertTrue(widget.get_sensitive())
         self.assertTrue(w.settings_status.get_visible())
         self.assertEqual("config.json не прочитан", w.settings_status.get_text())
@@ -724,7 +759,7 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual("Настройки сохранены", w.settings_status.get_text())
         self.assertEqual({"success"}, css_classes(w.settings_status))
 
-    def test_settings_screen_fields_are_voice_speed_tail_pause_others(self) -> None:
+    def test_settings_screen_fields_are_voice_speed_tail_pause_others_gap(self) -> None:
         labels = []
 
         def collect(widget) -> None:
@@ -735,7 +770,8 @@ class SettingsScreenTest(unittest.TestCase):
 
         collect(self.window.stack.get_child_by_name("settings"))
         self.assertEqual({"Настройки", "Голос", "Скорость", "Хвост очереди",
-                          "Ставить другие плееры на паузу, пока говорю", "Сохранить"},
+                          "Ставить другие плееры на паузу, пока говорю",
+                          "Пауза до и после речи, мс", "Сохранить"},
                          {text for text in labels if text})
 
     def test_save_takes_typed_tail_without_focus_loss(self) -> None:

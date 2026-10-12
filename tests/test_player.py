@@ -36,6 +36,9 @@ B0 = "1000000000000000003_bb_tts_queue_S_bb_s0.wav"
 C0 = "1000000000000000005_cc_tts_queue_S_cc_s0.wav"
 RATE = 1000
 SECONDS = 0.5
+# колбэки таймеров паузы других плееров: тишина до речи и после неё
+GAP = "_gap_over"
+RESUME = "_resume_others"
 
 
 def write_wav(path: Path, seconds: float) -> None:
@@ -1159,14 +1162,15 @@ class PlayerPrefsTest(PlayerCase):
 
 class PlayerPauseOthersTest(PlayerCase):
     """Пауза других плееров (контракт (9')): начало речи — pause_playing, звук ждёт ответа;
-    кто-то встал — звук через 3 с, ничего не встало — сразу; тишина — resume через 5 с,
-    речь снова до них — таймер снят, новой паузы нет. Таймеры — мок GLib."""
+    кто-то встал — звук через gap_ms, ничего не встало — сразу; тишина — resume через те же
+    gap_ms, речь снова до них — таймер снят, новой паузы нет. Таймеры — мок GLib, различаются
+    колбэком: GAP — тишина до речи, RESUME — после."""
 
     def setUp(self) -> None:
         super().setUp()
         self.pause = FakePause()
         ids = iter(range(100, 1000))
-        self.glib.timeout_add_seconds.side_effect = lambda seconds, callback, *data: next(ids)
+        self.glib.timeout_add.side_effect = lambda ms, callback, *data: next(ids)
         self.player = Player(self.runtime, None, pause=self.pause,
                              sessions=Sessions(self.runtime / "sessions.json"),
                              daemon_queue=self.daemon, daemon_settings=self.settings)
@@ -1175,28 +1179,52 @@ class PlayerPauseOthersTest(PlayerCase):
         self.playback = self.player._playback
         self.player.on_change = self.states.append
 
-    def timers(self, seconds: int) -> list[tuple[int, Callable[[], bool]]]:
-        """Таймеры на seconds секунд: (id, колбэк), в порядке постановки."""
-        calls = self.glib.timeout_add_seconds.call_args_list
-        return [(index + 100, c.args[1]) for index, c in enumerate(calls) if c.args[0] == seconds]
+    def timers(self, kind: str) -> list[tuple[int, Callable[[], bool]]]:
+        """Таймеры kind (GAP или RESUME): (id, колбэк), в порядке постановки."""
+        calls = self.glib.timeout_add.call_args_list
+        return [(index + 100, c.args[1]) for index, c in enumerate(calls)
+                if c.args[1].__name__ == kind]
+
+    def delays(self) -> list[tuple[str, int]]:
+        """(kind, мс) каждого поставленного таймера, в порядке постановки."""
+        return [(c.args[1].__name__, c.args[0]) for c in self.glib.timeout_add.call_args_list]
 
     def removed(self) -> list[int]:
         return [c.args[0] for c in self.glib.source_remove.call_args_list]
 
-    def fire(self, seconds: int) -> None:
-        """Срабатывание последнего таймера на seconds секунд."""
-        timer_id, callback = self.timers(seconds)[-1]
+    def fire(self, kind: str) -> None:
+        """Срабатывание последнего таймера kind."""
+        timer_id, callback = self.timers(kind)[-1]
         self.assertNotIn(timer_id, self.removed(), "таймер уже снят")
         self.assertEqual(self.glib.SOURCE_REMOVE, callback())
 
     def speak_after_gap(self, *names: str) -> None:
-        """Старт с предложениями names: кто-то встал на паузу, 3 с прошли, звук пошёл."""
+        """Старт с предложениями names: кто-то встал на паузу, тишина прошла, звук пошёл."""
         self.start_with(*names)
         self.pause.answer(True)
-        self.fire(Player.PAUSE_GAP_SECONDS)
+        self.fire(GAP)
 
-    def test_constants(self) -> None:
-        self.assertEqual((3, 5), (Player.PAUSE_GAP_SECONDS, Player.RESUME_DELAY_SECONDS))
+    def test_gap_before_and_after_speech_is_3000_ms_by_default(self) -> None:
+        self.speak_after_gap(A0)
+        self.finish()
+        self.end_by_count()
+        self.assertEqual([(GAP, 3000), (RESUME, 3000)], self.delays())
+
+    def test_gap_ms_from_prefs_before_and_after_speech(self) -> None:
+        self.player.apply_prefs(Prefs(gap_ms=1200))
+        self.speak_after_gap(A0)
+        self.finish()
+        self.end_by_count()
+        self.assertEqual([(GAP, 1200), (RESUME, 1200)], self.delays())
+
+    def test_new_gap_ms_leaves_running_timer(self) -> None:
+        self.start_with(A0)
+        self.pause.answer(True)
+        self.player.apply_prefs(Prefs(gap_ms=800))
+        self.assertEqual([], self.removed())
+        self.fire(GAP)
+        self.player.toggle_play_pause()
+        self.assertEqual([(GAP, 3000), (RESUME, 800)], self.delays())
 
     def test_start_of_speech_pauses_once_and_sound_waits_for_answer(self) -> None:
         self.start_with(A0, A1)
@@ -1207,8 +1235,8 @@ class PlayerPauseOthersTest(PlayerCase):
         self.start_with(A0, A1)
         self.pause.answer(True)
         self.assertEqual([], self.playback.played)
-        self.assertEqual(1, len(self.timers(3)))
-        self.fire(3)
+        self.assertEqual(1, len(self.timers(GAP)))
+        self.fire(GAP)
         self.assertEqual([(A0, 0.0)], self.playback.starts)
         self.finish()
         self.assertEqual([A0, A1], self.playback.played)
@@ -1218,7 +1246,7 @@ class PlayerPauseOthersTest(PlayerCase):
         self.start_with(A0, A1)
         self.pause.answer(False)
         self.assertEqual([(A0, 0.0)], self.playback.starts)
-        self.assertEqual([], self.timers(3))
+        self.assertEqual([], self.timers(GAP))
 
     def test_state_during_gap_is_playing_at_message_start(self) -> None:
         self.start_with(A0, A1)
@@ -1233,10 +1261,10 @@ class PlayerPauseOthersTest(PlayerCase):
         self.pause.answer(True)
         self.player.toggle_play_pause()
         self.assertEqual("paused", self.state().status)
-        self.fire(3)
+        self.fire(GAP)
         self.assertEqual([], self.playback.played)
         self.assertEqual(["pause_playing"], self.pause.calls)
-        self.fire(5)
+        self.fire(RESUME)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_row_click_and_play_during_gap_sounds_after_same_gap(self) -> None:
@@ -1245,25 +1273,25 @@ class PlayerPauseOthersTest(PlayerCase):
         self.play_at(1)
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual([], self.playback.played)
-        self.assertEqual(1, len(self.timers(3)))
+        self.assertEqual(1, len(self.timers(GAP)))
         self.assertEqual(["pause_playing"], self.pause.calls)
-        self.fire(3)
+        self.fire(GAP)
         self.assertEqual([(B0, 0.0)], self.playback.starts)
         self.assertEqual(["pause_playing"], self.pause.calls)
 
     def test_new_pause_during_gap_keeps_same_gap(self) -> None:
-        """В тишине 3 с другой плеер больше не держится (пользователь сам его тронул), ⏸ —
-        продолжать некого; ▶ в те же 3 с — новая пауза, но отсчёт прежний."""
+        """В тишине до речи другой плеер больше не держится (пользователь сам его тронул), ⏸ —
+        продолжать некого; ▶ в ту же тишину — новая пауза, но отсчёт прежний."""
         self.start_with(A0, A1)
         self.pause.answer(True)
         self.pause.holding = False
         self.player.toggle_play_pause()
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
         self.player.toggle_play_pause()
         self.assertEqual(["pause_playing", "pause_playing"], self.pause.calls)
         self.pause.answer(True)
-        self.assertEqual(1, len(self.timers(3)))
-        self.fire(3)
+        self.assertEqual(1, len(self.timers(GAP)))
+        self.fire(GAP)
         self.assertEqual([(A0, 0.0)], self.playback.starts)
         self.player.shutdown()
         self.assertEqual([], self.removed())  # снимать нечего: единственный отсчёт кончился
@@ -1274,17 +1302,17 @@ class PlayerPauseOthersTest(PlayerCase):
         self.player.seek(0.7)
         self.assertEqual([], self.playback.played)
         self.assertAlmostEqual(0.7, self.state().position_s)
-        self.fire(3)
+        self.fire(GAP)
         self.assertEqual(A1, self.playback.starts[-1][0])
         self.assertAlmostEqual(0.2, self.playback.starts[-1][1])
 
     def test_pause_then_resume_timer_and_speech_again_cancels_it(self) -> None:
         self.speak_after_gap(A0, A1)
         self.player.toggle_play_pause()
-        self.assertEqual(1, len(self.timers(5)))
+        self.assertEqual(1, len(self.timers(RESUME)))
         self.assertEqual(["pause_playing"], self.pause.calls)
         self.player.toggle_play_pause()
-        self.assertIn(self.timers(5)[0][0], self.removed())
+        self.assertIn(self.timers(RESUME)[0][0], self.removed())
         self.assertEqual(["pause_playing"], self.pause.calls)
         self.assertEqual([A0, A0], self.playback.played)
 
@@ -1293,20 +1321,20 @@ class PlayerPauseOthersTest(PlayerCase):
         self.start_with(A0, A1)
         self.assertEqual([], self.pause.calls)
         self.assertEqual([(A0, 0.0)], self.playback.starts)
-        self.assertEqual([], self.timers(3))
+        self.assertEqual([], self.timers(GAP))
 
     def test_unchecked_during_speech_resumes_at_once_without_5s_timer(self) -> None:
         self.speak_after_gap(A0, A1)
         self.player.apply_prefs(Prefs(pause_others=False))
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
         self.player.toggle_play_pause()
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_unchecked_during_5s_after_speech_resumes_once_and_removes_timer(self) -> None:
         self.speak_after_gap(A0, A1)
         self.player.toggle_play_pause()
-        timer_id = self.timers(5)[0][0]
+        timer_id = self.timers(RESUME)[0][0]
         self.player.apply_prefs(Prefs(pause_others=False))
         self.assertIn(timer_id, self.removed())
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
@@ -1316,7 +1344,7 @@ class PlayerPauseOthersTest(PlayerCase):
     def test_unchecked_during_gap_sounds_at_once_and_resumes(self) -> None:
         self.start_with(A0, A1)
         self.pause.answer(True)
-        gap_id = self.timers(3)[0][0]
+        gap_id = self.timers(GAP)[0][0]
         self.assertEqual([], self.playback.played)
         self.player.apply_prefs(Prefs(pause_others=False))
         self.assertIn(gap_id, self.removed())
@@ -1330,7 +1358,7 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual([], self.playback.played)
         self.pause.answer(True)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
-        self.assertEqual([], self.timers(3))
+        self.assertEqual([], self.timers(GAP))
         self.assertEqual([(A0, 0.0)], self.playback.starts)
 
     def test_unchecked_while_answer_pending_and_speech_stopped_resumes_on_answer(self) -> None:
@@ -1341,8 +1369,8 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual(["pause_playing"], self.pause.calls)
         self.pause.answer(True)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
-        self.assertEqual([], self.timers(5))
-        self.assertEqual([], self.timers(3))
+        self.assertEqual([], self.timers(RESUME))
+        self.assertEqual([], self.timers(GAP))
 
     def test_checked_during_speech_pauses_from_next_speech_start(self) -> None:
         self.player.apply_prefs(Prefs(pause_others=False))
@@ -1352,7 +1380,7 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual([], self.pause.calls)
         self.player.toggle_play_pause()
         self.assertEqual([], self.pause.calls)
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
         self.player.toggle_play_pause()
         self.assertEqual(["pause_playing"], self.pause.calls)
 
@@ -1364,8 +1392,8 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual(["pause_playing"], self.pause.calls)
         self.pause.answer(True)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
-        self.assertEqual([], self.timers(3))
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(GAP))
+        self.assertEqual([], self.timers(RESUME))
 
     def test_shutdown_after_unchecked_resumes_again_and_stops(self) -> None:
         self.speak_after_gap(A0, A1)
@@ -1380,9 +1408,9 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual(["pause_playing"], self.pause.calls)
         self.pause.answer(True)
         self.assertEqual(["pause_playing"], self.pause.calls)
-        self.assertEqual(1, len(self.timers(3)))
+        self.assertEqual(1, len(self.timers(GAP)))
         self.assertEqual([], self.playback.played)
-        self.fire(3)
+        self.fire(GAP)
         self.assertEqual([(A0, 0.0)], self.playback.starts)
 
     def test_same_value_changes_nothing(self) -> None:
@@ -1397,7 +1425,7 @@ class PlayerPauseOthersTest(PlayerCase):
         self.end_by_count()
         self.assertEqual("idle", self.state().status)
         self.assertEqual(["pause_playing"], self.pause.calls)
-        self.fire(5)
+        self.fire(RESUME)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_new_answer_within_5s_sounds_at_once_without_new_pause(self) -> None:
@@ -1406,27 +1434,27 @@ class PlayerPauseOthersTest(PlayerCase):
         self.end_by_count()
         self.arrive(B0)
         self.assertEqual([A0, B0], self.playback.played)
-        self.assertIn(self.timers(5)[0][0], self.removed())
+        self.assertIn(self.timers(RESUME)[0][0], self.removed())
         self.assertEqual(["pause_playing"], self.pause.calls)
-        self.assertEqual(1, len(self.timers(3)))
+        self.assertEqual(1, len(self.timers(GAP)))
 
     def test_stop_button_resumes_after_5s(self) -> None:
         self.speak_after_gap(A0, B0)
         self.player.stop()
-        self.fire(5)
+        self.fire(RESUME)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_row_click_stops_and_resumes_after_5s(self) -> None:
         self.speak_after_gap(A0, B0)
         self.player.play_message(self.player._queue.messages[1])
         self.assertEqual("stopped", self.state().status)
-        self.fire(5)
+        self.fire(RESUME)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_speech_after_resume_pauses_again(self) -> None:
         self.speak_after_gap(A0, A1)
         self.player.toggle_play_pause()
-        self.fire(5)
+        self.fire(RESUME)
         self.player.toggle_play_pause()
         self.assertEqual(["pause_playing", "resume", "pause_playing"], self.pause.calls)
 
@@ -1434,13 +1462,13 @@ class PlayerPauseOthersTest(PlayerCase):
         self.start_with(A0, A1)
         self.pause.answer(False)
         self.player.toggle_play_pause()
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
 
     def test_waiting_for_sentence_of_growing_message_keeps_others_paused(self) -> None:
         self.speak_after_gap(A0)
         self.finish()
         self.assertEqual("playing", self.state().status)
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
         self.arrive(A1)
         self.assertEqual([A0, A1], self.playback.played)
         self.assertEqual(["pause_playing"], self.pause.calls)
@@ -1448,10 +1476,10 @@ class PlayerPauseOthersTest(PlayerCase):
     def test_speech_stops_before_answer_then_answer_starts_resume_timer(self) -> None:
         self.start_with(A0, A1)
         self.player.toggle_play_pause()
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
         self.pause.answer(True)
-        self.assertEqual([], self.timers(3))
-        self.fire(5)
+        self.assertEqual([], self.timers(GAP))
+        self.fire(RESUME)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_speech_restarts_before_answer_no_second_pause(self) -> None:
@@ -1462,18 +1490,18 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual([], self.playback.played)
         self.pause.answer(False)
         self.assertEqual([A0], self.playback.played)
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
 
-    # Удержание (контракт (10)): свой текст ставит других на паузу тем же путём, без 3 с.
+    # Удержание (контракт (10)): свой текст ставит других на паузу тем же путём, без тишины до речи.
 
     def test_hold_while_playing_does_not_pause_again(self) -> None:
         self.speak_after_gap(A0, B0)
         self.player.hold()
         self.assertEqual("paused", self.state().status)
         self.assertEqual(["pause_playing"], self.pause.calls)
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
         self.player.release()
-        self.fire(5)
+        self.fire(RESUME)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_hold_when_idle_pauses_once_without_gap(self) -> None:
@@ -1481,29 +1509,29 @@ class PlayerPauseOthersTest(PlayerCase):
         self.player.hold()
         self.assertEqual(["pause_playing"], self.pause.calls)
         self.pause.answer(True)
-        self.assertEqual([], self.timers(3))
+        self.assertEqual([], self.timers(GAP))
         self.player.release()
-        self.fire(5)
+        self.fire(RESUME)
         self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_shutdown_resumes_at_once_and_stops(self) -> None:
         self.speak_after_gap(A0)
         self.player.shutdown()
         self.assertEqual(["pause_playing", "resume", "stop"], self.pause.calls)
-        self.assertEqual([], self.timers(5))
+        self.assertEqual([], self.timers(RESUME))
 
     def test_shutdown_removes_resume_timer(self) -> None:
         self.speak_after_gap(A0, A1)
         self.player.toggle_play_pause()
         self.player.shutdown()
-        self.assertIn(self.timers(5)[0][0], self.removed())
+        self.assertIn(self.timers(RESUME)[0][0], self.removed())
         self.assertEqual(["pause_playing", "resume", "stop"], self.pause.calls)
 
     def test_shutdown_removes_gap_timer(self) -> None:
         self.start_with(A0)
         self.pause.answer(True)
         self.player.shutdown()
-        self.assertIn(self.timers(3)[0][0], self.removed())
+        self.assertIn(self.timers(GAP)[0][0], self.removed())
         self.assertEqual([], self.playback.played)
 
     def test_without_pause_sound_at_once(self) -> None:
@@ -1516,7 +1544,7 @@ class PlayerPauseOthersTest(PlayerCase):
         self.assertEqual([A0], self.playback.played)
         self.player.toggle_play_pause()
         self.player.shutdown()
-        self.glib.timeout_add_seconds.assert_not_called()
+        self.glib.timeout_add.assert_not_called()
 
 
 class PlayerMprisTest(PlayerCase):
@@ -1545,21 +1573,22 @@ class PlayerMprisTest(PlayerCase):
             if not context.iteration(False):
                 time.sleep(0.005)
 
-    def fire_last(self, seconds: int) -> None:
-        call = [c for c in self.glib.timeout_add_seconds.call_args_list if c.args[0] == seconds][-1]
+    def fire_last(self, kind: str) -> None:
+        call = [c for c in self.glib.timeout_add.call_args_list
+                if c.args[1].__name__ == kind][-1]
         call.args[1]()
 
-    def test_other_paused_at_start_and_playing_again_5s_after_end(self) -> None:
+    def test_other_paused_at_start_and_playing_again_after_gap(self) -> None:
         self.start_with(A0)
         self.spin_until(lambda: self.other.status == "Paused")
-        self.spin_until(lambda: self.glib.timeout_add_seconds.called)
+        self.spin_until(lambda: self.glib.timeout_add.called)
         self.assertEqual([], self.playback.played)
-        self.fire_last(Player.PAUSE_GAP_SECONDS)
+        self.fire_last(GAP)
         self.assertEqual([A0], self.playback.played)
         self.finish()
         self.end_by_count()
         self.assertEqual("idle", self.state().status)
-        self.fire_last(Player.RESUME_DELAY_SECONDS)
+        self.fire_last(RESUME)
         self.spin_until(lambda: self.other.status == "Playing")
         self.assertEqual(["Pause", "Play"], self.other.calls)
 
