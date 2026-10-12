@@ -774,6 +774,18 @@ class SettingsScreenTest(unittest.TestCase):
                           "Пауза до и после речи, мс", "Сохранить"},
                          {text for text in labels if text})
 
+    def test_settings_status_is_full_width_bar_at_bottom(self) -> None:
+        w = self.window
+        screen = w.stack.get_child_by_name("settings")
+        self.assertIs(screen, w.settings_status.get_parent())
+        self.assertEqual(Gtk.PackType.END,
+                         screen.child_get_property(w.settings_status, "pack-type"))
+        # отступ у формы, а не у экрана и стека: полоса доходит до краёв окна
+        self.assertEqual(0, w.stack.get_margin_start())
+        self.assertEqual(0, screen.get_margin_start())
+        self.assertEqual(0, screen.get_margin_bottom())
+        self.assertTrue(w.settings_status.get_style_context().has_class("bar"))
+
     def test_save_takes_typed_tail_without_focus_loss(self) -> None:
         w = self.window
         w.settings_button.clicked()

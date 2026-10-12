@@ -31,11 +31,14 @@ FOLDER_CLOSED_ICON = "folder-symbolic"
 SAVED_TEXT = "Настройки сохранены"
 STATUS_SUCCESS = "success"
 STATUS_ERROR = "error"
+STATUS_BAR = "bar"  # полоса во всю ширину окна у нижнего края
+SCREEN_MARGIN = 12
 # блок результата на экране настроек: провайдер ставится только на этот Label
 STATUS_CSS = b"""
-label.success, label.error { padding: 6px 8px; border-radius: 4px; color: #ffffff; }
-label.success { background-color: #2e7d32; border: 1px solid #1b5e20; }
-label.error { background-color: #c62828; border: 1px solid #8e0000; }
+label.success, label.error { padding: 6px 8px; border-radius: 4px; }
+label.success { background-color: alpha(#2e7d32, 0.25); border: 1px solid alpha(#2e7d32, 0.4); }
+label.error { color: #ffffff; background-color: #c62828; border: 1px solid #8e0000; }
+label.bar { padding: 3px 12px; border-radius: 0; border-width: 1px 0 0 0; }
 """
 
 
@@ -166,13 +169,13 @@ class PlayerWindow(Gtk.Window):
             tools.pack_start(button, False, False, 0)
         tools.pack_end(self.text_button, False, False, 0)
 
-        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=SCREEN_MARGIN)
         main.pack_start(tools, False, False, 0)
         main.pack_start(scrolled, True, True, 0)
         main.pack_start(self.scale, False, False, 0)
         main.pack_start(buttons, False, False, 0)
 
-        self.stack = Gtk.Stack(margin=12)
+        self.stack = Gtk.Stack()
         self.stack.add_named(main, "main")
         self.stack.add_named(self._settings_screen(), "settings")
         self.stack.add_named(self._text_screen(), "text")
@@ -224,6 +227,7 @@ class PlayerWindow(Gtk.Window):
         self.gap_spin.set_digits(0)
         self.save_button = self._button("Сохранить", self._save_settings)
         self.settings_status = self._status_label()
+        self.settings_status.get_style_context().add_class(STATUS_BAR)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         header.pack_start(self.back_button, False, False, 0)
@@ -244,11 +248,15 @@ class PlayerWindow(Gtk.Window):
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         actions.pack_end(self.save_button, False, False, 0)
 
-        screen = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        screen.pack_start(header, False, False, 0)
-        screen.pack_start(fields, False, False, 0)
-        screen.pack_start(actions, False, False, 0)
-        screen.pack_end(self.settings_status, False, False, 0)  # узкий блок внизу экрана
+        form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=SCREEN_MARGIN)
+        form.pack_start(header, False, False, 0)
+        form.pack_start(fields, False, False, 0)
+        form.pack_start(actions, False, False, 0)
+
+        # блок итога вне отступа формы: полоса во всю ширину у нижнего края окна
+        screen = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        screen.pack_start(form, False, False, 0)
+        screen.pack_end(self.settings_status, False, False, 0)
         return screen
 
     @staticmethod
@@ -287,7 +295,7 @@ class PlayerWindow(Gtk.Window):
         transport.pack_start(self.text_position, False, False, 0)
         transport.pack_end(self.text_play_button, False, False, 0)
 
-        screen = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        screen = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=SCREEN_MARGIN)
         screen.pack_start(header, False, False, 0)
         screen.pack_start(scrolled, True, True, 0)
         screen.pack_start(self.text_scale, False, False, 0)
