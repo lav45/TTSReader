@@ -901,7 +901,7 @@ class TextScreenTest(unittest.TestCase):
         w = self.window
         button = w.text_button
         self.assertFalse(button.get_label())
-        self.assertEqual("audio-volume-high-symbolic", icon_name(button))
+        self.assertEqual("text-x-generic-symbolic", icon_name(button))
         self.assertEqual("Озвучить свой текст", button.get_tooltip_text())
         row = w.clear_button.get_parent()
         self.assertEqual([w.settings_button, w.clear_button, button], row.get_children())

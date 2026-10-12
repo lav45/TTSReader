@@ -142,7 +142,7 @@ class PlayerWindow(Gtk.Window):
             "user-trash-symbolic", "Очистить сообщения активной сессии", player.clear)
         self.settings_button = self._icon_button("emblem-system-symbolic", "Настройки",
                                                  self._open_settings)
-        self.text_button = self._icon_button("audio-volume-high-symbolic", "Озвучить свой текст",
+        self.text_button = self._icon_button("text-x-generic-symbolic", "Озвучить свой текст",
                                              self._open_text)
 
         self.autoplay_button = Gtk.ToggleButton()
@@ -460,7 +460,7 @@ class PlayerWindow(Gtk.Window):
 
     def _on_row_activated(self, _list, row: Gtk.ListBoxRow) -> None:
         """Клик по заголовку закрытой папки открывает её сессию, открытой — закрывает; клик по
-        дорожке выбирает сообщение (играет по play/pause)."""
+        дорожке выбирает сообщение: звучало — играет сразу, иначе — по play/pause."""
         item = self._shown_rows[row.get_index()]
         if isinstance(item, MessageRow):
             self._player.play_message(self._shown_messages[item.index])
