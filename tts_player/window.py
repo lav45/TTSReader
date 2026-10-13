@@ -571,8 +571,18 @@ def tray_menu(quit_app: Callable[[], None]) -> Gtk.Menu:
     return menu
 
 
+def tray_click(window: Gtk.Window, button: int, time: int) -> None:
+    """Левый клик по значку: окно показывается и встаёт поверх остальных, даже если уже открыто.
+
+    Время клика нужно оконному менеджеру: без него запрет перехвата фокуса оставляет окно позади.
+    """
+    if button != Gdk.BUTTON_PRIMARY:
+        return
+    window.present_with_time(time)
+
+
 class TrayIcon:
-    """Значок XApp в трее: левый клик показывает или прячет окно, правый — меню с «Выход»."""
+    """Значок XApp в трее: левый клик поднимает окно поверх остальных, правый — меню с «Выход»."""
     NAME = "tts-player"
     TOOLTIP = "TTS Player"
 
@@ -587,10 +597,5 @@ class TrayIcon:
         self._icon.connect("activate", self._on_activate)
         self._icon.set_visible(True)
 
-    def _on_activate(self, _icon, button: int, _time: int) -> None:
-        if button != Gdk.BUTTON_PRIMARY:
-            return
-        if self._window.get_visible():
-            self._window.hide()
-        else:
-            self._window.present()
+    def _on_activate(self, _icon, button: int, time: int) -> None:
+        tray_click(self._window, button, time)

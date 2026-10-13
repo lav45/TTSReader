@@ -29,7 +29,7 @@ from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sessions import Session  # noqa: E402
 from tts_player.view import play_pause_label, position_label  # noqa: E402
-from tts_player.window import PlayerWindow, tray_menu  # noqa: E402
+from tts_player.window import PlayerWindow, tray_click, tray_menu  # noqa: E402
 
 if not Gtk.init_check(None)[0]:
     raise RuntimeError("Gtk.init_check: дисплей недоступен")
@@ -1058,6 +1058,25 @@ class TrayMenuTest(unittest.TestCase):
         self.assertEqual(["Выход"], list(items))
         items["Выход"].activate()
         self.assertEqual(["quit"], calls)
+
+
+class TrayClickTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.window = Gtk.Window()
+        self.addCleanup(self.window.destroy)
+
+    def test_left_click_shows_hidden_window(self) -> None:
+        tray_click(self.window, Gdk.BUTTON_PRIMARY, Gdk.CURRENT_TIME)
+        self.assertTrue(self.window.get_visible())
+
+    def test_left_click_keeps_open_window_open(self) -> None:
+        self.window.show()
+        tray_click(self.window, Gdk.BUTTON_PRIMARY, Gdk.CURRENT_TIME)
+        self.assertTrue(self.window.get_visible())
+
+    def test_other_button_does_nothing(self) -> None:
+        tray_click(self.window, Gdk.BUTTON_SECONDARY, Gdk.CURRENT_TIME)
+        self.assertFalse(self.window.get_visible())
 
 
 if __name__ == "__main__":
