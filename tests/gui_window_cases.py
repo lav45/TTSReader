@@ -699,6 +699,44 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual(("save", expected), self.prefs.calls[-1])
         self.assertEqual([("apply_prefs", expected)], self.player.calls)
 
+    def test_dictation_gap_spin_range_in_ms(self) -> None:
+        spin = self.window.dictation_gap_spin
+        self.assertEqual((0.0, 10000.0), tuple(spin.get_range()))
+        self.assertEqual(100.0, spin.get_increments()[0])
+        self.assertEqual(0, spin.get_digits())
+
+    def test_dictation_gap_field_under_gap_field_labelled_and_reloaded_on_each_open(self) -> None:
+        w = self.window
+        grid = w.gap_spin.get_parent()
+        self.assertIs(grid, w.dictation_gap_spin.get_parent())
+        gap_top = grid.child_get_property(w.gap_spin, "top-attach")
+        top = grid.child_get_property(w.dictation_gap_spin, "top-attach")
+        self.assertEqual(gap_top + 1, top)
+        self.assertEqual("Продолжать после диктовки через, мс", grid.get_child_at(0, top).get_text())
+        self.prefs.loaded = Prefs(tail=7, dictation_gap_ms=4500)
+        w.settings_button.clicked()
+        self.assertEqual(4500, w.dictation_gap_spin.get_value_as_int())
+        w.dictation_gap_spin.set_value(500)
+        w.back_button.clicked()
+        w.settings_button.clicked()
+        self.assertEqual(4500, w.dictation_gap_spin.get_value_as_int())
+
+    def test_save_takes_typed_dictation_gap_ms_without_focus_loss(self) -> None:
+        w = self.window
+        w.settings_button.clicked()
+        w.dictation_gap_spin.set_text("1500")
+        w.save_button.clicked()
+        expected = Prefs(tail=7, dictation_gap_ms=1500)
+        self.assertEqual(("save", expected), self.prefs.calls[-1])
+        self.assertEqual([("apply_prefs", expected)], self.player.calls)
+
+    def test_autoplay_click_keeps_dictation_gap_ms_from_file(self) -> None:
+        w = self.window
+        self.prefs.loaded = Prefs(tail=7, dictation_gap_ms=4500)
+        w.autoplay_button.clicked()
+        self.assertEqual(("save", Prefs(tail=7, autoplay=False, dictation_gap_ms=4500)),
+                         self.prefs.calls[-1])
+
     def test_autoplay_click_keeps_gap_ms_from_file(self) -> None:
         w = self.window
         self.prefs.loaded = Prefs(tail=7, gap_ms=1500)
@@ -712,7 +750,8 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertEqual("settings", w.stack.get_visible_child_name())
         for widget in (w.voice_combo, w.speed_spin):
             self.assertFalse(widget.get_sensitive())
-        for widget in (w.tail_spin, w.pause_others_check, w.gap_spin, w.save_button):
+        for widget in (w.tail_spin, w.pause_others_check, w.gap_spin, w.dictation_gap_spin,
+                       w.save_button):
             self.assertTrue(widget.get_sensitive())
         self.assertTrue(w.settings_status.get_visible())
         self.assertEqual("config.json не прочитан", w.settings_status.get_text())
@@ -774,7 +813,8 @@ class SettingsScreenTest(unittest.TestCase):
         collect(self.window.stack.get_child_by_name("settings"))
         self.assertEqual({"Настройки", "Голос", "Скорость", "Хвост очереди",
                           "Ставить другие плееры на паузу, пока говорю",
-                          "Пауза до и после речи, мс", "Сохранить"},
+                          "Пауза до и после речи, мс", "Продолжать после диктовки через, мс",
+                          "Сохранить"},
                          {text for text in labels if text})
 
     def wait_ms(self, ms: int) -> None:
