@@ -1,0 +1,21 @@
+{
+  "planPath": "docs/superpowers/plans/2026-10-13-tts-player-dictation-gap-setting.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 1: dictation_gap_ms в settings.json и в ворота плеера",
+      "status": "pending",
+      "description": "**Goal:** значение из `settings.json` доходит до `DictationGate.gap_ms` через `Player.apply_prefs`.\n\n**Files:**\n- Modify: `tts_player/player_settings.py`, `tts_player/player.py` (`apply_prefs`)\n- Test: `tests/test_player_settings.py`, `tests/test_player.py`\n\n**Contract:** (3) settings.json плеера\n\n```\nбыло   {\"tail\": …, \"autoplay\": …, \"pause_others\": …, \"gap_ms\": <целое 0–10000>}\nстало  {\"tail\": …, \"autoplay\": …, \"pause_others\": …, \"gap_ms\": <целое 0–10000>,\n        \"dictation_gap_ms\": <целое 0–10000>}\nPrefs(..., gap_ms: int = 3000, dictation_gap_ms: int = 3000)\nPlayerSettings.DICTATION_GAP_MIN_MS = 0; DICTATION_GAP_MAX_MS = 10000\nPlayer.apply_prefs(prefs) → dictation.gap_ms = prefs.dictation_gap_ms (dictation None — ничего)\n```\n\n**Acceptance Criteria:**\n- [ ] нет ключа → 3000, без строки в журнале\n- [ ] 0 и 10000 читаются как есть; -1, 10001, \"3000\", 1.5 → 3000 и одна строка WARNING\n- [ ] `save` пишет `dictation_gap_ms`; `save` вне пределов — `SettingsError`, файл не меняется\n- [ ] `Player.apply_prefs` ставит `gap_ms` воротам; идущий отсчёт не меняется\n\n**Verify:** `python3 -m unittest tests.test_player_settings tests.test_player -v` → все `ok`\n\n```json:metadata\n{\"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 2: Поле «Продолжать после диктовки через, мс»",
+      "status": "pending",
+      "description": "**Goal:** поле на экране настроек показывает и сохраняет `dictation_gap_ms`.\n\n**Files:**\n- Modify: `tts_player/window.py`, `README.md` (разделы «Настройки» и «Диктовка Claude Code»: 3 с → значение поля)\n- Test: `tests/gui_window_cases.py` (и `tests/test_window_gui.py`, если кейсы регистрируются там)\n\n**Contract:** (3) — поле окна, артефакт контракта в Task 1; своего артефакта нет.\n\n**Acceptance Criteria:**\n- [ ] поле подписано «Продолжать после диктовки через, мс», стоит под «Пауза до и после речи, мс»\n- [ ] открытие настроек показывает сохранённое значение\n- [ ] «Сохранить» пишет значение в `settings.json` и в плеер (`apply_prefs`), набранное без потери фокуса тоже\n- [ ] README называет поле и его значение по умолчанию\n\n**Verify:** `python3 -m unittest discover -s tests` → `OK`\n\n```json:metadata\n{\"modelTier\": \"standard\"}\n```",
+      "blockedBy": [
+        0
+      ]
+    }
+  ],
+  "lastUpdated": "2026-10-13T18:21:05.155911"
+}
