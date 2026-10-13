@@ -1,7 +1,7 @@
 """Тесты Player: задачи хука в демон и переозвучка (заглушки DaemonQueue и DaemonSettings),
 воспроизведение по курсору, кнопки, снимок состояния, выход процесса, повтор при отказе вывода
 звука, пауза других плееров на время речи (заглушка MprisPause; сквозной — с настоящим на
-Gio.TestDBus)."""
+Gio.TestDBus), молчание за воротами диктовки (настоящий DictationGate)."""
 import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import sys
@@ -19,6 +19,7 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
 from tts_player.daemon_settings import ActiveVoice  # noqa: E402
+from tts_player.dictation_gate import DictationGate  # noqa: E402
 from tts_player.inbox import NAME_PATTERN  # noqa: E402
 from tts_player.model import HookTask, Message, Sentence  # noqa: E402
 from tts_player.settings_error import SettingsError  # noqa: E402
@@ -1669,6 +1670,139 @@ class PlayerHoldTest(PlayerCase):
         self.player.hold()
         self.player.toggle_play_pause()
         self.assertEqual("playing", self.state().status)
+
+
+class PlayerDictationTest(PlayerCase):
+    """Ворота диктовки (DictationGate, gap_ms=0: открываются сразу с концом диктовки): пока
+    закрыты, звук плеера молчит, статус playing; открылись — с начала прерванного
+    предложения. Новый звук за закрытыми воротами не начинается."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.gate = DictationGate(gap_ms=0)
+        self.pause = FakePause()
+        ids = iter(range(100, 1000))
+        self.glib.timeout_add.side_effect = lambda ms, callback, *data: next(ids)
+        self.player = Player(self.runtime, None, pause=self.pause,
+                             sessions=Sessions(self.runtime / "sessions.json"),
+                             daemon_queue=self.daemon, daemon_settings=self.settings,
+                             dictation=self.gate)
+        self.player.add_session("S", "/w/proj")
+        self.player.select_session("S")
+        self.playback = self.player._playback
+        self.player.on_change = self.states.append
+
+    def sounding_second_sentence(self) -> None:
+        """Ответ A0 A1 звучит без паузы других (никто не встал): A1 с 0.5 с, в нём 0.2 с."""
+        self.start_with(A0, A1)
+        self.pause.answer(False)
+        self.finish()
+        self.assertEqual([(A0, 0.0), (A1, 0.0)], self.playback.starts)
+        self.playback.at = 0.2
+
+    def test_close_while_sounding_stops_at_sentence_start_still_playing(self) -> None:
+        self.sounding_second_sentence()
+        stops = self.playback.stops
+        self.gate.set_dictating(True)
+        state = self.state()
+        self.assertGreater(self.playback.stops, stops)
+        self.assertIsNone(self.playback.playing)
+        self.assertEqual("playing", state.status)
+        self.assertAlmostEqual(0.5, state.position_s)
+        self.assertEqual(self.states[-1], state)
+
+    def test_open_plays_interrupted_sentence_from_its_start(self) -> None:
+        self.sounding_second_sentence()
+        self.gate.set_dictating(True)
+        self.gate.set_dictating(False)
+        self.assertEqual([(A0, 0.0), (A1, 0.0), (A1, 0.0)], self.playback.starts)
+        self.assertEqual("playing", self.state().status)
+
+    def test_pause_while_closed_stays_paused_after_open_then_play_from_sentence(self) -> None:
+        self.sounding_second_sentence()
+        self.gate.set_dictating(True)
+        self.player.toggle_play_pause()
+        self.assertEqual("paused", self.state().status)
+        self.assertAlmostEqual(0.5, self.state().position_s)
+        self.gate.set_dictating(False)
+        self.assertEqual("paused", self.state().status)
+        self.assertEqual(2, len(self.playback.starts))
+        self.player.toggle_play_pause()
+        self.pause.answer(False)  # ▶ — новое начало речи
+        self.assertEqual([(A1, 0.0)], self.playback.starts[2:])
+
+    def test_play_while_still_closed_waits_for_open(self) -> None:
+        self.sounding_second_sentence()
+        self.gate.set_dictating(True)
+        self.player.toggle_play_pause()
+        self.player.toggle_play_pause()
+        self.pause.answer(False)  # ▶ — новое начало речи
+        self.assertEqual("playing", self.state().status)
+        self.assertEqual(2, len(self.playback.starts))
+        self.gate.set_dictating(False)
+        self.assertEqual([(A1, 0.0)], self.playback.starts[2:])
+
+    def test_new_message_starting_by_itself_waits_for_open(self) -> None:
+        self.player.start()
+        self.gate.set_dictating(True)
+        self.arrive(A0)
+        self.pause.answer(False)
+        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
+        self.assertEqual([], self.playback.played)
+        self.gate.set_dictating(False)
+        self.assertEqual([(A0, 0.0)], self.playback.starts)
+
+    def test_click_other_row_while_closed_plays_after_open(self) -> None:
+        self.start_with(A0, B0)
+        self.pause.answer(False)
+        self.gate.set_dictating(True)
+        self.player.play_message(self.state().messages[1])
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
+        self.assertEqual([A0], self.playback.played)
+        self.gate.set_dictating(False)
+        self.assertEqual([(A0, 0.0), (B0, 0.0)], self.playback.starts)
+
+    def test_next_sentence_of_growing_message_waits_for_open(self) -> None:
+        self.player.start()
+        self.arrive(A0)
+        self.pause.answer(False)
+        self.finish()  # ждём следующее предложение: playing без звука
+        self.gate.set_dictating(True)
+        self.arrive(A1)
+        self.assertEqual([A0], self.playback.played)
+        self.gate.set_dictating(False)
+        self.assertEqual([(A0, 0.0), (A1, 0.0)], self.playback.starts)
+
+    def test_others_stay_paused_while_closed(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(True)
+        self.player._gap_over()
+        self.assertEqual([A0], self.playback.played)
+        self.gate.set_dictating(True)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertNotIn("_resume_others",
+                         [c.args[1].__name__ for c in self.glib.timeout_add.call_args_list])
+        self.gate.set_dictating(False)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual([A0, A0], self.playback.played)
+
+    def test_close_during_output_retry_cancels_retry_and_replays_sentence_after_open(self) -> None:
+        self.sounding_second_sentence()
+        self.playback.fail("no output", True)
+        self.gate.set_dictating(True)
+        self.glib.source_remove.assert_any_call(42)
+        self.assertAlmostEqual(0.5, self.state().position_s)
+        self.gate.set_dictating(False)
+        self.assertEqual([(A1, 0.0)], self.playback.starts[2:])
+
+    def test_after_shutdown_gate_change_does_nothing(self) -> None:
+        self.sounding_second_sentence()
+        self.player.shutdown()
+        stops, count = self.playback.stops, len(self.states)
+        self.gate.set_dictating(True)
+        self.gate.set_dictating(False)
+        self.assertEqual((stops, count, 2), (self.playback.stops, len(self.states),
+                                             len(self.playback.starts)))
 
 
 class PlayerAutoplayTest(PlayerCase):
