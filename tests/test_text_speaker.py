@@ -17,6 +17,7 @@ from gi.repository import GLib  # noqa: E402
 
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
+from tts_player.dictation_gate import DictationGate  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sessions import Sessions  # noqa: E402
@@ -123,21 +124,30 @@ class TextSpeakerCase(unittest.TestCase):
         self.player = FakePlayer()
         self.states: list[TextState] = []
         self.plays: list[tuple[str, float, float]] = []  # файл, start_s, длина в момент запуска
+        self.stops = 0  # вызовы Playback.stop
 
-    def make(self, plan: list, player=None, python: Path | None = None) -> TextSpeaker:
+    def make(self, plan: list, player=None, python: Path | None = None,
+             dictation: DictationGate | None = None) -> TextSpeaker:
         self.worker.write_text(WORKER.format(plan=json.dumps(plan), log=str(self.log)))
         speaker = TextSpeaker(self.runtime, python or Path(sys.executable), self.worker,
-                              player or self.player, audio_sink="fakesink")
+                              player or self.player, audio_sink="fakesink",
+                              dictation=dictation)
         self.addCleanup(speaker.shutdown)
         speaker.on_change = self.states.append
         playback = speaker._playback
         original = playback.play
+        original_stop = playback.stop
 
         def play(path: Path, start_s: float = 0.0) -> None:
             self.plays.append((path.name, start_s, speaker.state().length_s))
             original(path, start_s)
 
+        def stop() -> None:
+            self.stops += 1
+            original_stop()
+
         playback.play = play
+        playback.stop = stop
         self.speaker = speaker
         return speaker
 
@@ -483,6 +493,103 @@ class TextSpeakerErrorTest(TextSpeakerCase):
         speaker.toggle_play_pause()
         self.run_until(lambda: self.status() == "error")
         self.assertIn("шум", speaker.state().error)
+
+
+class TextSpeakerDictationTest(TextSpeakerCase):
+    """Ворота диктовки: закрыты — свой текст молчит, статус и удержание главного плеера как
+    при звуке; открылись — с начала прерванного предложения. gap_ms=0: ворота меняются сразу."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.gate = DictationGate(gap_ms=0)
+
+    def play_second_sentence(self) -> TextSpeaker:
+        """Звучит второе предложение (начало — 0.3 с), уже не с его начала."""
+        speaker = self.make([["count", 2], ["wav", 0, 0.3], ["wav", 1, 1.0], ["done"]],
+                            dictation=self.gate)
+        speaker.set_text("Раз. Два.")
+        speaker.toggle_play_pause()
+        self.run_until(lambda: speaker.state().position_s > 0.5)
+        self.assertEqual("1.wav", self.plays[-1][0])
+        return speaker
+
+    def test_closing_stops_sound_at_sentence_start_and_keeps_playing(self) -> None:
+        speaker = self.play_second_sentence()
+        plays, stops = len(self.plays), self.stops
+        self.gate.set_dictating(True)
+        self.assertEqual(stops + 1, self.stops)
+        self.assertEqual(plays, len(self.plays))
+        state = speaker.state()
+        self.assertEqual("playing", state.status)
+        self.assertAlmostEqual(0.3, state.position_s)
+        self.assertEqual(["hold"], self.player.calls)
+
+    def test_opening_plays_interrupted_sentence_from_its_start(self) -> None:
+        speaker = self.play_second_sentence()
+        self.gate.set_dictating(True)
+        self.gate.set_dictating(False)
+        self.assertEqual(("1.wav", 0.0), self.plays[-1][:2])
+        self.assertEqual("playing", self.status())
+        self.run_until(lambda: self.status() == "stopped")
+        self.assertEqual(["hold", "release"], self.player.calls)
+
+    def test_first_sentence_waits_for_gate(self) -> None:
+        self.gate.set_dictating(True)
+        speaker = self.make([["count", 1], ["wav", 0, 0.2], ["done"]], dictation=self.gate)
+        speaker.set_text("Раз.")
+        speaker.toggle_play_pause()
+        self.assertEqual("synthesizing", self.status())
+        self.run_until(lambda: speaker._complete)
+        self.assertEqual([], self.plays)
+        self.assertEqual(TextState("playing", 0.0, 0.2, ""), speaker.state())
+        self.assertEqual(["hold"], self.player.calls)
+        self.gate.set_dictating(False)
+        self.assertEqual([("0.wav", 0.0)], [play[:2] for play in self.plays])
+        self.run_until(lambda: self.status() == "stopped")
+
+    def test_synthesis_error_while_closed_keeps_waiting_sentence(self) -> None:
+        self.gate.set_dictating(True)
+        speaker = self.make([["count", 2], ["wav", 0, 0.2], ["error", "сбой"]],
+                            dictation=self.gate)
+        speaker.set_text("Раз. Два.")
+        speaker.toggle_play_pause()
+        self.run_until(lambda: speaker._synth_failed)
+        self.assertEqual("playing", self.status())
+        self.gate.set_dictating(False)
+        self.assertEqual([("0.wav", 0.0)], [play[:2] for play in self.plays])
+        self.run_until(lambda: self.status() == "error")
+        self.assertEqual("сбой", speaker.state().error)
+
+    def test_pause_while_closed_stays_paused_after_opening(self) -> None:
+        speaker = self.play_second_sentence()
+        self.gate.set_dictating(True)
+        speaker.toggle_play_pause()
+        state = speaker.state()
+        self.assertEqual("paused", state.status)
+        self.assertAlmostEqual(0.3, state.position_s)
+        plays = len(self.plays)
+        self.gate.set_dictating(False)
+        self.assertEqual(plays, len(self.plays))
+        self.assertEqual("paused", self.status())
+        self.assertEqual(["hold", "release"], self.player.calls)
+
+    def test_seek_while_closed_does_not_sound(self) -> None:
+        speaker = self.play_second_sentence()
+        self.gate.set_dictating(True)
+        plays = len(self.plays)
+        speaker.seek(0.1)
+        self.assertEqual(plays, len(self.plays))
+        self.assertEqual(TextState("playing", 0.1, 1.3, ""), speaker.state())
+        self.gate.set_dictating(False)
+        self.assertEqual(("0.wav", 0.1), self.plays[-1][:2])
+
+    def test_gate_after_shutdown_does_nothing(self) -> None:
+        speaker = self.play_second_sentence()
+        speaker.shutdown()
+        states, plays, stops = len(self.states), len(self.plays), self.stops
+        self.gate.set_dictating(True)
+        self.gate.set_dictating(False)
+        self.assertEqual((states, plays, stops), (len(self.states), len(self.plays), self.stops))
 
 
 class TextSpeakerPauseTest(TextSpeakerCase):
