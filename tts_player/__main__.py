@@ -25,6 +25,7 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
+from tts_player.dictation_watch import DictationWatch  # noqa: E402
 from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance  # noqa: E402
 from tts_player.mpris_pause import MprisPause  # noqa: E402
@@ -38,6 +39,12 @@ from tts_player.text_speaker import TextSpeaker  # noqa: E402
 
 SYNTH_WORKER = Path(__file__).resolve().parent / "synth_worker.py"
 SENTENCE_COUNT_WORKER = Path(__file__).resolve().parent / "sentence_count_worker.py"
+
+dictation_log = logging.getLogger("tts_player.dictation")
+
+
+def log_dictation(active: bool) -> None:
+    dictation_log.info("диктовка началась" if active else "диктовка кончилась")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -97,7 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     sessions.load()  # сессии прошлого запуска — до player.start()
     tts_python = Path(args.tts_python).expanduser()
     output = OutputIdle()  # один на процесс: звук очереди и своего текста будит вывод для обоих
+    dictation = DictationWatch(log_dictation)  # слежение за диктовкой Claude Code, пока — в журнал
     try:
+        dictation.start()
         player = Player(Path(runtime), args.audio_sink, pause,
                         hook_tasks_dir=hook_home.queue_dir,
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
@@ -116,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
                                        args.audio_sink, output)
             run_gui(player, settings, prefs, text_speaker, args.show, hook_home)
     finally:
+        dictation.stop()  # процессы pactl убиты и подобраны; повторный stop безвреден
         hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
     return 0
 
