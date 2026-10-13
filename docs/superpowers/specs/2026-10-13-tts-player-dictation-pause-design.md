@@ -73,8 +73,14 @@
 ## Цепочка
 
 PipeWire (поток записи Claude Code появился / исчез) → `DictationWatch` (новый, процесс
-`pactl subscribe`) → `Player` (озвучка ответов и свой текст молчат / продолжают после
-`dictation_gap_ms`).
+`pactl subscribe`) → `DictationGate` (новый, один на процесс, как `OutputIdle`: диктовка идёт
+или после неё не истекли `dictation_gap_ms`) → `Player` и `TextSpeaker` (звук молчит,
+прерванное предложение начнётся с начала; ворота открылись — звучит).
+
+Уточнено при планировании 2026-10-13: в первой записи цепочки ворота стояли только у
+`Player` (`Player.set_dictating`), а свой текст играет своим `Playback` мимо ворот `Player` —
+по решению «свой текст замолкает так же» отсчёт тишины нужен обоим, поэтому он вынесен в
+общий `DictationGate`.
 
 ## Контракты
 
@@ -96,12 +102,16 @@ $ LC_ALL=C pactl -f json list clients         → [{"index": int,
 `pactl` нет или `subscribe` завершился — строка в журнале плеера; диктовка считается
 неидущей (плеер говорит как раньше).
 
-### (2) DictationWatch → Player
+### (2) DictationWatch → DictationGate → Player, TextSpeaker
 
 ```
 DictationWatch(on_change: Callable[[bool], None])   # True — диктовка началась, False — кончилась;
                                                     # вызывается только при смене, в цикле GLib
-Player.set_dictating(active: bool) -> None
+DictationGate
+  set_dictating(active: bool) -> None               # от DictationWatch
+  gap_ms: int                                       # dictation_gap_ms, новое — с ближайшего отсчёта
+  closed() -> bool                                  # диктовка идёт или отсчёт после неё не истёк
+  subscribe(on_change: Callable[[], None]) -> None  # смена closed(), в цикле GLib
 ```
 
 ### (3) settings.json плеера
