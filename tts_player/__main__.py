@@ -25,6 +25,7 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
+from tts_player.dictation_gate import DictationGate  # noqa: E402
 from tts_player.dictation_watch import DictationWatch  # noqa: E402
 from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance  # noqa: E402
@@ -43,8 +44,13 @@ SENTENCE_COUNT_WORKER = Path(__file__).resolve().parent / "sentence_count_worker
 dictation_log = logging.getLogger("tts_player.dictation")
 
 
-def log_dictation(active: bool) -> None:
-    dictation_log.info("диктовка началась" if active else "диктовка кончилась")
+def dictation_changed(gate: DictationGate) -> Callable[[bool], None]:
+    """on_change вотча: строка в журнал и затвор озвучки (Player и TextSpeaker)."""
+    def on_change(active: bool) -> None:
+        dictation_log.info("диктовка началась" if active else "диктовка кончилась")
+        gate.set_dictating(active)
+
+    return on_change
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     sessions.load()  # сессии прошлого запуска — до player.start()
     tts_python = Path(args.tts_python).expanduser()
     output = OutputIdle()  # один на процесс: звук очереди и своего текста будит вывод для обоих
-    dictation = DictationWatch(log_dictation)  # слежение за диктовкой Claude Code, пока — в журнал
+    gate = DictationGate()  # один на процесс: молчат и очередь, и свой текст
+    dictation = DictationWatch(dictation_changed(gate))  # слежение за диктовкой Claude Code
     try:
         dictation.start()
         player = Player(Path(runtime), args.audio_sink, pause,
@@ -114,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                         control_dir=control_dir(Path(runtime)),
                         # процесс — с первым запросом, остановит Player.shutdown
                         sentence_counter=SentenceCounter(tts_python, SENTENCE_COUNT_WORKER),
-                        output=output)
+                        output=output, dictation=gate)
         prefs = PlayerSettings(Path(args.settings_file).expanduser())
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:
@@ -122,10 +129,11 @@ def main(argv: list[str] | None = None) -> int:
             run(player, loop.run, loop.quit, hook_home=hook_home)
         else:
             text_speaker = TextSpeaker(Path(runtime), tts_python, SYNTH_WORKER, player,
-                                       args.audio_sink, output)
+                                       args.audio_sink, output, dictation=gate)
             run_gui(player, settings, prefs, text_speaker, args.show, hook_home)
     finally:
         dictation.stop()  # процессы pactl убиты и подобраны; повторный stop безвреден
+        gate.stop()  # после выхода Player и TextSpeaker ворота колбэков не зовут
         hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
     return 0
 
