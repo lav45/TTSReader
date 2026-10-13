@@ -1768,7 +1768,8 @@ class PlayerDictationTest(PlayerCase):
         self.gate.set_dictating(True)
         self.player.toggle_play_pause()
         self.player.toggle_play_pause()
-        self.pause.answer(False)  # ▶ — новое начало речи
+        # за закрытыми воротами для других плеер звучит: ⏸ и ▶ новой паузы не ставят
+        self.assertEqual(["pause_playing"], self.pause.calls)
         self.assertEqual("playing", self.state().status)
         self.assertEqual(2, len(self.playback.starts))
         self.gate.set_dictating(False)
@@ -1817,6 +1818,86 @@ class PlayerDictationTest(PlayerCase):
         self.gate.set_dictating(False)
         self.assertEqual(["pause_playing"], self.pause.calls)
         self.assertEqual([A0, A0], self.playback.played)
+
+    def resume_timers(self) -> list[Callable[[], bool]]:
+        """Колбэки таймеров продолжения других (RESUME), в порядке постановки."""
+        return [c.args[1] for c in self.glib.timeout_add.call_args_list
+                if c.args[1].__name__ == RESUME]
+
+    def test_dictation_in_idle_pauses_others_and_resume_after_gap_when_open(self) -> None:
+        self.player.start()
+        self.gate.set_dictating(True)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.pause.answer(True)
+        self.assertEqual([], self.glib.timeout_add.call_args_list)  # ни тишины до речи, ни продолжения
+        self.gate.set_dictating(False)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual([(RESUME, 3000)], [(c.args[1].__name__, c.args[0])
+                                            for c in self.glib.timeout_add.call_args_list])
+        self.resume_timers()[-1]()
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+
+    def test_dictation_in_paused_pauses_others(self) -> None:
+        self.sounding_second_sentence()
+        self.player.toggle_play_pause()
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.gate.set_dictating(True)
+        self.assertEqual(["pause_playing", "pause_playing"], self.pause.calls)
+
+    def test_dictation_during_speech_no_second_pause_resume_after_speech_ends(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(True)
+        self.player._gap_over()
+        self.gate.set_dictating(True)
+        self.gate.set_dictating(False)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual([A0, A0], self.playback.played)
+        self.assertEqual([], self.resume_timers())
+        self.finish()
+        self.assertEqual([A0, A0, A1], self.playback.played)
+        self.end_by_count()
+        self.finish()
+        self.assertEqual("idle", self.state().status)
+        self.assertEqual(1, len(self.resume_timers()))
+        self.resume_timers()[-1]()
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+
+    def test_pause_during_dictation_others_resume_only_after_open_and_gap(self) -> None:
+        self.start_with(A0, A1)
+        self.pause.answer(True)
+        self.player._gap_over()
+        self.gate.set_dictating(True)
+        self.player.toggle_play_pause()
+        self.assertEqual("paused", self.state().status)
+        self.assertEqual([], self.resume_timers())
+        self.gate.set_dictating(False)
+        self.assertEqual(1, len(self.resume_timers()))
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.resume_timers()[-1]()
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+
+    def test_new_message_during_dictation_sounds_after_open_others_wait_for_its_end(self) -> None:
+        """Озвучка, начатая за воротами, — та же речь для других: второй паузы и тишины до
+        речи нет, звук с открытием ворот, другие ждут конца озвучки."""
+        self.player.start()
+        self.gate.set_dictating(True)
+        self.pause.answer(True)
+        self.arrive(A0)
+        self.assertEqual([], self.playback.played)
+        self.gate.set_dictating(False)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual([(A0, 0.0)], self.playback.starts)
+        self.assertEqual([], [c for c in self.glib.timeout_add.call_args_list])
+        self.end_by_count()
+        self.finish()
+        self.assertEqual(1, len(self.resume_timers()))
+
+    def test_pause_others_off_dictation_does_not_pause_others(self) -> None:
+        self.player.apply_prefs(Prefs(pause_others=False))
+        self.player.start()
+        self.gate.set_dictating(True)
+        self.gate.set_dictating(False)
+        self.assertEqual([], self.pause.calls)
 
     def test_close_during_output_retry_cancels_retry_and_replays_sentence_after_open(self) -> None:
         self.sounding_second_sentence()

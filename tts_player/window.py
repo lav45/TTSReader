@@ -224,8 +224,7 @@ class PlayerWindow(Gtk.Window):
         self.tail_spin = Gtk.SpinButton.new_with_range(
             PlayerSettings.TAIL_MIN, PlayerSettings.TAIL_MAX, 1)
         self.tail_spin.set_digits(0)
-        self.pause_others_check = Gtk.CheckButton(
-            label="Ставить другие плееры на паузу, пока говорю")
+        self.pause_others_check = Gtk.CheckButton(label="Ставить другие плееры на паузу")
         self.gap_spin = Gtk.SpinButton.new_with_range(
             PlayerSettings.GAP_MIN_MS, PlayerSettings.GAP_MAX_MS, self.GAP_STEP_MS)
         self.gap_spin.set_digits(0)

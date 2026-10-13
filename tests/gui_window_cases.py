@@ -636,7 +636,7 @@ class SettingsScreenTest(unittest.TestCase):
     def test_pause_others_check_below_tail_and_reloaded_on_each_open(self) -> None:
         w = self.window
         self.assertIsInstance(w.pause_others_check, Gtk.CheckButton)
-        self.assertEqual("Ставить другие плееры на паузу, пока говорю",
+        self.assertEqual("Ставить другие плееры на паузу",
                          w.pause_others_check.get_label())
         grid = w.tail_spin.get_parent()
         self.assertIs(grid, w.pause_others_check.get_parent())
@@ -812,7 +812,7 @@ class SettingsScreenTest(unittest.TestCase):
 
         collect(self.window.stack.get_child_by_name("settings"))
         self.assertEqual({"Настройки", "Голос", "Скорость", "Хвост очереди",
-                          "Ставить другие плееры на паузу, пока говорю",
+                          "Ставить другие плееры на паузу",
                           "Пауза до и после речи, мс", "Продолжать после диктовки через, мс",
                           "Сохранить"},
                          {text for text in labels if text})
