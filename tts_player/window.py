@@ -212,7 +212,7 @@ class PlayerWindow(Gtk.Window):
 
     def _settings_screen(self) -> Gtk.Box:
         """Экран настроек: стрелка назад, голос, скорость, хвост, флажок паузы других плееров,
-        пауза до и после речи, «Сохранить», блок итога."""
+        пауза до и после речи, продолжение после диктовки, «Сохранить», блок итога."""
         self.back_button = self._icon_button("go-previous-symbolic", "Назад", self._show_main)
         self.voice_combo = Gtk.ComboBoxText()
         for renderer in self.voice_combo.get_cells():
@@ -229,6 +229,10 @@ class PlayerWindow(Gtk.Window):
         self.gap_spin = Gtk.SpinButton.new_with_range(
             PlayerSettings.GAP_MIN_MS, PlayerSettings.GAP_MAX_MS, self.GAP_STEP_MS)
         self.gap_spin.set_digits(0)
+        self.dictation_gap_spin = Gtk.SpinButton.new_with_range(
+            PlayerSettings.DICTATION_GAP_MIN_MS, PlayerSettings.DICTATION_GAP_MAX_MS,
+            self.GAP_STEP_MS)
+        self.dictation_gap_spin.set_digits(0)
         self.save_button = self._button("Сохранить", self._save_settings)
         self.settings_status = self._status_label()
         self.settings_status.get_style_context().add_class(STATUS_BAR)
@@ -247,6 +251,10 @@ class PlayerWindow(Gtk.Window):
         fields.attach(self.pause_others_check, 0, 3, 2, 1)
         fields.attach(Gtk.Label(label="Пауза до и после речи, мс", xalign=0.0), 0, 4, 1, 1)
         fields.attach(self.gap_spin, 1, 4, 1, 1)
+        dictation_gap_label = Gtk.Label(label="Продолжать после диктовки через, мс", xalign=0.0)
+        dictation_gap_label.set_line_wrap(True)  # длинная подпись не растягивает окно
+        fields.attach(dictation_gap_label, 0, 5, 1, 1)
+        fields.attach(self.dictation_gap_spin, 1, 5, 1, 1)
         self.voice_combo.set_hexpand(True)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -368,6 +376,7 @@ class PlayerWindow(Gtk.Window):
         self.tail_spin.set_value(loaded_prefs.tail)
         self.pause_others_check.set_active(loaded_prefs.pause_others)
         self.gap_spin.set_value(loaded_prefs.gap_ms)
+        self.dictation_gap_spin.set_value(loaded_prefs.dictation_gap_ms)
         self.voice_combo.remove_all()
         try:
             loaded = self._settings.load()
@@ -399,10 +408,12 @@ class PlayerWindow(Gtk.Window):
         try:
             self.tail_spin.update()  # набранный текст без потери фокуса
             self.gap_spin.update()
+            self.dictation_gap_spin.update()
             prefs = Prefs(tail=self.tail_spin.get_value_as_int(),
                           autoplay=self.autoplay_button.get_active(),
                           pause_others=self.pause_others_check.get_active(),
-                          gap_ms=self.gap_spin.get_value_as_int())
+                          gap_ms=self.gap_spin.get_value_as_int(),
+                          dictation_gap_ms=self.dictation_gap_spin.get_value_as_int())
             self._prefs.save(prefs)
             self._player.apply_prefs(prefs)
             if self._voice_loaded:
