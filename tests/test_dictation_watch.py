@@ -24,7 +24,8 @@ LOOP_LIMIT_S = 10.0
 
 # Поддельный pactl. Каждый вызов пишется в calls.log (pid и аргументы) вместе с LC_ALL.
 # subscribe: печатает новые строки events.txt; строка EXIT — выход. -f json list <что>:
-# содержимое <что>.json, прочитанное при запуске, после задержки из delay.txt (если есть)
+# содержимое <что>.json, прочитанное при запуске, после задержки из delay.txt (если есть);
+# есть fail.txt — сообщение в stderr и выход 1
 PACTL = '''#!{python}
 import os
 import sys
@@ -45,6 +46,9 @@ if sys.argv[1:] == ["subscribe"]:
         seen = len(lines)
         time.sleep(0.01)
 if sys.argv[1:3] == ["-f", "json"] and sys.argv[3] == "list":
+    if (ROOT / "fail.txt").exists():
+        print("Connection failure", file=sys.stderr)
+        sys.exit(1)
     text = (ROOT / f"{{sys.argv[4]}}.json").read_text()
     delay = ROOT / "delay.txt"
     if delay.exists():
@@ -86,8 +90,14 @@ class DictationWatchTest(unittest.TestCase):
         return child.pid
 
     def set_streams(self, outputs: list[dict], clients: list[dict]) -> None:
-        (self.root / "source-outputs.json").write_text(json.dumps(outputs))
-        (self.root / "clients.json").write_text(json.dumps(clients))
+        self.write("source-outputs.json", json.dumps(outputs))
+        self.write("clients.json", json.dumps(clients))
+
+    def write(self, name: str, text: str) -> None:
+        """Атомарно: поддельный pactl не прочитает файл наполовину."""
+        part = self.root / f"{name}.part"
+        part.write_text(text)
+        os.replace(part, self.root / name)
 
     def set_stream_of(self, pid: int | None) -> None:
         """Один поток записи #7 у клиента 42; pid None — потоков нет."""
@@ -110,9 +120,8 @@ class DictationWatchTest(unittest.TestCase):
     def list_calls(self) -> int:
         return sum(" list source-outputs" in line for line in self.calls())
 
-    def subscribe_pid(self) -> int:
-        [line] = [line for line in self.calls() if line.endswith(" subscribe")]
-        return int(line.split()[0])
+    def pids(self, args: str) -> list[int]:
+        return [int(line.split()[0]) for line in self.calls() if line.endswith(f" {args}")]
 
     def run_until(self, predicate, limit: float = LOOP_LIMIT_S) -> None:
         context = GLib.MainContext.default()
@@ -133,7 +142,7 @@ class DictationWatchTest(unittest.TestCase):
     def started(self, watch: DictationWatch) -> None:
         """start() и первая проверка завершена (ответ поддельного pactl — без задержки)."""
         watch.start()
-        self.run_until(lambda: self.list_calls() >= 1)
+        self.run_until(lambda: self.list_calls() >= 1 and self.pids("subscribe"))
         self.run_for(0.3)
 
     @staticmethod
@@ -180,9 +189,11 @@ class DictationWatchTest(unittest.TestCase):
         self.event("Event 'new' on source #3")
         self.event("Event 'new' on sink-input #8")
         self.event("Event 'remove' on client #42")
-        self.run_for(0.4)
-        self.assertEqual(1, self.list_calls())
-        self.assertEqual([], self.changes)
+        self.event("Event 'new' on source-output #9")  # метка: строки выше уже прочитаны
+        self.run_until(lambda: self.list_calls() == 2)
+        self.run_for(0.2)
+        self.assertEqual(2, self.list_calls())
+        self.assertEqual([True], self.changes)  # по метке: поток Claude Code есть
 
     def test_claude_stream_present_at_start(self) -> None:
         self.set_stream_of(self.process(self.claude_dir, "2.1.0"))
@@ -231,15 +242,45 @@ class DictationWatchTest(unittest.TestCase):
     def test_stop_ends_subscribe_and_callbacks(self) -> None:
         watch = self.make()
         self.started(watch)
-        pid = self.subscribe_pid()
-        (self.root / "delay.txt").write_text("0.2")
+        [subscribe] = self.pids("subscribe")
+        self.write("delay.txt", "1")
         self.set_stream_of(self.process(self.claude_dir, "2.1.0"))
         self.event("Event 'new' on source-output #7")
         self.run_until(lambda: self.list_calls() == 2)  # проверка в пути
+        [_, listing] = self.pids("-f json list source-outputs")
         watch.stop()
-        self.assertFalse(self.alive(pid))
+        self.assertFalse(self.alive(subscribe))
+        self.assertFalse(self.alive(listing))
         self.run_for(0.5)
         self.assertEqual([], self.changes)
+
+    def list_failure_during_dictation(self, break_list) -> list[str]:
+        """Диктовка идёт, break_list() ломает `pactl list`, следующая проверка не удалась:
+        одна строка WARNING (она и возвращается), диктовка кончилась, слежение выключено."""
+        self.set_stream_of(self.process(self.claude_dir, "2.1.0"))
+        watch = self.make()
+        watch.start()
+        self.run_until(lambda: self.changes)
+        break_list()
+        with self.assertLogs("tts_player.dictation_watch", "WARNING") as logs:
+            self.event("Event 'remove' on source-output #7")
+            self.run_until(lambda: len(self.changes) == 2)
+            self.event("Event 'new' on source-output #7")
+            self.run_for(0.3)
+        self.assertEqual(1, len(logs.records))
+        self.assertEqual([True, False], self.changes)
+        self.assertFalse(watch.active)
+        self.assertEqual(2, self.list_calls())  # слежение выключено: новое событие без проверки
+        return logs.output
+
+    def test_list_exit_failure_during_dictation_warns_and_ends_it(self) -> None:
+        [warning] = self.list_failure_during_dictation(lambda: self.write("fail.txt", ""))
+        self.assertIn("Connection failure", warning)
+
+    def test_list_garbage_during_dictation_warns_and_ends_it(self) -> None:
+        [warning] = self.list_failure_during_dictation(
+            lambda: self.write("source-outputs.json", "not json"))
+        self.assertIn("непонятный ответ", warning)
 
     def test_event_during_check_is_not_lost(self) -> None:
         """Первая проверка прочитала пустой список и ещё идёт; поток появился и пришло

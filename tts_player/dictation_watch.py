@@ -39,9 +39,6 @@ class DictationWatch:
         self._on_change = on_change
         self._pactl = pactl
         self._claude_dir = claude_dir
-        self._launcher = Gio.SubprocessLauncher.new(
-            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
-        self._launcher.setenv("LC_ALL", "C", True)
         self._cancellable = Gio.Cancellable()
         self._subscribe: Gio.Subprocess | None = None
         self._stdout: Gio.DataInputStream | None = None
@@ -58,7 +55,8 @@ class DictationWatch:
     def start(self) -> None:
         """Процесс subscribe и первая проверка: диктовка могла идти до запуска плеера."""
         try:
-            self._subscribe = self._spawn("subscribe")
+            # stderr не перехватывается: subscribe живёт долго, его жалобы идут в журнал плеера
+            self._subscribe = self._spawn(Gio.SubprocessFlags.STDOUT_PIPE, "subscribe")
         except GLib.Error as error:
             self._fail(f"pactl subscribe не запустился: {error.message}")
             return
@@ -71,13 +69,17 @@ class DictationWatch:
         self._broken = True
         self._end()
 
-    def _spawn(self, *args: str) -> Gio.Subprocess:
-        return self._launcher.spawnv([self._pactl, *args])
+    def _spawn(self, flags: Gio.SubprocessFlags, *args: str) -> Gio.Subprocess:
+        launcher = Gio.SubprocessLauncher.new(flags)
+        launcher.setenv("LC_ALL", "C", True)
+        return launcher.spawnv([self._pactl, *args])
 
     def _read_next(self) -> None:
         self._stdout.read_line_async(GLib.PRIORITY_DEFAULT, self._cancellable, self._read)
 
     def _read(self, stream: Gio.DataInputStream, result: Gio.AsyncResult) -> None:
+        if self._broken:
+            return
         try:
             line, _ = stream.read_line_finish_utf8(result)
         except GLib.Error as error:
@@ -103,13 +105,17 @@ class DictationWatch:
     def _list_json(self, what: str, on_list: Callable[[list], None]) -> None:
         """`pactl -f json list <what>`; разобранный список — в on_list, иначе сбой."""
         try:
-            process = self._spawn("-f", "json", "list", what)
+            # stderr list читает communicate_utf8: причина сбоя попадает в WARNING
+            flags = Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+            process = self._spawn(flags, "-f", "json", "list", what)
         except GLib.Error as error:
             self._fail(f"pactl list {what} не запустился: {error.message}")
             return
         self._list = process
 
         def done(process: Gio.Subprocess, result: Gio.AsyncResult) -> None:
+            if self._broken:
+                return
             try:
                 _, stdout, stderr = process.communicate_utf8_finish(result)
             except GLib.Error as error:
@@ -189,4 +195,5 @@ class DictationWatch:
                 process.force_exit()
                 process.wait(None)
         self._subscribe = None
+        self._stdout = None
         self._list = None
