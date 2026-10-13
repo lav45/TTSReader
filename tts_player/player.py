@@ -12,6 +12,7 @@ from gi.repository import GLib  # noqa: E402
 from tts_player.control import ControlRequests  # noqa: E402
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import ActiveVoice, DaemonSettings  # noqa: E402
+from tts_player.dictation_gate import DictationGate  # noqa: E402
 from tts_player.inbox import Inbox  # noqa: E402
 from tts_player.hook_tasks import HookTasks  # noqa: E402
 from tts_player.model import UNKNOWN_TASK, HookTask, Message, Sentence  # noqa: E402
@@ -125,6 +126,15 @@ class Player:
     _follow_status, когда ответа не ждут и тишина до речи не идёт. Поэтому команды в эту тишину
     (⏸, клик и ▶, перемотка) меняют, что заиграет, а не когда: отсчёт не перезапускается,
     другие уже стоят; окно видит playing на позиции курсора.
+    Ворота диктовки (dictation, DictationGate): закрыты — пока Claude Code слушает диктовку и
+    ещё gap_ms ворот после неё (3 с по умолчанию; в настройках — следующая правка) —
+    _follow_status звука не пускает. Закрылись, когда файл звучит, — звук стоп, тот же файл
+    запомнен с начала (_file_base: файл — одно предложение), статус playing: окно как при игре,
+    для других плееров плеер звучит — их пауза не снимается.
+    Открылись — _changed, запомненное звучит. Команды за закрытыми воротами меняют, что
+    заиграет, а не когда; ⏸ — обычная пауза на начале прерванного предложения, открытие её
+    не снимает. Новый звук (автопереход, новое сообщение, следующее предложение) ждёт тех же
+    ворот. После shutdown смена ворот ничего не делает.
     """
     RETRY_SECONDS = 2
 
@@ -136,7 +146,8 @@ class Player:
                  sessions: Sessions,
                  control_dir: Path | None = None,
                  sentence_counter: SentenceCounter | None = None,
-                 output: OutputIdle | None = None) -> None:
+                 output: OutputIdle | None = None,
+                 dictation: DictationGate | None = None) -> None:
         """pause None — других плееров не трогать; плеер её владелец (останавливает в shutdown);
         hook_tasks_dir — queue/ хука (контракт (11)), None — без задач хука; daemon_queue —
         очередь демона (контракт (12)), daemon_settings — текущий голос для переозвучки;
@@ -146,7 +157,8 @@ class Player:
         sentence_counter — счётчик предложений, плеер его владелец (останавливает в shutdown);
         None — число предложений неизвестно, конец сообщения по запасным признакам;
         output — простой вывода, общий со своим текстом (Playback), None — без тишины
-        пробуждения."""
+        пробуждения; dictation — ворота диктовки, общие со своим текстом, None — без них;
+        владелец — процесс, плеер только подписывается."""
         self.on_change: Callable[[PlayerState], None] = lambda state: None
         defaults = Prefs()
         self._tail = defaults.tail
@@ -202,6 +214,10 @@ class Player:
         # Отданные демону в этом запуске (_send) и ещё живые в очередях: только они, пока
         # синтезируются, дают фокус в idle (_focused); восстановленные из messages.json — нет
         self._sent_in_run: set[Message] = set()
+        self._dictation = dictation
+        self._shut = False  # после shutdown смена ворот диктовки ничего не делает
+        if dictation is not None:
+            dictation.subscribe(self._on_dictation)
 
     def apply_prefs(self, prefs: Prefs) -> None:
         """Настройки плеера: хвост очереди каждой сессии, кнопка автовоспроизведения, флажок
@@ -420,6 +436,7 @@ class Player:
         предложений остановлен; сообщения — в messages.json для следующего запуска (файлы
         непрослушанных остаются в store/, прослушанных — удаляются), вместе с id их задач:
         предложения, пришедшие после выхода, — их."""
+        self._shut = True
         if self._gap_id:
             GLib.source_remove(self._gap_id)
             self._gap_id = 0
@@ -839,8 +856,8 @@ class Player:
     def _follow_status(self) -> None:
         """Пауза других по статусу и ворота звука: начал звучать — снять таймер продолжения
         или поставить других на паузу; замолчал — продолжение через _gap_ms тишины.
-        Запомненный файл звучит, когда ответа паузы не ждут и тишина до речи не идёт. Флажок
-        pause_others снят — сначала другие отпущены (_release_others)."""
+        Запомненный файл звучит, когда ответа паузы не ждут, тишина до речи не идёт и ворота
+        диктовки открыты. Флажок pause_others снят — сначала другие отпущены (_release_others)."""
         if not self._pause_others:
             self._release_others()
         speaking = self._speaking()
@@ -850,8 +867,25 @@ class Player:
                 self._speech_started()
             else:
                 self._resume_later()
-        if self._due and not self._pausing and not self._gap_id:
+        if self._due and not self._pausing and not self._gap_id and not self._dictating():
             self._sound()
+
+    def _dictating(self) -> bool:
+        """Ворота диктовки закрыты: звука сейчас нельзя."""
+        return self._dictation is not None and self._dictation.closed()
+
+    def _on_dictation(self) -> None:
+        """Ворота диктовки сменились. Закрылись, когда файл звучит (или ждёт повтора после
+        отказа вывода), — звук стоп, тот же файл запомнен с начала, статус playing; открылись —
+        запомненное пускает _follow_status."""
+        if self._shut:
+            return
+        if (self._dictating() and self._status == "playing" and self._file is not None
+                and not self._due):
+            path, base = self._file, self._file_base
+            self._halt()
+            self._start_file(path, base, base)
+        self._changed()
 
     def _speaking(self) -> bool:
         """Для других плееров плеер звучит: играет сам или держит паузу ради своего текста."""

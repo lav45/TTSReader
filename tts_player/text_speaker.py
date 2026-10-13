@@ -16,6 +16,7 @@ gi.require_version("GLib", "2.0")
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+from tts_player.dictation_gate import DictationGate  # noqa: E402
 from tts_player.output_idle import OutputIdle  # noqa: E402
 from tts_player.playback import Playback  # noqa: E402
 from tts_player.player import Player  # noqa: E402
@@ -148,10 +149,21 @@ class TextSpeaker:
     Сбой синтеза ({"error"}, выход ≠ 0 без done, процесс не запустился) — текст в error;
     звучащее готовое доигрывает, и статус error ставится, когда звучать нечему. Готовое
     после сбоя играет снова без нового процесса; без готового play запускает синтез заново.
+
+    Ворота диктовки (dictation, DictationGate, общие с главным Player): закрыты — _start
+    звука не пускает, а запоминает предложение и позицию (_due); статус playing (или
+    synthesizing до первого готового), поэтому главный плеер остаётся в удержании, как при
+    звуке. Закрылись при звуке — звук стоп, запомнено начало того же предложения (файл —
+    одно предложение). Открылись при статусе playing — запомненное звучит. ⏸ за закрытыми
+    воротами — пауза на начале прерванного предложения, открытие её не снимает. После
+    shutdown смена ворот ничего не делает.
     """
 
     def __init__(self, runtime_dir: Path, python: Path, worker: Path, player: Player,
-                 audio_sink: str | None = None, output: OutputIdle | None = None) -> None:
+                 audio_sink: str | None = None, output: OutputIdle | None = None,
+                 dictation: DictationGate | None = None) -> None:
+        """dictation — ворота диктовки, None — без них; владелец — процесс, здесь только
+        подписка."""
         self.on_change: Callable[[TextState], None] = lambda state: None
         self._text_root = Path(runtime_dir) / "tts-player" / "text"
         self._python = python
@@ -170,10 +182,17 @@ class TextSpeaker:
         self._complete = False
         self._synth_failed = False
         self._error = ""
-        # Без файла — курсор; с файлом — позиция, с которой запущен файл _index.
+        # Без файла — курсор; с файлом — позиция, с которой запущен файл _index; с _due —
+        # позиция, с которой зазвучит запомненное.
         self._position = 0.0
         self._index: int | None = None
         self._file_base = 0.0
+        # Предложение, которому пора звучать, а ворота диктовки закрыты; позиция — _position
+        self._due: int | None = None
+        self._dictation = dictation
+        self._shut = False  # после shutdown смена ворот диктовки ничего не делает
+        if dictation is not None:
+            dictation.subscribe(self._on_dictation)
 
     def state(self) -> TextState:
         return TextState(self._status, self._now(), self._length(), self._error)
@@ -224,6 +243,7 @@ class TextSpeaker:
         Вызывается до Player.shutdown(): release() после него прошёл бы через Player._changed
         уже остановленного плеера — пауза других плееров (_follow_status: таймер продолжения
         _resume_later поверх уже остановленного MprisPause) и on_change окна."""
+        self._shut = True
         self._discard()
         self._status = self._rest_status()
         self._holding = False
@@ -329,7 +349,8 @@ class TextSpeaker:
         log.info("synthesis failed: %s", text)
         self._synth_failed = True
         self._error = text
-        if self._index is None and (self._status != "paused" or not self._sentences):
+        sounding = self._index is not None or self._due is not None
+        if not sounding and (self._status != "paused" or not self._sentences):
             self._status = "error"
             self._position = 0.0
 
@@ -361,13 +382,36 @@ class TextSpeaker:
         self._run_out()
 
     def _start(self, index: int, position: float) -> None:
+        """Единственное место, где звучит Playback; за закрытыми воротами — только запомнить."""
         sentence = self._sentences[index]
-        self._index = index
         self._file_base = self._offset(index)
         self._position = position
         self._status = "playing"
+        if self._dictating():
+            self._index = None
+            self._due = index
+            return
+        self._index = index
+        self._due = None
         log.info("playing %s", sentence.path.name)
         self._playback.play(sentence.path, start_s=position - self._file_base)
+
+    def _dictating(self) -> bool:
+        """Ворота диктовки закрыты: звука сейчас нельзя."""
+        return self._dictation is not None and self._dictation.closed()
+
+    def _on_dictation(self) -> None:
+        """Ворота диктовки сменились. Закрылись при звуке — стоп, запомнено начало того же
+        предложения; открылись при playing с запомненным — оно звучит."""
+        if self._shut:
+            return
+        if self._dictating() and self._index is not None:
+            index = self._index
+            self._halt()
+            self._start(index, self._offset(index))
+        elif not self._dictating() and self._status == "playing" and self._due is not None:
+            self._start(self._due, self._position)
+        self._changed()
 
     def _run_out(self) -> None:
         """Готовое кончилось: синтез завершён — stopped с начала, не удался — error с начала,
@@ -385,6 +429,7 @@ class TextSpeaker:
     def _halt(self) -> None:
         self._playback.stop()
         self._index = None
+        self._due = None
 
     def _stop_run(self) -> None:
         if self._run is not None:
