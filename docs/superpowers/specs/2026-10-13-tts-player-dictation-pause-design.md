@@ -48,6 +48,20 @@
   `application.name = "PipeWire ALSA [2.1.296]"`, `node.name = "alsa_capture.2.1.296"` — имя
   исполняемого файла Claude Code (`~/.local/share/claude/versions/<версия>`). Отпустил — поток
   закрывается. Видно в `pactl subscribe` (журнал 2026-10-13 17:12).
+- Поток Claude Code узнаётся по процессу, а не по имени: у потока записи есть `client`, у
+  клиента — `pipewire.sec.pid`, который ставит сам PipeWire (процесс подделать не может);
+  `/proc/<pid>/exe` у Claude Code — `~/.local/share/claude/versions/<версия>`. Имя
+  `PipeWire ALSA [<версия>]` меняется с каждым обновлением. Проверено на `arecord`:
+  `LC_ALL=C pactl -f json list source-outputs` → `client`, `pactl -f json list clients` →
+  `properties."pipewire.sec.pid"` (pactl 16.1; без `LC_ALL=C` JSON ломается на русских строках).
+
+Записано мной, не разобрано:
+- Другие плееры (MPRIS), поставленные на паузу озвучкой, во время диктовки на паузе и
+  остаются: для них плеер по-прежнему «говорит» (статус playing), видео не продолжится
+  посреди диктовки.
+- Запись через `arecord`/`sox`, которой Claude Code пользуется без своего модуля записи,
+  плеер не узнаёт: там процесс — `arecord`, а не Claude Code. У нас модуль есть (поток
+  `PipeWire ALSA [2.1.296]`), поэтому и короткой пробы `arecordProbe` на 150 мс нет.
 
 ## Цепочка
 
@@ -60,8 +74,4 @@
 
 ## Открытые вопросы
 
-- Как отличить поток Claude Code от чужих надёжно: по имени `PipeWire ALSA [<версия>]` или по
-  процессу (`application.process.id` → `/proc/<pid>/exe` в `~/.local/share/claude/versions/`)
-  — имя меняется с каждой версией.
-- Claude Code при запуске режима голоса пробует `arecord` на 150 мс (`arecordProbe`), если нет
-  собственного модуля записи: короткий ложный сигнал — проверить, бывает ли он у нас.
+- Чем плеер следит за потоками записи PipeWire — не выбрано.
