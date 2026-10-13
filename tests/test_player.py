@@ -1731,6 +1731,27 @@ class PlayerDictationTest(PlayerCase):
         self.pause.answer(False)  # ▶ — новое начало речи
         self.assertEqual([(A1, 0.0)], self.playback.starts[2:])
 
+    def test_seek_while_closed_plays_from_new_position_after_open(self) -> None:
+        self.sounding_second_sentence()
+        self.gate.set_dictating(True)
+        self.player.seek(0.3)
+        self.assertEqual(("playing", 2), (self.state().status, len(self.playback.starts)))
+        self.assertAlmostEqual(0.3, self.state().position_s)
+        self.gate.set_dictating(False)
+        name, start = self.playback.starts[-1]
+        self.assertEqual((3, A0), (len(self.playback.starts), name))
+        self.assertAlmostEqual(0.3, start)
+
+    def test_hold_while_closed_pauses_at_sentence_start_and_open_stays_silent(self) -> None:
+        self.sounding_second_sentence()
+        self.gate.set_dictating(True)
+        self.player.hold()
+        self.assertEqual("paused", self.state().status)
+        self.assertAlmostEqual(0.5, self.state().position_s)
+        self.gate.set_dictating(False)
+        self.assertEqual("paused", self.state().status)
+        self.assertEqual(2, len(self.playback.starts))
+
     def test_play_while_still_closed_waits_for_open(self) -> None:
         self.sounding_second_sentence()
         self.gate.set_dictating(True)

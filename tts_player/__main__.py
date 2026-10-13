@@ -45,7 +45,7 @@ dictation_log = logging.getLogger("tts_player.dictation")
 
 
 def dictation_changed(gate: DictationGate) -> Callable[[bool], None]:
-    """on_change вотча: строка в журнал и затвор озвучки (Player и TextSpeaker)."""
+    """on_change вотча: строка в журнал и ворота озвучки (Player и TextSpeaker)."""
     def on_change(active: bool) -> None:
         dictation_log.info("диктовка началась" if active else "диктовка кончилась")
         gate.set_dictating(active)
@@ -111,9 +111,9 @@ def main(argv: list[str] | None = None) -> int:
     tts_python = Path(args.tts_python).expanduser()
     output = OutputIdle()  # один на процесс: звук очереди и своего текста будит вывод для обоих
     gate = DictationGate()  # один на процесс: молчат и очередь, и свой текст
-    dictation = DictationWatch(dictation_changed(gate))  # слежение за диктовкой Claude Code
+    watch = DictationWatch(dictation_changed(gate))  # слежение за диктовкой Claude Code
     try:
-        dictation.start()
+        watch.start()
         player = Player(Path(runtime), args.audio_sink, pause,
                         hook_tasks_dir=hook_home.queue_dir,
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
@@ -132,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                                        args.audio_sink, output, dictation=gate)
             run_gui(player, settings, prefs, text_speaker, args.show, hook_home)
     finally:
-        dictation.stop()  # процессы pactl убиты и подобраны; повторный stop безвреден
+        watch.stop()  # процессы pactl убиты и подобраны; повторный stop безвреден
         gate.stop()  # после выхода Player и TextSpeaker ворота колбэков не зовут
         hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
     return 0

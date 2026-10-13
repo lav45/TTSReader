@@ -635,5 +635,43 @@ class TextSpeakerPauseTest(TextSpeakerCase):
         self.assertEqual("idle", self.main.state().status)
 
 
+class TextSpeakerSharedDictationTest(TextSpeakerCase):
+    """Одни ворота диктовки (gap_ms=0) на главный Player и свой текст, как в процессе: закрылись,
+    пока звучит свой текст, — он молчит на начале предложения, главный плеер остаётся в
+    удержании, другие плееры стоят; открылись — свой текст с начала того же предложения."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.pause = FakePause()
+        self.gate = DictationGate(gap_ms=0)
+        self.main = Player(self.runtime, "fakesink", pause=self.pause,
+                           sessions=Sessions(self.runtime / "sessions.json"),
+                           daemon_queue=DaemonQueue(self.runtime / "daemon-queue"),
+                           daemon_settings=DaemonSettings(self.runtime / "claude-tts"),
+                           dictation=self.gate)
+        self.addCleanup(self.main.shutdown)
+
+    def test_own_text_waits_for_gate_while_main_stays_held(self) -> None:
+        speaker = self.make([["count", 2], ["wav", 0, 0.3], ["wav", 1, 1.0], ["done"]],
+                            player=self.main, dictation=self.gate)
+        speaker.set_text("Раз. Два.")
+        speaker.toggle_play_pause()
+        self.run_until(lambda: speaker.state().position_s > 0.5)
+        self.assertEqual("1.wav", self.plays[-1][0])
+        plays = len(self.plays)
+        self.gate.set_dictating(True)
+        state = speaker.state()
+        self.assertEqual(("playing", plays), (state.status, len(self.plays)))
+        self.assertAlmostEqual(0.3, state.position_s)
+        self.assertTrue(self.main._held)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.gate.set_dictating(False)
+        self.assertEqual(("1.wav", 0.0), self.plays[-1][:2])
+        self.assertEqual(plays + 1, len(self.plays))
+        self.assertTrue(self.main._held)
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.run_until(lambda: self.status() == "stopped")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -182,7 +182,8 @@ class TextSpeaker:
         self._complete = False
         self._synth_failed = False
         self._error = ""
-        # Без файла — курсор; с файлом — позиция, с которой запущен файл _index.
+        # Без файла — курсор; с файлом — позиция, с которой запущен файл _index; с _due —
+        # позиция, с которой зазвучит запомненное.
         self._position = 0.0
         self._index: int | None = None
         self._file_base = 0.0

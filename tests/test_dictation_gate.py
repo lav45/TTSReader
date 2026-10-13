@@ -113,6 +113,15 @@ class DictationGateTest(unittest.TestCase):
             gate.set_dictating(True)
         self.assertEqual([True], seen)
 
+    def test_stop_from_subscriber_skips_the_rest(self) -> None:
+        gate = DictationGate(gap_ms=0)
+        self.addCleanup(gate.stop)
+        seen: list[bool] = []
+        gate.subscribe(gate.stop)
+        gate.subscribe(lambda: seen.append(gate.closed()))
+        gate.set_dictating(True)
+        self.assertEqual([], seen)
+
 
 if __name__ == "__main__":
     unittest.main()
