@@ -19,11 +19,14 @@
 2. Сразу перезапустить плеер, чтобы изменения было видно:
 
    ```bash
-   pid=$(pgrep -f "python3 -m tts_player$"); kill $pid
+   pid=$(pgrep -f "python3 -m tts_player( |$)"); kill $pid
    for i in $(seq 20); do kill -0 $pid 2>/dev/null || break; sleep 0.25; done
-   cd ~ && setsid nohup ~/.local/bin/tts-player >/dev/null 2>&1 </dev/null &
+   cd ~ && setsid ~/.local/bin/tts-player --tray </dev/null >>"$XDG_RUNTIME_DIR/tts-player/player.log" 2>&1 &
    ps -eo pid,lstart,args | grep tts_player | grep -v grep
    ```
+
+   Запуск — как у `bin/tts-player-hook`: журнал плеера дописывается в `player.log`. Без него
+   не восстановить, что плеер сделал с задачей хука (отправил, отложил, выбросил).
 
 3. В отчёте — что сделано, хэш коммита и время перезапуска. Дурацких вопросов («перезапустить?»,
    «хотите другой вариант?») не задавать: пользователь смотрит в перезапущенном плеере, а исправления
