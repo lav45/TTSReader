@@ -1,0 +1,39 @@
+{
+  "planPath": "docs/superpowers/plans/2026-10-13-tts-player-dictation-gate.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 1: DictationGate — диктовка и отсчёт тишины после неё",
+      "status": "pending",
+      "description": "**Goal:** объект, который отвечает «звук нельзя» во время диктовки и `gap_ms` после неё и\nсообщает подписчикам о смене.\n\n**Files:**\n- Create: `tts_player/dictation_gate.py`\n- Test: `tests/test_dictation_gate.py`\n\n**Contract:** (2) DictationWatch → DictationGate → Player, TextSpeaker\n\n```\nclass DictationGate:\n    def __init__(self, gap_ms: int = 3000) -> None\n    gap_ms: int                                       # новое — с ближайшего отсчёта, идущий не трогается\n    def set_dictating(self, active: bool) -> None     # от DictationWatch.on_change\n    def closed(self) -> bool                          # диктовка идёт или отсчёт после неё не истёк\n    def subscribe(self, on_change: Callable[[], None]) -> None   # смена closed(), в цикле GLib\n    def stop(self) -> None                            # выход: таймер снят, колбэков больше нет\n```\n\n**Acceptance Criteria:**\n- [ ] `set_dictating(True)` → `closed()` True, подписчики позваны один раз\n- [ ] `set_dictating(False)` → `closed()` True ещё `gap_ms`, затем False и подписчики позваны один раз\n- [ ] `set_dictating(True)` во время отсчёта → отсчёт снят, подписчиков не зовут (ворота и так закрыты); следующий `False` — новый полный отсчёт\n- [ ] `gap_ms = 0` → открытие сразу после `set_dictating(False)`\n- [ ] повторный `set_dictating` с тем же значением ничего не меняет\n- [ ] после `stop()` таймер снят, подписчиков не зовут\n\n**Verify:** `python3 -m unittest tests.test_dictation_gate -v` → все `ok`\n\n```json:metadata\n{\"files\": [\"tts_player/dictation_gate.py\", \"tests/test_dictation_gate.py\"], \"verifyCommand\": \"python3 -m unittest tests.test_dictation_gate -v\", \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 2: Player молчит за закрытыми воротами",
+      "status": "pending",
+      "description": "**Goal:** ответы не звучат во время закрытых ворот и после открытия продолжают с начала\nпрерванного предложения.\n\n**Files:**\n- Modify: `tts_player/player.py` (конструктор, `_follow_status`, подписка, `shutdown`, докстринг класса)\n- Test: `tests/test_player.py` (новый класс `PlayerDictationTest`)\n\n**Contract:** сторона чтения (2) у `Player`\n\n```\nPlayer.__init__(..., output: OutputIdle | None = None,\n                dictation: DictationGate | None = None) -> None\n# ворота звука: _follow_status зовёт _sound() только при\n#   self._due and not self._pausing and not self._gap_id and not dictation.closed()\n# подписчик ворот: закрылись при звучащем файле → _halt(), _start_file(тот же файл, base, base),\n#   статус playing; любая смена → _changed()\n```\n\n**Acceptance Criteria:**\n- [ ] ворота закрылись во время звука → `Playback.stop`, `state().status == \"playing\"`, `state().position_s` = начало текущего предложения\n- [ ] ворота открылись → `Playback.play` того же файла с позиции 0 в файле\n- [ ] ⏸ при закрытых воротах → `paused`; открытие звука не даёт; ▶ после — с начала прерванного предложения\n- [ ] новое сообщение, которое при нажатой кнопке автовоспроизведения начинается само, при закрытых воротах не звучит до открытия, затем звучит с начала\n- [ ] клик по другой строке при закрытых воротах (статус playing) → выбранное звучит только после открытия\n- [ ] следующее предложение растущего сообщения, пришедшее при закрытых воротах, не звучит до открытия\n- [ ] `FakePause`: пауза других не снимается, пока ворота закрыты (resume не зовётся)\n- [ ] `dictation=None` — весь прежний набор тестов `tests.test_player` проходит без правок\n\n**Verify:** `python3 -m unittest tests.test_player -v` → все `ok`\n\n```json:metadata\n{\"files\": [\"tts_player/player.py\", \"tests/test_player.py\"], \"verifyCommand\": \"python3 -m unittest tests.test_player -v\", \"modelTier\": \"standard\"}\n```",
+      "blockedBy": [
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "subject": "Task 3: Свой текст молчит за закрытыми воротами",
+      "status": "pending",
+      "description": "**Goal:** экран «Свой текст» не звучит во время закрытых ворот и после открытия продолжает с\nначала прерванного предложения.\n\n**Files:**\n- Modify: `tts_player/text_speaker.py`\n- Test: `tests/test_text_speaker.py`\n\n**Contract:** сторона чтения (2) у `TextSpeaker`\n\n```\nTextSpeaker.__init__(self, runtime_dir: Path, python: Path, worker: Path, player: Player,\n                     audio_sink: str | None = None, output: OutputIdle | None = None,\n                     dictation: DictationGate | None = None) -> None\n# _start(index, position) при закрытых воротах: запоминает index и position, статус playing,\n#   Playback.play не зовёт; закрылись при звуке → stop, position = _offset(index), статус playing;\n#   открылись и статус playing с запомненным → play с запомненной позиции\n```\n\n**Acceptance Criteria:**\n- [ ] ворота закрылись во время звука → `Playback.stop`, статус `playing`, позиция = начало предложения\n- [ ] ворота открылись → звук того же предложения с его начала\n- [ ] первое предложение, синтезированное при закрытых воротах (`synthesizing` → готово), не звучит до открытия\n- [ ] ⏸ при закрытых воротах → `paused`, открытие звука не даёт\n- [ ] главный плеер во время закрытых ворот остаётся в удержании (`hold`), как при звуке своего текста\n- [ ] `dictation=None` — прежние тесты `tests.test_text_speaker` проходят без правок\n\n**Verify:** `python3 -m unittest tests.test_text_speaker -v` → все `ok`\n\n```json:metadata\n{\"files\": [\"tts_player/text_speaker.py\", \"tests/test_text_speaker.py\"], \"verifyCommand\": \"python3 -m unittest tests.test_text_speaker -v\", \"modelTier\": \"standard\"}\n```",
+      "blockedBy": [
+        1
+      ]
+    },
+    {
+      "id": 3,
+      "subject": "Task 4: Подключение: DictationWatch → DictationGate → Player, TextSpeaker",
+      "status": "pending",
+      "description": "**Goal:** запущенный плеер замолкает при удержании пробела в Claude Code и продолжает через\n3 с после отпускания.\n\n**Files:**\n- Modify: `tts_player/__main__.py`\n- Modify: `README.md` (раздел «Диктовка Claude Code»: теперь не только журнал, а пауза озвучки)\n\n**Contract:** (2) — проводка, своего артефакта нет; `DictationWatch.on_change` → журнал и\n`DictationGate.set_dictating`; один `DictationGate` в `Player` и `TextSpeaker`; `stop()` ворот —\nпри выходе, после `Player.shutdown` / `TextSpeaker.shutdown` не зовут колбэки.\n\n**Acceptance Criteria:**\n- [ ] один `DictationGate` передан и `Player`, и `TextSpeaker`\n- [ ] строки журнала «диктовка началась» / «диктовка кончилась» остаются\n- [ ] README описывает поведение словами окна: молчит, пока зажат пробел, продолжает с начала предложения через 3 с\n- [ ] весь набор тестов проходит; плеер перезапущен и стартует без ошибок в `player.log`\n\n**Verify:** `python3 -m unittest discover -s tests` → `OK`; перезапуск плеера по CLAUDE.md, `tail player.log` без Traceback.\n\n```json:metadata\n{\"files\": [\"tts_player/__main__.py\", \"README.md\"], \"verifyCommand\": \"python3 -m unittest discover -s tests\", \"modelTier\": \"standard\"}\n```",
+      "blockedBy": [
+        2
+      ]
+    }
+  ],
+  "lastUpdated": "2026-10-13T17:50:16.310161"
+}
