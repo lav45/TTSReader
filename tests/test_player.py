@@ -930,6 +930,9 @@ class PlayerPrefsTest(PlayerCase):
     def test_tail_is_5_by_default(self) -> None:
         self.assertEqual(5, self.player._queue.tail)
 
+    def test_apply_prefs_without_dictation_gate_is_fine(self) -> None:
+        self.player.apply_prefs(Prefs(dictation_gap_ms=500))
+
     def test_apply_prefs_sets_tail_and_notifies(self) -> None:
         self.player.start()
         count = len(self.states)
@@ -1691,6 +1694,14 @@ class PlayerDictationTest(PlayerCase):
         self.player.select_session("S")
         self.playback = self.player._playback
         self.player.on_change = self.states.append
+
+    def test_apply_prefs_sets_gate_gap_ms(self) -> None:
+        self.player.apply_prefs(Prefs(dictation_gap_ms=4500))
+        self.assertEqual(4500, self.gate.gap_ms)
+
+    def test_apply_prefs_gap_ms_does_not_touch_gate(self) -> None:
+        self.player.apply_prefs(Prefs(gap_ms=1200))
+        self.assertEqual(Prefs().dictation_gap_ms, self.gate.gap_ms)
 
     def sounding_second_sentence(self) -> None:
         """Ответ A0 A1 звучит без паузы других (никто не встал): A1 с 0.5 с, в нём 0.2 с."""

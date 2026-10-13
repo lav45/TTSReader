@@ -1,4 +1,4 @@
-"""Тесты PlayerSettings: файл настроек плеера (tail, autoplay, pause_others, gap_ms)."""
+"""Тесты PlayerSettings: файл настроек плеера (tail, autoplay, pause_others, gap_ms, dictation_gap_ms)."""
 import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import json
 import os
@@ -135,28 +135,58 @@ class LoadTest(PlayerSettingsCase):
                 prefs = self.load_warned('{"tail": 7, "pause_others": false, "gap_ms": %s}' % gap_ms)
                 self.assertEqual(Prefs(tail=7, pause_others=False), prefs)
 
+    def test_missing_dictation_gap_ms_defaults_to_3000_without_warning(self):
+        self.write_raw('{"tail": 7}')
+        with self.assertNoLogs("tts_player.player_settings", "WARNING"):
+            self.assertEqual(3000, self.settings.load().dictation_gap_ms)
+
+    def test_dictation_gap_ms_bounds_accepted(self):
+        for value in (0, 10000):
+            with self.subTest(dictation_gap_ms=value):
+                self.write_raw(json.dumps({"dictation_gap_ms": value}))
+                self.assertEqual(value, self.settings.load().dictation_gap_ms)
+
+    def test_bad_dictation_gap_ms_defaults_to_3000_keeps_others(self):
+        for value in ("-1", "10001", '"3000"', "true", "1.5", "null"):
+            with self.subTest(dictation_gap_ms=value):
+                prefs = self.load_warned(
+                    '{"tail": 7, "gap_ms": 1500, "dictation_gap_ms": %s}' % value)
+                self.assertEqual(Prefs(tail=7, gap_ms=1500), prefs)
+
 
 class SaveTest(PlayerSettingsCase):
     def test_roundtrip_creates_dir_without_tmp(self):
         self.settings.save(Prefs(3))
         self.assertEqual(self.settings.load(), Prefs(3))
         self.assertEqual(json.loads(self.path.read_text()),
-                         {"tail": 3, "autoplay": True, "pause_others": True, "gap_ms": 3000})
+                         {"tail": 3, "autoplay": True, "pause_others": True, "gap_ms": 3000, "dictation_gap_ms": 3000})
         self.assertEqual([p.name for p in self.dir.iterdir()], ["settings.json"])
 
     def test_autoplay_false_is_written(self):
         self.settings.save(Prefs(autoplay=False))
         self.assertEqual(json.loads(self.path.read_text()),
-                         {"tail": 5, "autoplay": False, "pause_others": True, "gap_ms": 3000})
+                         {"tail": 5, "autoplay": False, "pause_others": True, "gap_ms": 3000, "dictation_gap_ms": 3000})
 
     def test_pause_others_false_is_written(self):
         self.settings.save(Prefs(4, False, False))
         self.assertEqual(json.loads(self.path.read_text()),
-                         {"tail": 4, "autoplay": False, "pause_others": False, "gap_ms": 3000})
+                         {"tail": 4, "autoplay": False, "pause_others": False, "gap_ms": 3000, "dictation_gap_ms": 3000})
 
     def test_gap_ms_is_written(self):
         self.settings.save(Prefs(gap_ms=1500))
         self.assertEqual(1500, json.loads(self.path.read_text())["gap_ms"])
+
+    def test_dictation_gap_ms_is_written(self):
+        self.settings.save(Prefs(dictation_gap_ms=4500))
+        self.assertEqual(4500, json.loads(self.path.read_text())["dictation_gap_ms"])
+
+    def test_bad_dictation_gap_ms_leaves_file_untouched(self):
+        self.write_raw('{"tail": 4}')
+        before = self.path.read_bytes()
+        for value in (-1, 10001, "3000", True, 1.5):
+            with self.subTest(dictation_gap_ms=value), self.assertRaises(SettingsError):
+                self.settings.save(Prefs(dictation_gap_ms=value))
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_bad_gap_ms_leaves_file_untouched(self):
         self.write_raw('{"tail": 4}')
