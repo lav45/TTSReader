@@ -63,15 +63,60 @@
   плеер не узнаёт: там процесс — `arecord`, а не Claude Code. У нас модуль есть (поток
   `PipeWire ALSA [2.1.296]`), поэтому и короткой пробы `arecordProbe` на 150 мс нет.
 
+Решено мной (код на мне, CLAUDE.md проекта):
+- Слежение за потоками записи — `pactl` (`pulseaudio-utils`, уже в системе): долгоживущий
+  `pactl subscribe` через `Gio.Subprocess` (образец — `sentence_counter.py`), на событие
+  `source-output` — разовый `pactl -f json list source-outputs` и `list clients`. Отложены:
+  `pw-dump --monitor` — многострочный JSON потоком, разбор кусками; `pulsectl` — пакета нет,
+  ставить ради одной функции; свой клиент libpulse через ctypes — свои крайние случаи.
+
 ## Цепочка
 
-Записано мной, не разобрано: PipeWire (поток записи Claude Code появился / исчез) → плеер
-(наблюдатель за микрофоном) → `Player` (приостановить / продолжить озвучку).
+PipeWire (поток записи Claude Code появился / исчез) → `DictationWatch` (новый, процесс
+`pactl subscribe`) → `Player` (озвучка ответов и свой текст молчат / продолжают после
+`dictation_gap_ms`).
 
 ## Контракты
 
-Не разобраны.
+### (1) pactl → DictationWatch
+
+```
+$ LC_ALL=C pactl subscribe            # одна строка на событие, построчно
+Event 'new' on source-output #161651
+Event 'change' on source-output #161651
+Event 'remove' on source-output #161651
+# на new/remove по source-output:
+$ LC_ALL=C pactl -f json list source-outputs  → [{"index": int, "client": "int", ...}]
+$ LC_ALL=C pactl -f json list clients         → [{"index": int,
+                                                 "properties": {"pipewire.sec.pid": "str", ...}}]
+диктовка идёт ⇔ есть source-output, у клиента которого
+                 readlink(/proc/<pipewire.sec.pid>/exe) лежит в ~/.local/share/claude/versions/
+```
+
+`pactl` нет или `subscribe` завершился — строка в журнале плеера; диктовка считается
+неидущей (плеер говорит как раньше).
+
+### (2) DictationWatch → Player
+
+```
+DictationWatch(on_change: Callable[[bool], None])   # True — диктовка началась, False — кончилась;
+                                                    # вызывается только при смене, в цикле GLib
+Player.set_dictating(active: bool) -> None
+```
+
+### (3) settings.json плеера
+
+```
+было   {"tail": …, "autoplay": …, "pause_others": …, "gap_ms": <целое 0–10000>}
+стало  {"tail": …, "autoplay": …, "pause_others": …, "gap_ms": <целое 0–10000>,
+        "dictation_gap_ms": <целое 0–10000>}
+нет ключа → 3000 без строки в журнале; вне пределов или не целое → 3000 и строка в журнале;
+save вне пределов — SettingsError, файл не трогается (как gap_ms)
+```
 
 ## Открытые вопросы
 
-- Чем плеер следит за потоками записи PipeWire — не выбрано.
+- Диктовка идёт в момент запуска плеера — `DictationWatch` при старте один раз читает список
+  потоков, не дожидаясь события; проверить на запущенном плеере.
+- Claude Code закрыт посреди диктовки (поток исчез вместе с процессом) — это `remove`, озвучка
+  продолжится после тишины; проверить, что событие приходит.
