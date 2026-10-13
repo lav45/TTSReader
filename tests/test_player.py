@@ -1887,10 +1887,43 @@ class PlayerDictationTest(PlayerCase):
         self.gate.set_dictating(False)
         self.assertEqual(["pause_playing"], self.pause.calls)
         self.assertEqual([(A0, 0.0)], self.playback.starts)
-        self.assertEqual([], [c for c in self.glib.timeout_add.call_args_list])
+        self.assertEqual([], self.glib.timeout_add.call_args_list)
         self.end_by_count()
         self.finish()
         self.assertEqual(1, len(self.resume_timers()))
+
+    def test_gate_quiet_period_keeps_others_paused_then_resume_after_gap(self) -> None:
+        """Тишина ворот после отпускания (gap_ms ворот > 0) для других — ещё речь: таймер
+        продолжения ставится только по открытию ворот, продолжение — ещё через gap_ms плеера."""
+        patcher = mock.patch("tts_player.dictation_gate.GLib")
+        gate_glib = patcher.start()
+        self.addCleanup(patcher.stop)
+        gate_glib.timeout_add.return_value = 7
+        self.gate.gap_ms = 2000
+        self.player.start()
+        self.gate.set_dictating(True)
+        self.pause.answer(True)
+        self.gate.set_dictating(False)
+        self.assertTrue(self.gate.closed())
+        self.assertEqual([], self.resume_timers())
+        ms, gate_over = gate_glib.timeout_add.call_args.args
+        self.assertEqual(2000, ms)
+        gate_over()
+        self.assertFalse(self.gate.closed())
+        self.assertEqual(["pause_playing"], self.pause.calls)
+        self.assertEqual(1, len(self.resume_timers()))
+        self.resume_timers()[-1]()
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+
+    def test_pause_others_unchecked_during_dictation_releases_at_once(self) -> None:
+        self.player.start()
+        self.gate.set_dictating(True)
+        self.pause.answer(True)
+        self.player.apply_prefs(Prefs(pause_others=False))
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
+        self.gate.set_dictating(False)
+        self.assertEqual([], self.resume_timers())
+        self.assertEqual(["pause_playing", "resume"], self.pause.calls)
 
     def test_pause_others_off_dictation_does_not_pause_others(self) -> None:
         self.player.apply_prefs(Prefs(pause_others=False))
