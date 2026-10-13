@@ -27,8 +27,10 @@ class PlayerSettingsCase(unittest.TestCase):
 
     def load_warned(self, text):
         self.write_raw(text)
-        with self.assertLogs("tts_player.player_settings", "WARNING"):
-            return self.settings.load()
+        with self.assertLogs("tts_player.player_settings", "WARNING") as logged:
+            prefs = self.settings.load()
+        self.assertEqual(1, len(logged.records))
+        return prefs
 
 
 class DefaultPathTest(unittest.TestCase):
