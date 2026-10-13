@@ -982,6 +982,28 @@ class TextScreenTest(unittest.TestCase):
         buffer.set_text("")
         self.assertEqual(("set_text", ""), self.calls("set_text")[-1])
 
+    def test_clear_button_in_header_right(self) -> None:
+        w = self.window
+        header = w.text_back_button.get_parent()
+        self.assertIs(header, w.text_clear_button.get_parent())
+        self.assertEqual(Gtk.PackType.END, header.child_get_property(w.text_clear_button, "pack-type"))
+        self.assertEqual("user-trash-symbolic", icon_name(w.text_clear_button))
+        self.assertEqual("Очистить", w.text_clear_button.get_tooltip_text())
+
+    def test_clear_empties_field_and_disabled_when_empty(self) -> None:
+        w = self.window
+        self.assertFalse(w.text_clear_button.get_sensitive())
+        buffer = w.text_view.get_buffer()
+        buffer.set_text("Привет.")
+        self.text.change(text_state("playing", 1.0, 3.0))
+        self.assertTrue(w.text_clear_button.get_sensitive())
+        w.text_clear_button.clicked()
+        start, end = buffer.get_bounds()
+        self.assertEqual("", buffer.get_text(start, end, False))
+        self.assertEqual(("set_text", ""), self.calls("set_text")[-1])
+        self.text.change(text_state("empty"))
+        self.assertFalse(w.text_clear_button.get_sensitive())
+
     def test_play_button_toggles_and_disabled_when_empty(self) -> None:
         w = self.window
         self.assertFalse(w.text_play_button.get_sensitive())

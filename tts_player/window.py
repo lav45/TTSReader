@@ -104,7 +104,8 @@ class PlayerWindow(Gtk.Window):
     "settings": хвост очереди (PlayerSettings), голос и скорость claude-tts
     (DaemonSettings); «Сохранить» пишет их и остаётся на экране, итог — в блоке внизу; стрелка
     назад возвращает без записи. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
-    время и play/pause; стрелка назад ставит звучащий свой текст на паузу.
+    время и play/pause; стрелка назад ставит звучащий свой текст на паузу, мусорка «Очистить»
+    стирает поле.
 
     Один звук за раз: play/pause главного экрана при звучащем своём тексте сначала ставит его
     на паузу. Обновляется по on_change плеера и TextSpeaker и, пока окно видно, таймером
@@ -281,7 +282,8 @@ class PlayerWindow(Gtk.Window):
         return label
 
     def _text_screen(self) -> Gtk.Box:
-        """Экран «Свой текст»: стрелка назад, поле ввода, ползунок, ошибка, время и play/pause."""
+        """Экран «Свой текст»: стрелка назад, мусорка «Очистить», поле ввода, ползунок, ошибка,
+        время и play/pause."""
         self.text_back_button = self._icon_button("go-previous-symbolic", "Назад",
                                                   self._leave_text)
         self.text_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)  # длинное слово — по буквам
@@ -292,10 +294,13 @@ class PlayerWindow(Gtk.Window):
         self.text_error.get_style_context().add_class(STATUS_ERROR)
         self.text_play_button = self._button("", self._text_speaker.toggle_play_pause)
         self.text_position = Gtk.Label(xalign=0.0)
+        self.text_clear_button = self._icon_button("user-trash-symbolic", "Очистить",
+                                                   self._clear_text)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         header.pack_start(self.text_back_button, False, False, 0)
         header.pack_start(Gtk.Label(label="Свой текст", xalign=0.0), False, False, 0)
+        header.pack_end(self.text_clear_button, False, False, 0)
 
         scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.set_shadow_type(Gtk.ShadowType.IN)
@@ -316,6 +321,12 @@ class PlayerWindow(Gtk.Window):
 
     def _open_text(self) -> None:
         self.stack.set_visible_child_name("text")
+        self.text_view.grab_focus()
+
+    def _clear_text(self) -> None:
+        """Мусорка экрана: поле пустеет — через «changed» свой текст останавливается и
+        становится empty, как при стирании руками; курсор остаётся в поле."""
+        self.text_view.get_buffer().set_text("")
         self.text_view.grab_focus()
 
     def _leave_text(self) -> None:
@@ -359,6 +370,7 @@ class PlayerWindow(Gtk.Window):
     def _show_text(self, state: TextState) -> None:
         self.text_play_button.set_label(text_play_pause_label(state))
         self.text_play_button.set_sensitive(text_play_enabled(state))
+        self.text_clear_button.set_sensitive(state.status != "empty")
         self.text_position.set_text(text_position_label(state))
         self.text_scale.set_sensitive(state.length_s > 0)
         self.text_slider.show(state.position_s, state.length_s)
