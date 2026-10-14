@@ -681,6 +681,20 @@ class PlayerCursorTest(PlayerCase):
         self.assertEqual(["a2", "a3", "a4", "a5", "a6"], [self.task_of(m) for m in self.state().messages])
         self.assertFalse(self.path(names[0]).exists())
 
+    def test_skipped_unheard_above_current_are_trimmed_to_tail(self) -> None:
+        """Играет дорожка далеко внизу: сверху остаются tail последних, непрослушанные тоже."""
+        names = [f"100000000000000000{i}_{t}_tts_queue_S_{t}_s0.wav"
+                 for i, t in enumerate(["a1", "a2", "a3", "a4", "a5", "a6"], start=1)]
+        self.start_with(names[0])
+        self.player.apply_prefs(Prefs(tail=2))
+        for name in names[1:]:
+            self.arrive(name)
+        self.assertEqual(6, len(self.state().messages))
+        self.player.play_message(self.state().messages[4])
+        self.assertEqual(["a3", "a4", "a5", "a6"], [self.task_of(m) for m in self.state().messages])
+        self.assertFalse(self.path(names[1]).exists())
+        self.assertEqual(("playing", "a5"), (self.state().status, self.task()))
+
     def test_on_change_after_file_change_and_new_sentence(self) -> None:
         self.start_with(A0, A1)
         self.announce("bb")
@@ -2967,8 +2981,9 @@ class PlayerSessionsTest(PlayerCase):
         self.assertFalse(b_file.exists())
 
     def test_open_session_accumulates_with_focus_and_idle_trims_to_tail(self) -> None:
-        """На паузе ответы сверх tail копятся; доиграли последний — idle, очередь режется до
-        tail, доигранное текущее остаётся; новый ответ в idle режет дальше."""
+        """На паузе ответы сверх tail копятся; заиграл последний — позади него остаётся tail;
+        доиграли — idle, очередь режется до tail, доигранное текущее остаётся; новый ответ в
+        idle режет дальше."""
         self.player.apply_prefs(Prefs(tail=2))
         s1, s2, s3 = self.paused_with("e1", "e2", "e3")
         self.assertEqual(["text aa", "text e1", "text e2", "text e3"], self.texts("S"))
@@ -2977,7 +2992,8 @@ class PlayerSessionsTest(PlayerCase):
         self.player.play_message(last)
         self.player.toggle_play_pause()
         self.finish()
-        self.assertEqual(("playing", 4), (self.state().status, len(self.messages("S"))))
+        self.assertEqual(("playing", ["text e1", "text e2", "text e3"]),
+                         (self.state().status, self.texts("S")))
         self.end_current()
         self.assertEqual(("idle", last), (self.state().status, self.state().current))
         self.assertEqual(["text e2", "text e3"], self.texts("S"))

@@ -82,8 +82,8 @@ class MessageQueue:
     сообщение, вытесненное, обрезанное или забытое после clear()/release(), им не передаётся.
 
     tail задаёт снаружи Player (настройки плеера) и может меняться на ходу: start()
-    подгоняет хвост начатых к нему постепенно (см. start), trim() режет всю очередь сразу —
-    когда её звать, решает Player (фокус).
+    подгоняет хвост начатых к нему постепенно (см. start), trim() режет всю очередь сразу,
+    trim_behind() — всё позади текущего сразу; кого из них звать, решает Player (фокус).
     """
 
     def __init__(self, tail: int, order: TaskOrder) -> None:
@@ -212,6 +212,14 @@ class MessageQueue:
         for message in older:
             if message is not keep:
                 self._drop(message)
+
+    def trim_behind(self, current: Message) -> None:
+        """Позади курсора — не больше tail сообщений: старшие текущего сверх tail — любые,
+        начатые и нет, прослушанные и отложенные — удаляются с файлами. Текущее и всё новее
+        него остаются."""
+        behind = self._messages[:self._messages.index(current)]
+        for message in behind[:max(len(behind) - self.tail, 0)]:
+            self._drop(message)
 
     def is_started(self, message: Message) -> bool:
         """Сообщение начато и ещё в хвосте (не вытеснено, не забыто)."""

@@ -449,6 +449,25 @@ class MessageQueueTest(unittest.TestCase):
         self.assertEqual(["t1", "t2", "t3", "t4", "t5"], self.tasks())
         self.assertTrue(all(s.path.exists() for s in sentences))
 
+    def test_trim_behind_keeps_tail_before_current_of_any_kind(self):
+        """Позади текущего — tail последних, непрослушанные тоже; текущее и новее остаются."""
+        self.queue.tail = 2
+        sentences = [self.add(n, task=f"t{n}") for n in range(1, 7)]
+        self.queue.start(self.queue.messages[1])
+        self.queue.mark_heard(self.queue.messages[1])
+        current = self.queue.messages[4]
+        self.queue.trim_behind(current)
+        self.assertEqual(["t3", "t4", "t5", "t6"], self.tasks())
+        self.assertEqual([False, False, True, True, True, True],
+                         [s.path.exists() for s in sentences])
+        self.assertFalse(any(self.queue.is_started(m) for m in self.queue.messages))
+
+    def test_trim_behind_within_tail_changes_nothing(self):
+        self.queue.tail = 2
+        [self.add(n, task=f"t{n}") for n in range(1, 5)]
+        self.queue.trim_behind(self.queue.messages[2])
+        self.assertEqual(["t1", "t2", "t3", "t4"], self.tasks())
+
     def test_sentence_of_trimmed_message_is_deleted_not_added(self):
         self.queue.tail = 1
         self.add(1, task="t1")

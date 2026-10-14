@@ -67,10 +67,11 @@ class Player:
     отданный демону в этом запуске ответ, до которого дойдёт автопереход (новее текущего,
     ещё не завершён); у закрытых папок фокуса нет. Без фокуса очередь режется до tail
     (MessageQueue.trim): старшие — прослушанные, непрослушанные, отложенные — удаляются с
-    файлами; текущее места в tail не занимает и остаётся. С фокусом сообщения копятся, позади
-    курсора начатые ограничены tail (MessageQueue.start). Режет одно место — _trim_unfocused
-    из _changed (новое сообщение, конец последнего, открытие и закрытие папки, смена tail) и
-    из start() после восстановления messages.json.
+    файлами; текущее места в tail не занимает и остаётся. С фокусом сообщения новее курсора
+    копятся, позади курсора любые — прослушанные и нет — ограничены tail
+    (MessageQueue.trim_behind), начатые где угодно — тоже (MessageQueue.start). Режет одно
+    место — _trim_history из _changed (новое сообщение, конец последнего, открытие и закрытие
+    папки, смена tail, смена текущего) и из start() после восстановления messages.json.
     Открытая (активная) сессия играет подряд, пока нажата кнопка автовоспроизведения
     (prefs.autoplay, контракт (6)). Плеер сам начинает (_starts_by_itself), только когда
     кнопка нажата и свой текст не звучит (hold); иначе конец сообщения — stopped на следующем
@@ -271,7 +272,7 @@ class Player:
         ждёт (idle, текущего нет), восстановленные очереди без фокуса режутся до tail; новые ответы
         играют как обычно. Восстановленным без числа предложений оно запрашивается."""
         self._restore(self._saved.load())
-        self._trim_unfocused()
+        self._trim_history()
         for queue in self._queues.values():
             for message in queue.messages:
                 if message.sentence_count is None:
@@ -983,19 +984,22 @@ class Player:
         return any(m in self._sent_in_run and m.sent and not m.deferred and not m.heard
                    and not queue.is_complete(m) for m in ahead)
 
-    def _trim_unfocused(self) -> None:
+    def _trim_history(self) -> None:
         """Очереди без фокуса — до tail, самые старые первыми; текущее места в tail не
-        занимает и не удаляется. Ушедшие из очередей забываются в _sent_in_run."""
+        занимает и не удаляется. С фокусом — до tail позади текущего, новее него копится.
+        Ушедшие из очередей забываются в _sent_in_run."""
         for queue in self._queues.values():
             if not self._focused(queue):
                 queue.trim(keep=self._current)
+            elif self._current in queue.messages:
+                queue.trim_behind(self._current)
         live = {m for queue in self._queues.values() for m in queue.messages}
         self._sent_in_run &= live
 
     def _changed(self) -> None:
         """Каждая смена статуса доходит сюда: сначала длина очередей по фокусу, пауза других
         и ворота звука по статусу, затем окно."""
-        self._trim_unfocused()
+        self._trim_history()
         self._follow_status()
         try:
             self.on_change(self.state())
