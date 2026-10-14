@@ -484,7 +484,7 @@ class PlayerWindow(Gtk.Window):
 
     def _on_row_activated(self, _list, row: Gtk.ListBoxRow) -> None:
         """Клик по заголовку закрытой папки открывает её сессию, открытой — закрывает; клик по
-        дорожке выбирает сообщение: звучало — играет сразу, иначе — по play/pause."""
+        дорожке сразу играет её."""
         item = self._shown_rows[row.get_index()]
         if isinstance(item, MessageRow):
             self._player.play_message(self._shown_messages[item.index])

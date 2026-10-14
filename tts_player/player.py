@@ -542,29 +542,28 @@ class Player:
         self._start(self._current, position, requested=True)
 
     def play_message(self, message: Message) -> None:
-        """Клик по строке списка сохраняет состояние воспроизведения. Играло (playing) —
-        выбранное играет с начала, как по play/pause (requested: переозвучка и отложенное).
-        Пауза, stopped, idle — только выбор: сообщение становится текущим с позиции 0 в
-        статусе stopped и не начатым (в хвост входит при первом play/pause, как после
-        `_stop_after`). Покинутое прослушано, только если начато и завершено (как в _leave);
-        клик по текущему и по вытесненному из очереди сообщению ничего не меняет."""
+        """Клик по строке списка — выбранное сразу играет, без play/pause. Другое сообщение —
+        с начала, как по play/pause (requested: переозвучка и отложенное); покинутое прослушано,
+        только если начато и завершено (как в _leave). Текущее: играет — ничего не меняется;
+        пауза — дальше с места; stopped и idle — с курсора (курсор в конце — с начала).
+        Клик по вытесненному из очереди сообщению ничего не меняет."""
         if not any(message is queued for queued in self._queue.messages):
             return
         current = self._current
         if message is current:
+            if self._status == "playing":
+                return
+            if self._status == "paused":
+                self._status = "playing"
+                self._play_at(self._position)
+            else:
+                self._resume()
+            self._changed()
             return
-        playing = self._status == "playing"
         if current is not None:
             self._leave(current)
         self._output_down = False  # повтор снят _leave: отказ вывода больше не показывается
-        if playing:
-            self._begin(message, requested=True)
-        else:
-            self._current = message
-            self._stopped = None
-            self._sentence = None
-            self._position = 0.0
-            self._status = "stopped"
+        self._begin(message, requested=True)
         self._changed()
 
     def stop(self) -> None:
