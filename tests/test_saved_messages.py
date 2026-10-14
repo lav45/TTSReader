@@ -32,21 +32,22 @@ class SavedMessagesTest(unittest.TestCase):
         unheard = Message("S", project="/w/p", text="Привет", persona="p", speed=1.5,
                           task_ids={"aa", "bb"},
                           sentences=[self.sentence(S0, 0), self.sentence(S1, 1)],
-                          received_at=5.0, sentence_count=2)
+                          received_at=5.0, sentence_count=2, rest_at=4)
         heard = Message("N", text="пока", persona="q", speed=1.0, task_ids={"cc"},
                         received_at=6.0, heard=True, sentence_count=3,
                         played_indices={0, 2})
         not_sent = Message("S", text="x", sent=False)
-        deferred = Message("B", text="отложено", persona="p", speed=1.0, received_at=8.0,
-                           sent=False, deferred=True)
+        deferred = Message("B", text="Раз. Два.", persona="p", speed=1.0, received_at=8.0,
+                           task_ids={"dd"}, deferred=True, sentence_count=2, rest_at=5,
+                           head_task="dd")
         return QueueSnapshot([unheard, heard, not_sent, deferred], [unheard],
-                             {"aa": 1, "bb": 3, "cc": 2}, 3)
+                             {"aa": 1, "bb": 3, "cc": 2, "dd": 4}, 3)
 
     def fields(self, message: Message) -> tuple:
         return (message.session_id, message.project, message.text, message.persona,
                 message.speed, message.task_ids, message.sentences, message.received_at,
                 message.sent, message.heard, message.deferred, message.sentence_count,
-                message.played_indices)
+                message.played_indices, message.rest_at, message.head_task)
 
     def test_round_trip_and_file_deleted_after_load(self):
         snapshot = self.snapshot()
@@ -57,7 +58,8 @@ class SavedMessagesTest(unittest.TestCase):
         self.assertEqual([self.fields(m) for m in snapshot.messages],
                          [self.fields(m) for m in loaded.messages])
         self.assertEqual([loaded.messages[0]], loaded.started)
-        self.assertEqual(({"aa": 1, "bb": 3, "cc": 2}, 3), (loaded.task_order, loaded.delivered))
+        self.assertEqual(({"aa": 1, "bb": 3, "cc": 2, "dd": 4}, 3),
+                         (loaded.task_order, loaded.delivered))
 
     def test_deferred_is_saved_and_missing_key_reads_as_false(self):
         self.saved.save(self.snapshot())
@@ -73,7 +75,7 @@ class SavedMessagesTest(unittest.TestCase):
         доигранных индексов нет."""
         self.saved.save(self.snapshot())
         data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual([2, 3, None, None], [m["sentence_count"] for m in data["messages"]])
+        self.assertEqual([2, 3, None, 2], [m["sentence_count"] for m in data["messages"]])
         self.assertEqual([0, 2], data["messages"][1]["played_indices"])
         for item in data["messages"]:
             del item["sentence_count"]
@@ -82,6 +84,20 @@ class SavedMessagesTest(unittest.TestCase):
         loaded = self.saved.load().messages
         self.assertEqual([(None, set())] * 4,
                          [(m.sentence_count, m.played_indices) for m in loaded])
+
+    def test_missing_head_keys_read_as_none(self):
+        """Файл до первого предложения заранее: позиция второго неизвестна (её запросит
+        Player.start), первое предложение отдельно не отдавалось."""
+        self.saved.save(self.snapshot())
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual([(4, None), (None, None), (None, None), (5, "dd")],
+                         [(m["rest_at"], m["head_task"]) for m in data["messages"]])
+        for item in data["messages"]:
+            del item["rest_at"]
+            del item["head_task"]
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual([(None, None)] * 4,
+                         [(m.rest_at, m.head_task) for m in self.saved.load().messages])
 
     def test_saved_file_names_are_relative_to_store(self):
         self.saved.save(self.snapshot())

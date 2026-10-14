@@ -14,10 +14,14 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 log = logging.getLogger("tts_player.sentence_counter")
 
+OnCount = Callable[[int, int | None], None]
+"""Ответ счётчика: число предложений и позиция второго в тексте (None — их меньше двух)."""
+
 
 class SentenceCounter:
-    """Постоянный процесс-счётчик: count(text, on_count) — запрос, on_count(n) — ответ из цикла
-    GLib, по порядку запросов. Процесс запускается первым запросом и живёт до stop(); его
+    """Постоянный процесс-счётчик: count(text, on_count) — запрос, on_count(n, rest_at) — ответ
+    из цикла GLib, по порядку запросов (rest_at — позиция второго предложения в тексте или None,
+    протокол sentence_count_worker). Процесс запускается первым запросом и живёт до stop(); его
     владелец — Player (останавливает в shutdown).
 
     Главный цикл не ждёт: запрос пишется в stdin асинхронно, ответ читается асинхронно. Сбой —
@@ -38,11 +42,11 @@ class SentenceCounter:
         self._stdout: Gio.DataInputStream | None = None
         self._outbox: collections.deque[bytes] = collections.deque()
         self._writing = False
-        self._pending: collections.deque[Callable[[int], None]] = collections.deque()
+        self._pending: collections.deque[OnCount] = collections.deque()
         self._timeout_id = 0
         self._broken = False  # сбой или stop: запросы больше не принимаются
 
-    def count(self, text: str, on_count: Callable[[int], None]) -> None:
+    def count(self, text: str, on_count: OnCount) -> None:
         """Запрос числа предложений text; ответ — в on_count из цикла GLib. Счётчик
         недоступен — ответа не будет."""
         if self._broken:
@@ -104,22 +108,23 @@ class SentenceCounter:
         if line is None:
             self._fail("процесс завершился")
             return
-        count = self._parse(line)
-        if isinstance(count, str) or not self._pending:
-            self._fail(count if isinstance(count, str) else f"ответ без запроса {line!r}")
+        answer = self._parse(line)
+        if isinstance(answer, str) or not self._pending:
+            self._fail(answer if isinstance(answer, str) else f"ответ без запроса {line!r}")
             return
         self._disarm_timeout()
         on_count = self._pending.popleft()
         self._arm_timeout()
         self._read_next()
         try:
-            on_count(count)
+            on_count(*answer)
         except Exception:
             log.exception("on_count: ошибка обработчика числа предложений")
 
     @staticmethod
-    def _parse(line: str) -> int | str:
-        """{"count": n} с целым n ≥ 0 — n; иначе причина сбоя для WARNING."""
+    def _parse(line: str) -> tuple[int, int | None] | str:
+        """{"count": n, "rest_at": k} с целым n ≥ 0 и k — целым > 0 при n ≥ 2, иначе null —
+        (n, k); иначе причина сбоя для WARNING."""
         try:
             message = json.loads(line)
         except ValueError:
@@ -128,10 +133,14 @@ class SentenceCounter:
             return f"непонятная строка {line!r}"
         if "error" in message:
             return f"ошибка процесса: {message['error']}"
-        count = message.get("count")
+        count, rest_at = message.get("count"), message.get("rest_at")
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             return f"непонятная строка {line!r}"
-        return count
+        if count < 2 and rest_at is None:
+            return count, None
+        if isinstance(rest_at, bool) or not isinstance(rest_at, int) or rest_at < 1:
+            return f"непонятная строка {line!r}"
+        return count, rest_at
 
     def _arm_timeout(self) -> None:
         """Срок TIMEOUT_S — на самый старый запрос без ответа, от момента постановки срока:

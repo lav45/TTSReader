@@ -106,6 +106,11 @@ class Player:
     заново (переозвучка). В обоих случаях сообщение играет по мере прихода предложений, как
     растущее. Сообщение без звука (не отложенное) переозвучивает только команда пользователя;
     автозапуск его пропускает (прослушано).
+    Первое предложение заранее (_prefetch): плеер ведёт сам, текущее играет или на паузе, демон
+    его синтез закончил, а следующее за ним отложено — его первое предложение уходит демону
+    отдельной задачей (head_task) сразу, остальные — когда до него дойдёт воспроизведение. Так
+    переход на отложенное звучит без ожидания синтеза, а демон впереди слушателя не уходит
+    дальше одного предложения.
 
     Пауза других плееров (pause, контракт (9')): плеер начал звучать (_speaking стал True) —
     pause.pause_playing, и звук ждёт ответа: кто-то встал на паузу — первый звук через
@@ -223,6 +228,7 @@ class Player:
         # Отданные демону в этом запуске (_send) и ещё живые в очередях: только они, пока
         # синтезируются, дают фокус в idle (_focused); восстановленные из messages.json — нет
         self._sent_in_run: set[Message] = set()
+        self._head_tried: Message | None = None  # последнее, чьё первое предложение отдавали
         self._dictation = dictation
         self._shut = False  # после shutdown смена ворот диктовки ничего не делает
         if dictation is not None:
@@ -270,12 +276,14 @@ class Player:
         Поздние предложения восстановленных задач — их, а не чужие; файлы store/, на которые
         сообщения не ссылаются, удаляет Inbox. Сам плеер ничего не начинает: открытая папка
         ждёт (idle, текущего нет), восстановленные очереди без фокуса режутся до tail; новые ответы
-        играют как обычно. Восстановленным без числа предложений оно запрашивается."""
+        играют как обычно. Восстановленным без числа предложений или без позиции второго
+        (файл прошлой версии) оно запрашивается."""
         self._restore(self._saved.load())
         self._trim_history()
         for queue in self._queues.values():
             for message in queue.messages:
-                if message.sentence_count is None:
+                if message.sentence_count is None or (message.sentence_count >= 2
+                                                      and message.rest_at is None):
                     self._count(message)
         self._inbox.start(self._store_files())
         if self._control is not None:
@@ -433,12 +441,14 @@ class Player:
         текста — ничего: число остаётся неизвестным."""
         if self._counter is None or message.text is None:
             return
-        self._counter.count(message.text, lambda count: self._on_count(message, count))
+        self._counter.count(message.text,
+                            lambda count, rest_at: self._on_count(message, count, rest_at))
 
-    def _on_count(self, message: Message, count: int) -> None:
-        """Число предложений пришло. Текущее, доигранное до конца полученного и ждущее
-        предложения, могло этим завершиться: тогда — конец сообщения."""
+    def _on_count(self, message: Message, count: int, rest_at: int | None = None) -> None:
+        """Число предложений и позиция второго пришли. Текущее, доигранное до конца полученного
+        и ждущее предложения, могло этим завершиться: тогда — конец сообщения."""
         message.sentence_count = count
+        message.rest_at = rest_at
         if message is self._current:
             self._end_if_waiting()
         self._changed()
@@ -615,7 +625,8 @@ class Player:
             self._end_if_waiting()
         elif self._status == "idle" and self._starts_by_itself():
             message = self._queue.message_of(sentence.task_id)
-            if message is not None and not message.heard and self._after_stopped(message):
+            if (message is not None and not message.heard and not message.deferred
+                    and self._after_stopped(message)):
                 self._begin(message, requested=False)
         elif self._waiting():
             following = self._next_sentence()
@@ -756,7 +767,9 @@ class Player:
         удалены, текст — в демон текущим голосом. True — озвучка начата (и при сбое записи
         задачи: старого звука уже нет). Сбой чтения config.json — кэш считается актуальным,
         строка в журнал; отложенное тогда остаётся без звука и пропускается, как не
-        отправленное."""
+        отправленное. Отложенное с первым предложением, отданным заранее, — _voice_rest."""
+        if message.deferred and message.head_task is not None:
+            return self._voice_rest(message)
         if not self._queue.is_complete(message):
             return False
         silent = not message.sentences
@@ -775,13 +788,80 @@ class Player:
                      self._queue.task_of(message), message.persona, message.speed,
                      voice.persona, voice.speed)
             origin = "переозвучка"
+        self._voice(message, voice, origin)
+        return True
+
+    def _voice(self, message: Message, voice: ActiveVoice, origin: str) -> None:
+        """Кэш сообщения удалён, весь текст — демону голосом voice."""
         self._queue.forget_audio(message)
         message.persona = voice.persona
         message.speed = voice.speed
-        fields = {**voice.fields, "text": message.text, "session_id": message.session_id,
-                  "project": message.project}
-        self._send(self._queue, message, fields, origin)
-        return True
+        self._send(self._queue, message, self._fields(message, voice, message.text), origin)
+
+    @staticmethod
+    def _fields(message: Message, voice: ActiveVoice, text: str) -> dict:
+        """Задача демону: text сообщения message голосом voice."""
+        return {**voice.fields, "text": text, "session_id": message.session_id,
+                "project": message.project}
+
+    def _voice_rest(self, message: Message) -> bool:
+        """Начало отложенного, чьё первое предложение отдано заранее: остальные предложения —
+        демону тем же голосом, первое уже пришло или синтезируется (демон берёт задачи по
+        порядку); предложение одно — отдавать нечего, сообщение больше не отложено. Голос
+        сменился — первое предложение выброшено, весь текст — новым голосом, как у отложенного
+        (True). Голос не прочитан — остальные не отданы (строка в журнал у _active_voice)."""
+        voice = self._active_voice(message)
+        if voice is None:
+            return False
+        if (message.persona, message.speed) != (voice.persona, voice.speed):
+            log.info("voice deferred %s: %s %s", message.session_id, voice.persona, voice.speed)
+            self._voice(message, voice, "отложенное сообщение")
+            return True
+        if message.rest_at is None:
+            message.deferred = False
+            return False
+        log.info("voice rest %s after %s", message.session_id, message.head_task)
+        fields = self._fields(message, voice, message.text[message.rest_at:])
+        self._send(self._queue, message, fields, "остаток отложенного сообщения")
+        return False
+
+    def _prefetch(self) -> None:
+        """Первое предложение следующего отложенного — демону заранее: плеер ведёт сам
+        (_leads_itself), текущее играет или стоит на паузе, его синтез демон закончил
+        (is_complete), а следующее за ним по порядку отложено, и деление его текста известно
+        (счётчик). Остальные предложения уйдут при его начале (_voice_rest). Попытка одна на
+        сообщение (_head_tried): сбой чтения голоса или записи задачи не повторяется на каждом
+        _changed — отложенное озвучится целиком при начале, как без этого."""
+        current = self._current
+        queue = self._queue
+        if (current is None or self._status not in ("playing", "paused")
+                or not self._leads_itself() or current not in queue.messages):
+            return
+        upcoming = queue.following(current)
+        if (upcoming is None or not upcoming.deferred or upcoming.head_task is not None
+                or upcoming is self._head_tried or not upcoming.sentence_count
+                or (upcoming.sentence_count >= 2 and upcoming.rest_at is None)
+                or not queue.is_complete(current)):
+            return
+        self._head_tried = upcoming
+        try:
+            voice = self._daemon_settings.active_voice()
+        except SettingsError as error:
+            log.warning("голос не прочитан (%s): первое предложение %s заранее не отдано",
+                        error, upcoming.session_id)
+            return
+        task_id = self._daemon_queue.put(self._fields(upcoming, voice,
+                                                      upcoming.text[:upcoming.rest_at]))
+        if task_id is None:
+            log.warning("первое предложение заранее не отдано в демон: %.*s",
+                        LOGGED_TEXT_CHARS, upcoming.text)
+            return
+        upcoming.persona = voice.persona
+        upcoming.speed = voice.speed
+        upcoming.sent = True
+        upcoming.head_task = task_id
+        queue.link(upcoming, task_id)
+        log.info("head %s %s: %s %s", upcoming.session_id, task_id, voice.persona, voice.speed)
 
     def _active_voice(self, message: Message) -> ActiveVoice | None:
         """Текущий голос для озвучки message; сбой чтения — None и строка в журнал: у
@@ -997,9 +1077,10 @@ class Player:
         self._sent_in_run &= live
 
     def _changed(self) -> None:
-        """Каждая смена статуса доходит сюда: сначала длина очередей по фокусу, пауза других
-        и ворота звука по статусу, затем окно."""
+        """Каждая смена статуса доходит сюда: сначала длина очередей по фокусу, первое
+        предложение следующего отложенного, пауза других и ворота звука по статусу, затем окно."""
         self._trim_history()
+        self._prefetch()
         self._follow_status()
         try:
             self.on_change(self.state())

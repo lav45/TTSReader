@@ -175,12 +175,16 @@ class MessageQueue:
     def forget_audio(self, message: Message) -> None:
         """Кэш сообщения устарел: файлы предложений удалены, сообщение — как только пришедшее
         (без предложений, отметки «прослушано» и доигранных индексов; число предложений
-        остаётся — текст тот же)."""
+        остаётся — текст тот же). Задача первого предложения, отданного заранее, сообщению
+        больше не принадлежит: её позднее предложение — чужое."""
         for sentence in message.sentences:
             self._unlink(sentence)
         message.sentences = []
         message.heard = False
         message.played_indices = set()
+        if message.head_task is not None:
+            message.task_ids.discard(message.head_task)
+            message.head_task = None
 
     def following(self, message: Message) -> Message | None:
         index = self._messages.index(message) + 1
@@ -248,12 +252,17 @@ class MessageQueue:
 
     @staticmethod
     def _all_indices(message: Message, task_id: str | None) -> bool:
-        """У задачи task_id сообщения есть предложения со всеми индексами 0…sentence_count−1,
-        вместе с удалёнными доигранными при выходе (played_indices); число неизвестно — False."""
+        """У задачи task_id сообщения есть предложения со всеми своими индексами, вместе с
+        удалёнными доигранными при выходе (played_indices); число неизвестно — False. Задача
+        первого предложения (head_task) делит одно предложение, задача остальных после неё —
+        sentence_count−1, любая другая — весь текст, sentence_count."""
         if message.sentence_count is None:
             return False
+        expected = message.sentence_count
+        if message.head_task is not None:
+            expected = 1 if task_id == message.head_task else expected - 1
         received = {s.index for s in message.sentences if s.task_id == task_id}
-        return (received | message.played_indices).issuperset(range(message.sentence_count))
+        return (received | message.played_indices).issuperset(range(expected))
 
     def clear(self) -> None:
         """Удаляет файлы всех сообщений, включая хвост, и забывает их вместе с задачами:

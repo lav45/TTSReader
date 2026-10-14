@@ -41,6 +41,11 @@ class Message:
     функцией claude-tts); None — ещё не посчитано или счётчик недоступен. played_indices —
     индексы предложений последней задачи, удалённых доигранными при выходе плеера
     (MessageQueue.release): они пришли, и конец сообщения по числу их учитывает.
+    rest_at — позиция второго предложения в text (счётчик); None — предложений меньше двух или
+    не посчитано. head_task — задача демона только с первым предложением отложенного сообщения,
+    отданная заранее, пока доигрывает предыдущее (Player._prefetch): пока сообщение отложено,
+    остальные предложения ждут начала проигрывания и уходят своей задачей; None — первое
+    предложение отдельно не отдавалось или озвучка начата заново.
     """
     session_id: str
     project: str | None = None
@@ -55,6 +60,8 @@ class Message:
     deferred: bool = False
     sentence_count: int | None = None
     played_indices: set[int] = field(default_factory=set)
+    rest_at: int | None = None
+    head_task: str | None = None
 
 
 @dataclass(frozen=True)

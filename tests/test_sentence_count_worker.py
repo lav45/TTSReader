@@ -47,13 +47,21 @@ class SentenceCountWorkerTest(unittest.TestCase):
         code, lines = self.run_worker([self.request("Раз. Два. Три."), self.request("Один."),
                                        self.request("А.\nБ.")])
         self.assertEqual(0, code)
-        self.assertEqual([{"count": 3}, {"count": 1}, {"count": 2}], lines)
+        self.assertEqual([{"count": 3, "rest_at": 5}, {"count": 1, "rest_at": None},
+                          {"count": 2, "rest_at": 3}], lines)
+
+    def test_rest_at_splits_text_into_first_sentence_and_rest(self):
+        """text[:rest_at] делится на первое предложение, text[rest_at:] — на остальные."""
+        text = "  Раз.\n\n Два. Три."
+        _, [line] = self.run_worker([self.request(text)])
+        self.assertEqual(9, line["rest_at"])
+        self.assertEqual(("  Раз.\n\n ", "Два. Три."), (text[:9], text[9:]))
 
     def test_blank_text_is_zero(self):
         """Демон пустой текст не синтезирует: ни одного предложения."""
         code, lines = self.run_worker([self.request(""), self.request("  \n\t ")])
         self.assertEqual(0, code)
-        self.assertEqual([{"count": 0}, {"count": 0}], lines)
+        self.assertEqual([{"count": 0, "rest_at": None}] * 2, lines)
 
     def test_answer_comes_before_next_request(self):
         """Постоянный процесс: ответ на запрос сразу, не дожидаясь конца stdin."""
@@ -64,10 +72,10 @@ class SentenceCountWorkerTest(unittest.TestCase):
         try:
             proc.stdin.write(self.request("Раз. Два."))
             proc.stdin.flush()
-            self.assertEqual({"count": 2}, json.loads(proc.stdout.readline()))
+            self.assertEqual(2, json.loads(proc.stdout.readline())["count"])
             proc.stdin.write(self.request("Раз."))
             proc.stdin.flush()
-            self.assertEqual({"count": 1}, json.loads(proc.stdout.readline()))
+            self.assertEqual(1, json.loads(proc.stdout.readline())["count"])
             proc.stdin.close()
             self.assertEqual(0, proc.wait(timeout=30))
         finally:
@@ -80,7 +88,7 @@ class SentenceCountWorkerTest(unittest.TestCase):
             with self.subTest(line=line):
                 code, lines = self.run_worker([self.request("Раз."), line])
                 self.assertEqual(1, code)
-                self.assertEqual({"count": 1}, lines[0])
+                self.assertEqual(1, lines[0]["count"])
                 self.assertIn("error", lines[-1])
 
     def test_missing_package_gives_exit_2(self):

@@ -86,6 +86,8 @@ class SavedMessages:
             "sentences": [s.path.name for s in message.sentences],
             "sentence_count": message.sentence_count,
             "played_indices": sorted(message.played_indices),
+            "rest_at": message.rest_at,
+            "head_task": message.head_task,
         }
 
     def _from_dict(self, item: dict) -> Message:
@@ -106,6 +108,10 @@ class SavedMessages:
             # файл до счётчика предложений — без ключа: число запросит Player.start
             sentence_count=self._optional_count(item.get("sentence_count")),
             played_indices={self._count(index) for index in item.get("played_indices", [])},
+            # файл до заранее отданного первого предложения — без ключей: позицию запросит
+            # Player.start, первое предложение отдельно не отдавалось
+            rest_at=self._optional_count(item.get("rest_at")),
+            head_task=self._optional_text(item.get("head_task")),
         )
 
     def _sentences(self, names: list) -> list:

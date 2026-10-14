@@ -151,14 +151,14 @@ class FakeCounter:
     как недоступный счётчик."""
 
     def __init__(self) -> None:
-        self.requests: list[tuple[str, Callable[[int], None]]] = []
+        self.requests: list[tuple[str, Callable[[int, int | None], None]]] = []
         self.stopped = False
 
-    def count(self, text: str, on_count: Callable[[int], None]) -> None:
+    def count(self, text: str, on_count: Callable[[int, int | None], None]) -> None:
         self.requests.append((text, on_count))
 
-    def answer(self, count: int, request: int = 0) -> None:
-        self.requests[request][1](count)
+    def answer(self, count: int, request: int = 0, rest_at: int | None = None) -> None:
+        self.requests[request][1](count, rest_at)
 
     def stop(self) -> None:
         self.stopped = True
@@ -3166,7 +3166,7 @@ class PlayerSentenceCountTest(PlayerCase):
 
     def test_count_failure_does_not_block_sending(self) -> None:
         class BrokenCounter(FakeCounter):
-            def count(self, text: str, on_count: Callable[[int], None]) -> None:
+            def count(self, text: str, on_count: Callable[[int, int | None], None]) -> None:
                 raise RuntimeError("boom")
 
         self.counter = BrokenCounter()
@@ -3256,6 +3256,190 @@ class PlayerSentenceCountTest(PlayerCase):
         self.counter.answer(2)
         self.assertEqual([1, 2], [m.sentence_count for m in self.state().messages])
 
+
+
+BH = "1000000000000000011_b0_tts_queue_S_b0_s0.wav"
+BR0 = "1000000000000000012_b1_tts_queue_S_b1_s0.wav"
+BR1 = "1000000000000000013_b1_tts_queue_S_b1_s1.wav"
+B_TEXT = "Раз. Два. Три."
+B_REST_AT = 5
+
+
+class PlayerHeadAheadTest(PlayerCase):
+    """Первое предложение следующего отложенного — демону заранее, пока доигрывает текущее,
+    чей синтез закончен; остальные — при начале отложенного: переход без ожидания синтеза."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.counter = FakeCounter()
+        self.player = Player(self.runtime, None, sessions=Sessions(self.runtime / "sessions.json"),
+                             daemon_queue=self.daemon, daemon_settings=self.settings,
+                             sentence_counter=self.counter)
+        self.playback = self.player._playback
+        self.player.on_change = self.states.append
+        self.player.add_session("S", "/w/proj")
+        self.player.select_session("S")
+        self.player.start()
+
+    def deferred(self, text: str = B_TEXT, count: int = 3,
+                 rest_at: int | None = B_REST_AT) -> Message:
+        """Задача хука отложена (звучал свой текст), счётчик ответил на её текст."""
+        self.player.hold()
+        self.player._on_hook_task(HookTask("hook-b", 1.0, "S", "proj", text, "p", 1.0,
+                                           {"id": "hook-b", "text": text}))
+        self.player.release()
+        self.counter.answer(count, len(self.counter.requests) - 1, rest_at)
+        return self.state().messages[-1]
+
+    def playing_aa(self, *ids: str, count: int = 1) -> Message:
+        """aa ушла в демон и играет первое предложение; за ней — отложенное b. ids — id
+        следующих задач демона."""
+        self.announce("aa")
+        self.daemon.ids += ids
+        self.counter.answer(count)
+        b = self.deferred()
+        self.arrive(A0)
+        self.assertEqual(("playing", [A0]), (self.state().status, self.playback.played))
+        return b
+
+    def texts(self) -> list[str]:
+        return [put["text"] for put in self.daemon.puts]
+
+    def stray(self, name: str) -> None:
+        """Предложение пришло без задачи хука для него (arrive её завела бы)."""
+        path = self.store_dir / name
+        write_wav(path, SECONDS)
+        match = NAME_PATTERN.match(name)
+        self.player._on_sentence(Sentence(int(match["recv_ns"]), match["task_id"],
+                                          match["session_id"], match["token"],
+                                          int(match["index"]), path))
+
+    def test_head_of_next_deferred_is_sent_when_current_synthesis_ends(self) -> None:
+        with self.assertLogs("tts_player.player", "INFO") as logs:
+            b = self.playing_aa("b0")
+        self.assertEqual(["text aa", "Раз. "], self.texts())
+        self.assertEqual({**self.settings.active_voice().fields, "text": "Раз. ",
+                          "session_id": "S", "project": "proj"}, self.daemon.puts[-1])
+        self.assertEqual(("b0", {"b0"}, True, True), (b.head_task, b.task_ids, b.deferred, b.sent))
+        self.assertIn("head S b0: p 1.0", [r.getMessage() for r in logs.records])
+
+    def test_next_plays_head_at_once_and_sends_the_rest(self) -> None:
+        b = self.playing_aa("b0", "b1")
+        self.arrive(BH)
+        self.assertEqual([A0], self.playback.played)  # первое следующего ждёт своего часа
+        self.finish()
+        self.assertEqual((b, "playing", BH), (self.state().current, self.state().status,
+                                              self.playback.played[-1]))
+        self.assertEqual(["text aa", "Раз. ", "Два. Три."], self.texts())
+        self.assertEqual(({"b0", "b1"}, False), (b.task_ids, b.deferred))
+        self.finish()
+        self.assertEqual("playing", self.state().status)  # ждёт остальные
+        self.arrive(BR0)
+        self.arrive(BR1)
+        self.finish()
+        self.finish()
+        self.assertEqual([A0, BH, BR0, BR1], self.playback.played)
+        self.assertEqual(("idle", True), (self.state().status, b.heard))
+
+    def test_head_still_synthesizing_plays_when_it_arrives(self) -> None:
+        b = self.playing_aa("b0", "b1")
+        self.finish()
+        self.assertEqual((b, "playing", [A0]), (self.state().current, self.state().status,
+                                                self.playback.played))
+        self.arrive(BH)
+        self.assertEqual(BH, self.playback.played[-1])
+
+    def test_nothing_ahead_while_current_is_still_synthesizing(self) -> None:
+        self.playing_aa("b0", count=2)
+        self.assertEqual(["text aa"], self.texts())
+        self.arrive(A1)
+        self.assertEqual(["text aa", "Раз. "], self.texts())
+
+    def test_nothing_ahead_with_autoplay_off(self) -> None:
+        """Отжатая ⏩: отложенное уходит в синтез только по ▶."""
+        self.playing_aa("b0", count=2)
+        self.player.apply_prefs(Prefs(autoplay=False))
+        self.arrive(A1)
+        self.assertEqual(["text aa"], self.texts())
+
+    def test_nothing_ahead_without_split(self) -> None:
+        """Ответа счётчика ещё нет: деление текста неизвестно — отложенное ждёт, как раньше."""
+        self.announce("aa")
+        self.daemon.ids += ["bb"]
+        self.counter.answer(1)
+        self.player.hold()
+        self.player._on_hook_task(HookTask("hook-b", 1.0, "S", "proj", B_TEXT, "p", 1.0,
+                                           {"id": "hook-b", "text": B_TEXT}))
+        self.player.release()
+        self.arrive(A0)
+        self.assertEqual(["text aa"], self.texts())
+        self.finish()
+        self.assertEqual(["text aa", B_TEXT], self.texts())
+
+    def test_single_sentence_goes_whole_and_nothing_more_at_start(self) -> None:
+        self.announce("aa")
+        self.daemon.ids += ["b0"]
+        self.counter.answer(1)
+        b = self.deferred("Один.", count=1, rest_at=None)
+        self.arrive(A0)
+        self.assertEqual(["text aa", "Один."], self.texts())
+        self.arrive(BH)
+        self.finish()
+        self.assertEqual((b, BH, False), (self.state().current, self.playback.played[-1],
+                                          b.deferred))
+        self.assertEqual(2, len(self.daemon.puts))
+        self.finish()
+        self.assertEqual(("idle", True), (self.state().status, b.heard))
+
+    def test_changed_voice_drops_head_and_voices_whole_text(self) -> None:
+        b = self.playing_aa("b0", "b2")
+        self.settings.persona = "q"
+        self.finish()
+        self.assertEqual(["text aa", "Раз. ", B_TEXT], self.texts())
+        self.assertEqual(({"b2"}, None, "q", False),
+                         (b.task_ids, b.head_task, b.persona, b.deferred))
+        with self.assertLogs("tts_player.queue", "WARNING"):
+            self.stray(BH)
+        self.assertFalse(self.path(BH).exists())
+        self.assertEqual([A0], self.playback.played)
+
+    def test_failed_write_is_not_retried_and_whole_text_goes_at_start(self) -> None:
+        with self.assertLogs("tts_player.player", "WARNING") as logs:
+            b = self.playing_aa()
+            self.player.toggle_play_pause()
+            self.player.toggle_play_pause()
+        self.assertEqual(1, sum("заранее не отдано" in line for line in logs.output))
+        self.assertEqual((None, True), (b.head_task, b.deferred))
+        self.daemon.ids += ["bb"]
+        self.finish()
+        self.assertEqual(B_TEXT, self.texts()[-1])
+
+    def test_head_after_stop_does_not_start_deferred(self) -> None:
+        """⏹ после отдачи: пришедшее первое предложение отложенного само его не начинает."""
+        b = self.playing_aa("b0")
+        self.player.stop()
+        self.arrive(BH)
+        self.assertEqual(("idle", None, [A0]), (self.state().status, self.state().current,
+                                                self.playback.played))
+        self.assertTrue(b.deferred)
+
+    def test_restart_keeps_head_and_sends_rest_at_start(self) -> None:
+        b = self.playing_aa("b0", "b1")
+        self.arrive(BH)
+        self.player.shutdown()
+        self.counter = FakeCounter()
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()
+        self.player = Player(self.runtime, None, sessions=sessions, daemon_queue=self.daemon,
+                             daemon_settings=self.settings, sentence_counter=self.counter)
+        self.playback = self.player._playback
+        self.player.start()
+        self.assertEqual([], self.counter.requests)
+        b = self.player._queue.messages[-1]
+        self.assertEqual(("b0", B_REST_AT, True), (b.head_task, b.rest_at, b.deferred))
+        self.player.play_message(b)
+        self.player.toggle_play_pause()
+        self.assertEqual((BH, "Два. Три."), (self.playback.played[-1], self.texts()[-1]))
 
 if __name__ == "__main__":
     unittest.main()
