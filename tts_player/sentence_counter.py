@@ -14,21 +14,22 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 log = logging.getLogger("tts_player.sentence_counter")
 
-OnCount = Callable[[int, int | None], None]
-"""Ответ счётчика: число предложений и позиция второго в тексте (None — их меньше двух)."""
+OnCount = Callable[[int, list[int]], None]
+"""Ответ счётчика: число предложений и позиции их начал в тексте, по порядку."""
 
 
 class SentenceCounter:
-    """Постоянный процесс-счётчик: count(text, on_count) — запрос, on_count(n, rest_at) — ответ
-    из цикла GLib, по порядку запросов (rest_at — позиция второго предложения в тексте или None,
-    протокол sentence_count_worker). Процесс запускается первым запросом и живёт до stop(); его
+    """Постоянный процесс-счётчик: count(text, on_count) — запрос, on_count(n, starts) — ответ
+    из цикла GLib, по порядку запросов (starts — позиции начал предложений в тексте, протокол
+    sentence_count_worker). Процесс запускается первым запросом и живёт до stop(); его
     владелец — Player (останавливает в shutdown).
 
     Главный цикл не ждёт: запрос пишется в stdin асинхронно, ответ читается асинхронно. Сбой —
     процесс не запустился, вышел, прислал непонятное или не ответил на самый старый запрос за
     TIMEOUT_S — одна строка WARNING, процесс остановлен, счётчик недоступен до конца запуска:
     ждущие и новые запросы ответа не получают (число у сообщения остаётся неизвестным, конец
-    сообщения — по запасным признакам MessageQueue.is_complete).
+    сообщения — по запасным признакам MessageQueue.is_complete); on_broken зовётся один раз —
+    ждавшие ответа сообщения владелец отдаёт демону целиком. Состояние — available.
     """
     # ответ на текст сообщения — доли миллисекунды, запуск процесса с импортом claude_code_tts
     # — десятки; 5 с — заведомо сбой, а не медленный счёт
@@ -45,6 +46,12 @@ class SentenceCounter:
         self._pending: collections.deque[OnCount] = collections.deque()
         self._timeout_id = 0
         self._broken = False  # сбой или stop: запросы больше не принимаются
+        self.on_broken: Callable[[], None] = lambda: None  # сбой (не stop): ответов больше нет
+
+    @property
+    def available(self) -> bool:
+        """Запросы принимаются: сбоя и stop не было."""
+        return not self._broken
 
     def count(self, text: str, on_count: OnCount) -> None:
         """Запрос числа предложений text; ответ — в on_count из цикла GLib. Счётчик
@@ -122,9 +129,9 @@ class SentenceCounter:
             log.exception("on_count: ошибка обработчика числа предложений")
 
     @staticmethod
-    def _parse(line: str) -> tuple[int, int | None] | str:
-        """{"count": n, "rest_at": k} с целым n ≥ 0 и k — целым > 0 при n ≥ 2, иначе null —
-        (n, k); иначе причина сбоя для WARNING."""
+    def _parse(line: str) -> tuple[int, list[int]] | str:
+        """{"count": n, "starts": [k, …]} с целым n ≥ 0 и n возрастающими целыми k ≥ 0 —
+        (n, starts); иначе причина сбоя для WARNING."""
         try:
             message = json.loads(line)
         except ValueError:
@@ -133,14 +140,15 @@ class SentenceCounter:
             return f"непонятная строка {line!r}"
         if "error" in message:
             return f"ошибка процесса: {message['error']}"
-        count, rest_at = message.get("count"), message.get("rest_at")
+        count, starts = message.get("count"), message.get("starts")
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             return f"непонятная строка {line!r}"
-        if count < 2 and rest_at is None:
-            return count, None
-        if isinstance(rest_at, bool) or not isinstance(rest_at, int) or rest_at < 1:
+        if (not isinstance(starts, list) or len(starts) != count
+                or any(isinstance(k, bool) or not isinstance(k, int) for k in starts)
+                or any(k < 0 for k in starts[:1])
+                or any(a >= b for a, b in zip(starts, starts[1:]))):
             return f"непонятная строка {line!r}"
-        return count, rest_at
+        return count, starts
 
     def _arm_timeout(self) -> None:
         """Срок TIMEOUT_S — на самый старый запрос без ответа, от момента постановки срока:
@@ -164,9 +172,13 @@ class SentenceCounter:
         if self._broken:
             return
         self._broken = True
-        log.warning("счётчик предложений недоступен (%s): конец сообщения — по"
-                    " предложению следующей задачи", reason)
+        log.warning("счётчик предложений недоступен (%s): текст уходит демону целиком, конец"
+                    " сообщения — по предложению следующей задачи", reason)
         self._end()
+        try:
+            self.on_broken()
+        except Exception:
+            log.exception("on_broken: ошибка обработчика сбоя счётчика")
 
     def _end(self) -> None:
         """Колбэки сняты, срок снят; живой процесс убит SIGKILL и подобран здесь же: у счётчика

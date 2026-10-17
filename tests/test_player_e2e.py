@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PAPLAY = ROOT / "daemon-bin" / "paplay"
 WAIT = 10.0
 QUIET = 1.0
+SETTLE_S = 3.0  # задача демона после забранной задачи хука: ответ или сбой счётчика
 RATE = 8000
 SECONDS = 0.25
 PROTOCOL = ("playing ", "error ")
@@ -200,10 +201,16 @@ class PlayerProcessCase(unittest.TestCase):
             except FileNotFoundError:  # каталога ещё нет или его почистили
                 time.sleep(0.02)
                 continue
-            while target.exists():  # плеер удаляет задачу хука после записи задачи демона
+            while target.exists():  # плеер забрал задачу хука
                 self.assertLess(time.monotonic(), deadline, "задача хука не забрана")
                 time.sleep(0.02)
-            new = set(self.daemon_queue.glob("*.json")) - before
+            # задача демона — сразу или с ответом счётчика (первое предложение), а без
+            # счётчика — с его сбоем: асинхронно, после того как задача хука забрана
+            settle = time.monotonic() + SETTLE_S
+            while not (new := set(self.daemon_queue.glob("*.json")) - before):
+                if time.monotonic() > settle:
+                    break
+                time.sleep(0.02)
             if new:
                 [path] = new
                 return json.loads(path.read_text())

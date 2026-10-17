@@ -86,8 +86,8 @@ class SavedMessages:
             "sentences": [s.path.name for s in message.sentences],
             "sentence_count": message.sentence_count,
             "played_indices": sorted(message.played_indices),
-            "rest_at": message.rest_at,
-            "head_task": message.head_task,
+            "starts": message.starts,
+            "pieces": message.pieces,
         }
 
     def _from_dict(self, item: dict) -> Message:
@@ -108,11 +108,28 @@ class SavedMessages:
             # файл до счётчика предложений — без ключа: число запросит Player.start
             sentence_count=self._optional_count(item.get("sentence_count")),
             played_indices={self._count(index) for index in item.get("played_indices", [])},
-            # файл до заранее отданного первого предложения — без ключей: позицию запросит
-            # Player.start, первое предложение отдельно не отдавалось
-            rest_at=self._optional_count(item.get("rest_at")),
-            head_task=self._optional_text(item.get("head_task")),
+            # файл до текста по предложениям — без ключей: позиции запросит Player.start;
+            # первое предложение, отданное заранее (head_task), — отданное предложение 0
+            starts=self._optional_starts(item.get("starts")),
+            pieces=self._pieces(item),
         )
+
+    def _pieces(self, item: dict) -> dict[str, int]:
+        if "pieces" in item:
+            pieces = item["pieces"]
+            if not isinstance(pieces, dict):
+                raise TypeError(f"ожидался словарь: {pieces!r}")
+            return {self._text(task_id): self._count(index) for task_id, index in pieces.items()}
+        head = self._optional_text(item.get("head_task"))
+        return {} if head is None else {head: 0}
+
+    @classmethod
+    def _optional_starts(cls, value) -> list[int] | None:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise TypeError(f"ожидался список: {value!r}")
+        return [cls._count(start) for start in value]
 
     def _sentences(self, names: list) -> list:
         sentences = []

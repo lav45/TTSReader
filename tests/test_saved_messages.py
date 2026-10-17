@@ -32,14 +32,14 @@ class SavedMessagesTest(unittest.TestCase):
         unheard = Message("S", project="/w/p", text="Привет", persona="p", speed=1.5,
                           task_ids={"aa", "bb"},
                           sentences=[self.sentence(S0, 0), self.sentence(S1, 1)],
-                          received_at=5.0, sentence_count=2, rest_at=4)
+                          received_at=5.0, sentence_count=2, starts=[0, 4])
         heard = Message("N", text="пока", persona="q", speed=1.0, task_ids={"cc"},
                         received_at=6.0, heard=True, sentence_count=3,
                         played_indices={0, 2})
         not_sent = Message("S", text="x", sent=False)
         deferred = Message("B", text="Раз. Два.", persona="p", speed=1.0, received_at=8.0,
-                           task_ids={"dd"}, deferred=True, sentence_count=2, rest_at=5,
-                           head_task="dd")
+                           task_ids={"dd"}, deferred=True, sentence_count=2, starts=[0, 5],
+                           pieces={"dd": 0})
         return QueueSnapshot([unheard, heard, not_sent, deferred], [unheard],
                              {"aa": 1, "bb": 3, "cc": 2, "dd": 4}, 3)
 
@@ -47,7 +47,7 @@ class SavedMessagesTest(unittest.TestCase):
         return (message.session_id, message.project, message.text, message.persona,
                 message.speed, message.task_ids, message.sentences, message.received_at,
                 message.sent, message.heard, message.deferred, message.sentence_count,
-                message.played_indices, message.rest_at, message.head_task)
+                message.played_indices, message.starts, message.pieces)
 
     def test_round_trip_and_file_deleted_after_load(self):
         snapshot = self.snapshot()
@@ -85,19 +85,29 @@ class SavedMessagesTest(unittest.TestCase):
         self.assertEqual([(None, set())] * 4,
                          [(m.sentence_count, m.played_indices) for m in loaded])
 
-    def test_missing_head_keys_read_as_none(self):
-        """Файл до первого предложения заранее: позиция второго неизвестна (её запросит
-        Player.start), первое предложение отдельно не отдавалось."""
+    def test_missing_piece_keys_read_as_unknown(self):
+        """Файл до текста по предложениям: деление неизвестно (его запросит Player.start),
+        отданных по одному нет."""
         self.saved.save(self.snapshot())
         data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual([(4, None), (None, None), (None, None), (5, "dd")],
-                         [(m["rest_at"], m["head_task"]) for m in data["messages"]])
+        self.assertEqual([([0, 4], {}), (None, {}), (None, {}), ([0, 5], {"dd": 0})],
+                         [(m["starts"], m["pieces"]) for m in data["messages"]])
         for item in data["messages"]:
-            del item["rest_at"]
-            del item["head_task"]
+            del item["starts"]
+            del item["pieces"]
         self.path.write_text(json.dumps(data), encoding="utf-8")
-        self.assertEqual([(None, None)] * 4,
-                         [(m.rest_at, m.head_task) for m in self.saved.load().messages])
+        self.assertEqual([(None, {})] * 4,
+                         [(m.starts, m.pieces) for m in self.saved.load().messages])
+
+    def test_head_task_of_previous_version_is_piece_zero(self):
+        """Файл с первым предложением, отданным заранее (head_task): это отданное предложение 0."""
+        self.saved.save(self.snapshot())
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        for item in data["messages"]:
+            del item["pieces"]
+        data["messages"][3]["head_task"] = "dd"
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual({"dd": 0}, self.saved.load().messages[3].pieces)
 
     def test_saved_file_names_are_relative_to_store(self):
         self.saved.save(self.snapshot())

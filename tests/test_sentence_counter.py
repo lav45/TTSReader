@@ -18,9 +18,9 @@ from tts_player.sentence_counter import SentenceCounter  # noqa: E402
 
 LOOP_LIMIT_S = 10.0
 
-# Поддельный счётчик: n — число точек в тексте, второе предложение — через пробел за первой
-# точкой. MODE: count — отвечает; silent — молчит; garbage — непонятная строка; bad_rest — число
-# без позиции второго предложения; exit — строка error и выход 2, как без claude_code_tts
+# Поддельный счётчик: n — число точек в тексте, каждое следующее предложение — через пробел за
+# точкой. MODE: count — отвечает; silent — молчит; garbage — непонятная строка; bad_starts — позиций
+# меньше, чем предложений; exit — строка error и выход 2, как без claude_code_tts
 WORKER = '''
 import json
 import os
@@ -40,8 +40,10 @@ for line in sys.stdin:
         print("garbage", flush=True)
         continue
     count = text.count(".")
-    rest_at = text.index(".") + 2 if count >= 2 and MODE != "bad_rest" else None
-    print(json.dumps({{"count": count, "rest_at": rest_at}}), flush=True)
+    starts = [0] + [i + 2 for i, ch in enumerate(text) if ch == "."][:count - 1] if count else []
+    if MODE == "bad_starts":
+        starts = starts[:-1]
+    print(json.dumps({{"count": count, "starts": starts}}), flush=True)
 '''
 
 
@@ -53,7 +55,7 @@ class SentenceCounterTest(unittest.TestCase):
         self.log = self.root / "worker.log"
         self.worker = self.root / "fake_worker.py"
         self.counts: list[tuple[str, int]] = []
-        self.rests: list[int | None] = []
+        self.rests: list[list[int]] = []
 
     def make(self, mode: str = "count", python: Path | None = None) -> SentenceCounter:
         self.worker.write_text(WORKER.format(mode=mode, log=str(self.log)))
@@ -62,11 +64,11 @@ class SentenceCounterTest(unittest.TestCase):
         return counter
 
     def ask(self, counter: SentenceCounter, text: str) -> None:
-        counter.count(text, lambda n, rest_at: self.answered(text, n, rest_at))
+        counter.count(text, lambda n, starts: self.answered(text, n, starts))
 
-    def answered(self, text: str, n: int, rest_at: int | None) -> None:
+    def answered(self, text: str, n: int, starts: list[int]) -> None:
         self.counts.append((text, n))
-        self.rests.append(rest_at)
+        self.rests.append(starts)
 
     def run_until(self, predicate, limit: float = LOOP_LIMIT_S) -> None:
         context = GLib.MainContext.default()
@@ -108,16 +110,22 @@ class SentenceCounterTest(unittest.TestCase):
         self.ask(counter, "А. Б.")
         self.run_until(lambda: len(self.counts) == 4)
         self.assertEqual(("А. Б.", 2), self.counts[-1])
-        self.assertEqual([5, None, None, 3], self.rests)
+        self.assertEqual([[0, 5, 10], [0], [], [0, 3]], self.rests)
         self.assertEqual(1, len(self.starts()))
 
-    def test_count_without_rest_at_breaks_counter(self) -> None:
-        """Два предложения и больше без позиции второго — непонятный ответ: сбой счётчика."""
-        counter = self.make("bad_rest")
+    def test_starts_not_matching_count_break_counter(self) -> None:
+        """Позиций не столько, сколько предложений, — непонятный ответ: сбой счётчика,
+        on_broken — один раз, available — False."""
+        counter = self.make("bad_starts")
+        broken: list[bool] = []
+        counter.on_broken = lambda: broken.append(True)
+        self.assertTrue(counter.available)
         with self.assertLogs("tts_player.sentence_counter", "WARNING") as logs:
             self.ask(counter, "Раз. Два.")
             self.run_until(lambda: "непонятная" in logs.output[0] if logs.output else False)
-        self.assertEqual([], self.counts)
+        self.assertEqual(([], [True], False), (self.counts, broken, counter.available))
+        self.ask(counter, "Раз.")
+        self.assertEqual([True], broken)
 
     def test_lone_surrogate_is_counted(self) -> None:
         """Одиночный суррогат (json.loads задачи хука его пропускает) уходит экранированным
@@ -199,7 +207,7 @@ class SentenceCounterTest(unittest.TestCase):
     def test_failing_callback_does_not_stop_counter(self) -> None:
         counter = self.make()
 
-        def broken(n: int, rest_at: int | None) -> None:
+        def broken(n: int, starts: list[int]) -> None:
             raise RuntimeError("boom")
 
         with self.assertLogs("tts_player.sentence_counter", "ERROR"):

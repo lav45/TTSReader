@@ -110,6 +110,45 @@ class MessageQueue:
         message.task_ids.add(task_id)
         self._order.link(task_id)
 
+    def link_piece(self, message: Message, task_id: str, index: int) -> None:
+        """Задача демона task_id отдаёт демону одно предложение index текста message."""
+        message.pieces[task_id] = index
+        self.link(message, task_id)
+
+    @staticmethod
+    def by_sentence(message: Message) -> bool:
+        """Текст сообщения идёт демону по одному предложению: деление известно (starts), а задач
+        всего текста разом у него нет."""
+        return message.starts is not None and message.task_ids <= message.pieces.keys()
+
+    def next_piece(self, message: Message) -> int | None:
+        """Первое предложение текста, которое демону ещё не отдавалось (и не пропущено); None —
+        отдано всё."""
+        done, flying = self._pieces(message)
+        return next((i for i in range(len(message.starts)) if i not in done | flying), None)
+
+    def in_flight(self, message: Message) -> bool:
+        """Демон ещё озвучивает что-то, отданное для сообщения: предложение текста по одному —
+        его файла нет и демон не ушёл дальше; текст разом — сообщение не завершено."""
+        if self.by_sentence(message):
+            return bool(self._pieces(message)[1])
+        return message.sent and not self.is_complete(message)
+
+    def _pieces(self, message: Message) -> tuple[set[int], set[int]]:
+        """(готовые, в работе) предложения текста по одному. Готово — файл пришёл, доигран и
+        удалён при выходе (played_indices), запись задачи не удалась (skipped) или демон взял
+        задачу позже, а файла нет (сбой синтеза — не повторяется). В работе — остальные
+        отданные."""
+        arrived = {s.task_id for s in message.sentences}
+        done = message.played_indices | message.skipped
+        flying = set()
+        for task_id, index in message.pieces.items():
+            if task_id in arrived or self._order.delivered_after(task_id):
+                done = done | {index}
+            else:
+                flying.add(index)
+        return done, flying - done
+
     def task_of(self, message: Message) -> str | None:
         """Последняя задача демона сообщения; None, если ни одна не поставлена."""
         return max(message.task_ids, key=self._order.order, default=None)
@@ -175,16 +214,16 @@ class MessageQueue:
     def forget_audio(self, message: Message) -> None:
         """Кэш сообщения устарел: файлы предложений удалены, сообщение — как только пришедшее
         (без предложений, отметки «прослушано» и доигранных индексов; число предложений
-        остаётся — текст тот же). Задача первого предложения, отданного заранее, сообщению
-        больше не принадлежит: её позднее предложение — чужое."""
+        остаётся — текст тот же). Задачи предложений по одному сообщению больше не принадлежат:
+        их поздние предложения — чужие, и отдавать текст можно заново с первого."""
         for sentence in message.sentences:
             self._unlink(sentence)
         message.sentences = []
         message.heard = False
         message.played_indices = set()
-        if message.head_task is not None:
-            message.task_ids.discard(message.head_task)
-            message.head_task = None
+        message.task_ids -= message.pieces.keys()
+        message.pieces = {}
+        message.skipped = set()
 
     def following(self, message: Message) -> Message | None:
         index = self._messages.index(message) + 1
@@ -237,12 +276,16 @@ class MessageQueue:
         return sum(self._duration(s) for s in message.sentences)
 
     def is_complete(self, message: Message) -> bool:
-        """Сообщение больше не растёт: у его последней задачи пришли предложения со всеми
-        индексами 0…n−1, где n — message.sentence_count (любого прохода; n == 0 — ждать
-        нечего). Запасные признаки — число неизвестно или демон сбился: его задача не ушла в
-        демон (ждать нечего); или пришло предложение задачи, поставленной позже его последней,
-        — демон синтезирует задачи строго по одной в порядке постановки.
+        """Сообщение больше не растёт. Текст по предложениям — готово каждое предложение текста
+        (_pieces): пока какое-то не отдано, сообщение растёт. Текст разом — у его последней
+        задачи пришли предложения со всеми индексами 0…n−1, где n — message.sentence_count
+        (любого прохода; n == 0 — ждать нечего). Запасные признаки — число неизвестно или
+        демон сбился: его задача не ушла в демон (ждать нечего); или пришло предложение задачи,
+        поставленной позже его последней, — демон синтезирует задачи строго по одной в порядке
+        постановки.
         """
+        if self.by_sentence(message):
+            return self._pieces(message)[0].issuperset(range(len(message.starts)))
         if not message.sent:
             return True
         task_id = self.task_of(message)
@@ -253,14 +296,10 @@ class MessageQueue:
     @staticmethod
     def _all_indices(message: Message, task_id: str | None) -> bool:
         """У задачи task_id сообщения есть предложения со всеми своими индексами, вместе с
-        удалёнными доигранными при выходе (played_indices); число неизвестно — False. Задача
-        первого предложения (head_task) делит одно предложение, задача остальных после неё —
-        sentence_count−1, любая другая — весь текст, sentence_count."""
+        удалёнными доигранными при выходе (played_indices); число неизвестно — False."""
         if message.sentence_count is None:
             return False
         expected = message.sentence_count
-        if message.head_task is not None:
-            expected = 1 if task_id == message.head_task else expected - 1
         received = {s.index for s in message.sentences if s.task_id == task_id}
         return (received | message.played_indices).issuperset(range(expected))
 
@@ -280,7 +319,8 @@ class MessageQueue:
         current (непрослушанное) на позиции position_s > 0: предложения, кончившиеся до
         неё, удаляются — следующий запуск продолжит с недоигранного (предложение
         нулевой длины на позиции и начинающееся на ней остаются); индексы удалённых
-        предложений последней задачи остаются в played_indices для is_complete."""
+        предложений (последней задачи; у текста по предложениям — индексы текста) остаются в
+        played_indices для is_complete."""
         if current is not None and not current.heard and position_s > 0:
             self._drop_played(current, position_s)
         for message in self._messages:
@@ -296,8 +336,11 @@ class MessageQueue:
 
     def _drop_played(self, message: Message, position_s: float) -> None:
         played = [s for s in message.sentences if not self._unfinished(message, s, position_s)]
-        task_id = self.task_of(message)
-        message.played_indices |= {s.index for s in played if s.task_id == task_id}
+        if self.by_sentence(message):
+            message.played_indices |= {message.pieces[s.task_id] for s in played}
+        else:
+            task_id = self.task_of(message)
+            message.played_indices |= {s.index for s in played if s.task_id == task_id}
         for sentence in played:
             self._unlink(sentence)
         message.sentences = [s for s in message.sentences if s not in played]
