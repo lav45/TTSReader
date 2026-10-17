@@ -29,7 +29,7 @@ from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sessions import Session  # noqa: E402
 from tts_player.view import play_pause_label, position_label  # noqa: E402
-from tts_player.window import PlayerWindow, tray_click, tray_menu  # noqa: E402
+from tts_player.window import TEXT_PADDING, PlayerWindow, tray_click, tray_menu  # noqa: E402
 
 if not Gtk.init_check(None)[0]:
     raise RuntimeError("Gtk.init_check: дисплей недоступен")
@@ -974,6 +974,25 @@ class TextScreenTest(unittest.TestCase):
                          transport.child_get_property(w.text_position, "pack-type"))
         self.assertEqual(Gtk.PackType.END,
                          transport.child_get_property(w.text_play_button, "pack-type"))
+
+    def test_text_field_has_padding_inside_frame(self) -> None:
+        view = self.window.text_view
+        padding = (view.get_left_margin(), view.get_right_margin(),
+                   view.get_top_margin(), view.get_bottom_margin())
+        self.assertEqual((TEXT_PADDING,) * 4, padding)
+
+    def test_wide_text_does_not_hold_window_width(self) -> None:
+        """Перенос строк подстраивает ширину текста под поле: поле не требует от окна ширины,
+        которую однажды получило, — окно с широким текстом сужается."""
+        w = self.window
+        w.show_all()
+        w.text_button.clicked()
+        w.text_view.get_buffer().set_text("слово " * 400)
+        w.resize(1500, 400)
+        flush()
+        scrolled = w.text_view.get_parent()
+        minimum, _natural = scrolled.get_preferred_width()
+        self.assertLess(minimum, 100)
 
     def test_typing_sets_text_from_buffer(self) -> None:
         buffer = self.window.text_view.get_buffer()

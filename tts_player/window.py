@@ -34,6 +34,7 @@ STATUS_SUCCESS = "success"
 STATUS_ERROR = "error"
 STATUS_BAR = "bar"  # полоса во всю ширину окна у нижнего края
 SCREEN_MARGIN = 12
+TEXT_PADDING = 8  # текст в поле «Свой текст» не прижат к рамке
 # блок результата на экране настроек: провайдер ставится только на этот Label
 STATUS_CSS = b"""
 label.success, label.error { padding: 6px 8px; border-radius: 4px; }
@@ -286,7 +287,9 @@ class PlayerWindow(Gtk.Window):
         время и play/pause."""
         self.text_back_button = self._icon_button("go-previous-symbolic", "Назад",
                                                   self._leave_text)
-        self.text_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)  # длинное слово — по буквам
+        self.text_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR,  # длинное слово — по буквам
+                                      left_margin=TEXT_PADDING, right_margin=TEXT_PADDING,
+                                      top_margin=TEXT_PADDING, bottom_margin=TEXT_PADDING)
         self.text_view.get_buffer().connect("changed", self._on_text_changed)
         self.text_slider = SeekSlider(self._text_speaker.seek)
         self.text_scale = self.text_slider.scale
@@ -302,7 +305,9 @@ class PlayerWindow(Gtk.Window):
         header.pack_start(Gtk.Label(label="Свой текст", xalign=0.0), False, False, 0)
         header.pack_end(self.text_clear_button, False, False, 0)
 
-        scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        # EXTERNAL, а не NEVER: при NEVER поле требует от окна ширину, до которой его однажды
+        # растянул перенесённый текст, и окно перестаёт сужаться; строки и так переносятся
+        scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL)
         scrolled.set_shadow_type(Gtk.ShadowType.IN)
         scrolled.add(self.text_view)
 
