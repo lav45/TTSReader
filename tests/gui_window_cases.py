@@ -29,7 +29,7 @@ from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sessions import Session  # noqa: E402
 from tts_player.view import play_pause_label, position_label  # noqa: E402
-from tts_player.window import TEXT_PADDING, PlayerWindow, tray_click, tray_menu  # noqa: E402
+from tts_player.window import EMPTY_RANGE_S, TEXT_PADDING, PlayerWindow, tray_click, tray_menu  # noqa: E402
 
 if not Gtk.init_check(None)[0]:
     raise RuntimeError("Gtk.init_check: дисплей недоступен")
@@ -382,6 +382,15 @@ class PlayerWindowTest(unittest.TestCase):
         self.assertEqual([], self.player.calls)
         w.slider.release()
         self.assertEqual([("seek", 6.0)], self.player.calls)
+
+    def test_slider_without_current_stays_drawn_disabled_at_start(self) -> None:
+        """Текущего нет (⏹, конец последней): ползунок не пропадает — серый, бегунок в начале."""
+        self.player.change(state("playing", self.b, [self.a, self.b, self.c], 8.0))
+        self.player.change(state("idle", None, [self.a, self.b, self.c], 0.0))
+        w = self.window
+        self.assertEqual((False, 0.0, EMPTY_RANGE_S),
+                         (w.scale.get_sensitive(), w.scale.get_value(),
+                          w.scale.get_adjustment().get_upper()))
 
     def test_click_without_movement_does_not_seek(self) -> None:
         w = self.window
@@ -1049,7 +1058,8 @@ class TextScreenTest(unittest.TestCase):
             self.assertEqual(slider, w.text_scale.get_sensitive(), snapshot.status)
             self.assertEqual(snapshot.position_s, w.text_scale.get_value(), snapshot.status)
             adjustment = w.text_scale.get_adjustment()
-            self.assertEqual(snapshot.length_s, adjustment.get_upper(), snapshot.status)
+            upper = snapshot.length_s if snapshot.length_s > 0 else EMPTY_RANGE_S
+            self.assertEqual(upper, adjustment.get_upper(), snapshot.status)
         self.text.change(text_state("playing", 65.0, 125.0))
         self.assertEqual("1:05 / 2:05", w.text_position.get_text())
         self.assertEqual([], self.calls("seek"), "обновление из состояния не перематывает")

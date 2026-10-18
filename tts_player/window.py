@@ -44,6 +44,9 @@ label.bar { padding: 3px 12px; border-radius: 0; border-width: 1px 0 0 0; }
 """
 
 
+EMPTY_RANGE_S = 1.0  # диапазон ползунка без длины: бегунок виден в начале полосы
+
+
 class SeekSlider:
     """Ползунок позиции с перемоткой: сдвиг пользователем — seek(значение); при перетаскивании —
     один seek по отпусканию и только если двигали. Пока тянут, show() ползунок не двигает.
@@ -61,10 +64,12 @@ class SeekSlider:
         self.scale.connect("grab-broken-event", lambda _scale, _event: self.end_drag())
 
     def show(self, position_s: float, length_s: float) -> None:
-        """Позиция из состояния; set_range/set_value не шлют change-value — перемотки нет."""
+        """Позиция из состояния; set_range/set_value не шлют change-value — перемотки нет.
+        Длины нет — диапазон EMPTY_RANGE_S: у пустого диапазона GTK не рисует ни бегунок, ни
+        полосу, и ползунок пропадает."""
         if self._dragging:
             return
-        self.scale.set_range(0.0, length_s)
+        self.scale.set_range(0.0, length_s if length_s > 0 else EMPTY_RANGE_S)
         self.scale.set_value(position_s)
 
     def press(self) -> bool:
