@@ -731,9 +731,15 @@ class Player:
             return
         upcoming = self._queue.following(current)
         if upcoming is None:
-            self._status = "idle"
+            self._end_last(current)
             return
         self._begin(upcoming, requested=False)
+
+    def _end_last(self, message: Message) -> None:
+        """Доиграно последнее сообщение очереди — как кнопка ⏹ (stop): текущего нет, idle,
+        полоса на нуле; само снятое не начинается, новее него — по обычным правилам."""
+        self._reset_cursor()
+        self._stopped = message
 
     def _starts_by_itself(self) -> bool:
         """Плеер сам начинает следующее и новое: кнопка автовоспроизведения нажата и свой
@@ -750,11 +756,12 @@ class Player:
     def _stop_after(self, message: Message) -> None:
         """Конец сообщения, когда плеер сам не начинает (кнопка автовоспроизведения отжата
         или звучит свой текст): stopped; текущим становится следующее по порядку с позиции 0,
-        нет его — сообщение остаётся текущим с позицией в конце."""
-        self._status = "stopped"
+        нет его — как кнопка ⏹ (_end_last)."""
         following = self._queue.following(message)
         if following is None:
+            self._end_last(message)
             return
+        self._status = "stopped"
         self._current = following
         self._sentence = None
         self._position = 0.0

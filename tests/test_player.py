@@ -615,12 +615,15 @@ class PlayerCursorTest(PlayerCase):
         self.assertEqual([A0, B0], self.playback.played)
         self.assertTrue(self.state().messages[0].heard)
 
-    def test_idle_keeps_finished_current_and_new_message_plays(self) -> None:
+    def test_end_of_last_clears_current_and_new_message_plays(self) -> None:
+        """Доиграно последнее — как ⏹: текущего нет, idle, позиция 0; новое играет само."""
         self.start_with(A0)
         self.finish()
         self.end_by_count()
         state = self.state()
-        self.assertEqual(("idle", "aa"), (state.status, self.task_of(state.current)))
+        self.assertEqual(("idle", None, 0.0, 0.0),
+                         (state.status, state.current, state.position_s, state.length_s))
+        self.assertTrue(state.messages[0].heard)
         self.arrive(B0)
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual([A0, B0], self.playback.played)
@@ -848,11 +851,11 @@ class PlayerButtonsTest(PlayerCase):
         self.assertEqual(starts, self.playback.starts)
         self.assertEqual(token, self.task())
 
-    def test_play_message_current_while_idle_plays_it_again(self) -> None:
+    def test_play_message_ended_last_plays_it_again(self) -> None:
         self.start_with(A0)
         self.finish()
         self.end_by_count()
-        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
+        self.assertEqual(("idle", None), (self.state().status, self.task()))
         self.player.play_message(self.player._queue.messages[0])
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
         self.assertEqual((A0, 0.0), self.playback.starts[-1])
@@ -976,21 +979,24 @@ class PlayerPrefsTest(PlayerCase):
         self.assertAlmostEqual(0.2, start)
 
     def test_play_pause_when_stopped_plays_current_from_cursor(self) -> None:
-        self.end_last_manually()
-        self.assertEqual("stopped", self.state().status)
+        self.manual()
+        self.start_with(A0, B0)
+        self.play_first()
+        self.finish()
+        self.assertEqual(("stopped", "bb"), (self.state().status, self.task()))
         self.player.seek(0.3)
         self.player.toggle_play_pause()
-        self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
+        self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         name, start = self.playback.starts[-1]
-        self.assertEqual(A0, name)
+        self.assertEqual(B0, name)
         self.assertAlmostEqual(0.3, start)
 
-    def test_play_pause_when_idle_at_end_plays_current_from_start(self) -> None:
+    def test_play_pause_after_end_of_last_plays_it_from_start(self) -> None:
         self.start_with(A0, A1)
         self.finish()
         self.finish()
         self.end_by_count()
-        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
+        self.assertEqual(("idle", None), (self.state().status, self.task()))
         self.player.toggle_play_pause()
         self.assertEqual("playing", self.state().status)
         self.assertEqual((A0, 0.0), self.playback.starts[-1])
@@ -1030,7 +1036,8 @@ class PlayerPrefsTest(PlayerCase):
         self.player.toggle_play_pause()
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
 
-    def test_manual_end_of_last_message_keeps_it_at_its_end(self) -> None:
+    def test_manual_end_of_last_message_clears_current(self) -> None:
+        """Без автовоспроизведения доиграно последнее — тоже как ⏹: текущего нет, idle."""
         self.manual()
         self.start_with(A0, A1)
         self.player.toggle_play_pause()
@@ -1038,13 +1045,12 @@ class PlayerPrefsTest(PlayerCase):
         self.finish()
         self.end_by_count()
         state = self.state()
-        self.assertEqual(("stopped", "aa"), (state.status, self.task()))
-        self.assertAlmostEqual(state.length_s, state.position_s)
-        self.assertTrue(state.current.heard)
+        self.assertEqual(("idle", None, 0.0), (state.status, state.current, state.position_s))
+        self.assertTrue(state.messages[0].heard)
         self.assertEqual([A0, A1], self.playback.played)
 
     def end_last_manually(self) -> None:
-        """Без автовоспроизведения доиграно последнее сообщение aa: stopped в его конце."""
+        """Без автовоспроизведения доиграно последнее сообщение aa: текущего нет, idle."""
         self.manual()
         self.start_with(A0, A1)
         self.player.toggle_play_pause()
@@ -1055,7 +1061,7 @@ class PlayerPrefsTest(PlayerCase):
     def test_play_pause_after_last_ended_plays_message_arrived_since(self) -> None:
         self.end_last_manually()
         self.arrive(B0)
-        self.assertEqual(("stopped", "aa"), (self.state().status, self.task()))
+        self.assertEqual(("idle", None), (self.state().status, self.task()))
         self.player.toggle_play_pause()
         state = self.state()
         self.assertEqual(("playing", "bb", 0.0), (state.status, self.task(), state.position_s))
@@ -1075,7 +1081,7 @@ class PlayerPrefsTest(PlayerCase):
         self.end_by_count()
         self.manual()
         self.arrive(B0)
-        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
+        self.assertEqual(("idle", None), (self.state().status, self.task()))
         self.player.toggle_play_pause()
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
@@ -1093,20 +1099,20 @@ class PlayerPrefsTest(PlayerCase):
         self.assertEqual([(B0, 0.0)], self.playback.starts)
         self.assertTrue(self.player._queue.is_started(bb))
 
-    def test_click_in_idle_with_finished_current_plays_other(self) -> None:
+    def test_click_in_idle_after_end_of_last_plays_other(self) -> None:
         self.start_with(A0, A1)
         self.finish()
         self.finish()
         self.end_by_count()
         self.manual()
         self.arrive(B0)
-        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
+        self.assertEqual(("idle", None), (self.state().status, self.task()))
         self.player.play_message(self.player._queue.messages[1])
         bb = self.state().messages[1]
         self.assertEqual(("playing", "bb"), (self.state().status, self.task()))
         self.assertEqual((B0, 0.0), self.playback.starts[-1])
         self.assertTrue(self.player._queue.is_started(bb))
-        # покинутое aa доиграно и начато: прослушано
+        # доигранное aa прослушано
         self.assertTrue(self.state().messages[0].heard)
         self.player.play_message(self.player._queue.messages[0])
         self.assertEqual(("playing", "aa"), (self.state().status, self.task()))
@@ -2382,7 +2388,7 @@ class PlayerRevoiceTest(PlayerCase):
         self.finish()
         self.end_by_count()
         self.assertEqual("idle", self.state().status)
-        return self.state().current
+        return self.state().messages[0]
 
     def revoice_fields(self, persona: str, speed: float, task: str = "aa") -> dict:
         return {"persona": persona, "speed": speed, "speed_method": "tempo",
@@ -2515,9 +2521,10 @@ class PlayerRevoiceTest(PlayerCase):
         with self.assertLogs("tts_player.player", "WARNING") as logs:
             self.player.toggle_play_pause()
         self.assertIn("text aa", logs.output[-1])
-        message = self.state().current
-        self.assertEqual((False, True, "idle"),
-                         (message.sent, message.heard, self.state().status))
+        message = self.state().messages[0]
+        self.assertEqual((False, True, "idle", None),
+                         (message.sent, message.heard, self.state().status,
+                          self.state().current))
 
     def test_config_failure_keeps_cache_with_warning(self) -> None:
         self.heard_a()
@@ -2664,7 +2671,7 @@ class PlayerSessionsTest(PlayerCase):
     def test_end_of_last_waits_and_does_not_go_back_to_earlier_unheard(self) -> None:
         b1, b2 = self.play_last_deferred_to_end()
         state = self.state()
-        self.assertEqual(("idle", b2), (state.status, state.current))
+        self.assertEqual(("idle", None, True), (state.status, state.current, b2.heard))
         self.assertEqual([self.B2], self.playback.played)
         self.assertEqual([self.voiced("b2", "B")], self.daemon.puts)
         self.assertEqual((False, True), (b1.heard, b1.deferred))
@@ -2773,8 +2780,10 @@ class PlayerSessionsTest(PlayerCase):
         self.finish()
         self.assertEqual("playing", self.state().status)
         self.deliver(self.B1)
-        self.assertEqual(("idle", True, [A0]),
-                         (self.state().status, self.state().current.heard, self.playback.played))
+        aa = self.messages("S")[0]
+        self.assertEqual(("idle", None, True, [A0]),
+                         (self.state().status, self.state().current, aa.heard,
+                          self.playback.played))
 
     def test_deferred_with_unreadable_config_warns_not_voiced_and_is_skipped(self) -> None:
         self.hook("b1", "B")
@@ -2950,12 +2959,12 @@ class PlayerSessionsTest(PlayerCase):
         self.end_by_count(self.task())
 
     def finished_aa(self, tail: int) -> None:
-        """S открыта, tail задан, aa доиграно: idle, текущее — aa."""
+        """S открыта, tail задан, aa доиграно: idle, текущего нет."""
         self.player.apply_prefs(Prefs(tail=tail))
         self.start_with(A0)
         self.finish()
         self.end_current()
-        self.assertEqual(("idle", "aa"), (self.state().status, self.task()))
+        self.assertEqual(("idle", None), (self.state().status, self.task()))
 
     def test_closed_session_keeps_last_tail_answers(self) -> None:
         """Закрытая B, tail 2, 4 ответа: остаются 2 последних; у озвученного старого удалены
@@ -2973,8 +2982,8 @@ class PlayerSessionsTest(PlayerCase):
 
     def test_open_session_accumulates_with_focus_and_idle_trims_to_tail(self) -> None:
         """На паузе ответы сверх tail копятся; заиграл последний — позади него остаётся tail;
-        доиграли — idle, очередь режется до tail, доигранное текущее остаётся; новый ответ в
-        idle режет дальше."""
+        доиграли — idle без текущего, очередь режется до tail; новый ответ в idle режет
+        дальше."""
         self.player.apply_prefs(Prefs(tail=2))
         s1, s2, s3 = self.paused_with("e1", "e2", "e3")
         self.assertEqual(["text aa", "text e1", "text e2", "text e3"], self.texts("S"))
@@ -2985,7 +2994,8 @@ class PlayerSessionsTest(PlayerCase):
         self.assertEqual(("playing", ["text e1", "text e2", "text e3"]),
                          (self.state().status, self.texts("S")))
         self.end_current()
-        self.assertEqual(("idle", last), (self.state().status, self.state().current))
+        self.assertEqual(("idle", None, True), (self.state().status, self.state().current,
+                                                last.heard))
         self.assertEqual(["text e2", "text e3"], self.texts("S"))
         self.assertEqual([False, False, True, True],
                          [p.exists() for p in (self.path(A0), s1, s2, s3)])
@@ -2993,11 +3003,12 @@ class PlayerSessionsTest(PlayerCase):
         self.assertEqual(["text e2", "text e3", "text e4"], self.texts("S"))
         self.finish()
         self.end_current()
-        self.assertEqual(("idle", "e4"), (self.state().status, self.task()))
+        self.assertEqual(("idle", None), (self.state().status, self.task()))
         self.assertEqual(["text e3", "text e4"], self.texts("S"))
 
     def test_tail_one_new_answer_after_finished_current_plays(self) -> None:
-        """tail 1: доигранное текущее места не занимает — новый ответ остаётся и играет."""
+        """tail 1: доигранное aa и новый ответ, ушедший в синтез, — фокус: оба остаются,
+        новый играет."""
         self.finished_aa(tail=1)
         self.announce("bb")
         self.assertEqual(["text aa", "text bb"], self.texts("S"))
@@ -3008,14 +3019,14 @@ class PlayerSessionsTest(PlayerCase):
         self.end_current()
         self.assertEqual(["text bb"], self.texts("S"))
 
-    def test_deferred_answer_after_finished_current_keeps_both(self) -> None:
-        """tail 1, звучит свой текст: ответ отложен (фокуса нет), но и он, и старшее текущее
-        остаются — текущее сверх tail."""
+    def test_deferred_answer_after_end_of_last_trims_ended(self) -> None:
+        """tail 1, звучит свой текст: ответ отложен (фокуса нет), доигранное aa уже не текущее
+        — режется, остаётся только ответ."""
         self.finished_aa(tail=1)
         self.player.hold()
         self.hook("ab", "S")
-        self.assertEqual(["text aa", "text ab"], self.texts("S"))
-        self.assertIs(self.messages("S")[0], self.state().current)
+        self.assertEqual(["text ab"], self.texts("S"))
+        self.assertIsNone(self.state().current)
 
     def test_two_answers_before_first_sentence_both_play_in_order(self) -> None:
         """tail 2, текущее доиграно, два ответа подряд до первого предложения: остаются оба и
@@ -3046,7 +3057,7 @@ class PlayerSessionsTest(PlayerCase):
         self.finish()
         self.end_current()
         self.assertEqual(names, self.playback.played)
-        self.assertEqual(("idle", "e3"), (self.state().status, self.task()))
+        self.assertEqual(("idle", None), (self.state().status, self.task()))
         self.assertEqual(["text e2", "text e3"], self.texts("S"))
 
     def test_switching_folders_trims_left_and_opened_queues(self) -> None:
@@ -3173,8 +3184,8 @@ class PlayerSentenceCountTest(PlayerCase):
         self.assertEqual([A0], self.playback.played)
         self.finish()
         state = self.state()
-        self.assertEqual("idle", state.status)
-        self.assertTrue(state.current.heard)
+        self.assertEqual(("idle", None), (state.status, state.current))
+        self.assertTrue(state.messages[0].heard)
 
     def test_long_message_ends_at_last_index(self) -> None:
         self.announce("aa")
@@ -3184,8 +3195,8 @@ class PlayerSentenceCountTest(PlayerCase):
         for _ in range(3):
             self.finish()
         self.assertEqual([A0, A1, A2], self.playback.played)
-        self.assertEqual("idle", self.state().status)
-        self.assertTrue(self.state().current.heard)
+        self.assertEqual(("idle", None), (self.state().status, self.state().current))
+        self.assertTrue(self.state().messages[0].heard)
 
     def test_count_after_last_sentence_ends_waiting_message(self) -> None:
         """Ответ счётчика асинхронный: пришёл, когда сообщение уже доиграно и ждёт, — конец."""
@@ -3194,8 +3205,8 @@ class PlayerSentenceCountTest(PlayerCase):
         self.finish()
         self.assertEqual("playing", self.state().status)
         self.counter.answer(1)
-        self.assertEqual("idle", self.state().status)
-        self.assertTrue(self.state().current.heard)
+        self.assertEqual(("idle", None), (self.state().status, self.state().current))
+        self.assertTrue(self.state().messages[0].heard)
 
     def test_count_of_unfinished_message_keeps_waiting(self) -> None:
         self.announce("aa")
