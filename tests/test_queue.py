@@ -585,6 +585,20 @@ class SnapshotTest(unittest.TestCase):
         queue.add(self.sentence(10, task="t4"))
         self.assertTrue(queue.is_complete(third))
 
+    def test_restore_defers_heard_without_sound(self):
+        """Звук прослушанного удалён при выходе: в новом запуске его текст демону не отдавался."""
+        self.add(1, task="t1")
+        first, = self.queue.messages
+        first.text = "текст"
+        first.starts = [0]
+        first.pieces = {"t1": 0}
+        self.queue.mark_heard(first)
+        snapshot = self.queue.release()
+        queue = MessageQueue(tail=5, order=TaskOrder())
+        queue.restore(snapshot)
+        self.assertEqual((True, True, False, {}, set()),
+                         (first.deferred, first.heard, first.sent, first.pieces, first.task_ids))
+
     def test_restore_goes_before_messages_already_queued(self):
         self.add(1, task="t1")
         snapshot = self.queue.release()

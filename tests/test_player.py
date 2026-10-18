@@ -3414,6 +3414,31 @@ class PlayerByPiecesTest(PlayerCase):
         self.player.play_message(a)
         self.assertEqual("Три.", self.texts()[-1])
 
+    def test_heard_before_restart_gets_first_sentence_ahead_and_plays_next(self) -> None:
+        """Прослушанные до перезапуска остались без звука: пока играет первая, демону — первое
+        предложение второй, и автопереход её играет, а не пропускает."""
+        a = self.hook("ha", "Один.", [0])
+        b = self.hook("hb", "Б.", [0])
+        c = self.hook("hc", "Ц.", [0])
+        for message in (a, b, c):
+            self.deliver(message, 0)
+            self.finish()
+        self.assertEqual([True, True, True], [m.heard for m in (a, b, c)])
+        self.player.shutdown()
+        sessions = Sessions(self.runtime / "sessions.json")
+        sessions.load()
+        self.player = self.make_player(sessions)
+        self.player.start()
+        a, b, c = self.player._queue.messages[-3:]
+        self.player.play_message(c)
+        self.player.play_message(a)
+        self.assertEqual(["Ц.", "Один.", "Б."], self.texts()[-3:])
+        self.deliver(a, 0)
+        b0 = self.deliver(b, 0)
+        self.finish()
+        self.assertEqual((b, "playing", b0), (self.state().current, self.state().status,
+                                              self.playback.played[-1]))
+
     def test_changed_voice_drops_sent_sentences_and_starts_over(self) -> None:
         a = self.hook("ha")
         self.deliver(a, 0)

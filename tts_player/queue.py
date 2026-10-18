@@ -167,7 +167,8 @@ class MessageQueue:
     def add(self, sentence: Sentence, sounded: Sentence | None = None) -> None:
         """Добавляет предложение в сообщение его задачи. Задача чужая (нет сообщения:
         unknown, прошлый запуск, вытесненное или очищенное) — файл удалён, WARNING; сообщение
-        прослушано — файл удалён.
+        прослушано — файл удалён, кроме предложения текста, отданного по одному (pieces):
+        прослушанное до перезапуска озвучивается заново (_defer_heard).
 
         Дубль индекса той же задачи (пауза демона: новый проход начат с оборванного
         предложения) — остаётся предложение позднего прохода (больший recv_ns), файл другого
@@ -179,7 +180,7 @@ class MessageQueue:
                         sentence.task_id)
             self._unlink(sentence)
             return
-        if message.heard:
+        if message.heard and sentence.task_id not in message.pieces:
             log.info("предложение прослушанного сообщения %s не играется: %s",
                      sentence.task_id, sentence.path)
             self._unlink(sentence)
@@ -352,12 +353,26 @@ class MessageQueue:
     def restore(self, snapshot: QueueSnapshot) -> None:
         """Старт плеера: сообщения прошлого запуска — перед уже пришедшими, с их задачами
         (поздние предложения этих задач — их) и завершённостью; хвост начатых подгоняется
-        к tail, лишние удаляются, самые старые первыми."""
+        к tail, лишние удаляются, самые старые первыми. Прослушанное с текстом — снова
+        отложено (_defer_heard)."""
+        for message in snapshot.messages:
+            if message.heard and message.text is not None:
+                self._defer_heard(message)
         self._order.restore(snapshot.task_order, snapshot.delivered)
         self._messages[:0] = snapshot.messages
         self._started[:0] = snapshot.started
         while len(self._started) > self.tail:
             self._drop(self._started[0])
+
+    def _defer_heard(self, message: Message) -> None:
+        """Звук прослушанного удалён при выходе (release): в этом запуске его текст демону не
+        отдавался — отложено, как ответ закрытой папки, и остаётся прослушанным. Следующему за
+        текущим отложенному плеер заранее отдаёт первое предложение, автопереход его озвучивает,
+        а не пропускает как сообщение без звука."""
+        self.forget_audio(message)
+        message.heard = True
+        message.sent = False
+        message.deferred = True
 
     def message_of(self, task_id: str) -> Message | None:
         return next((m for m in self._messages if task_id in m.task_ids), None)
