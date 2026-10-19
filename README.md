@@ -9,11 +9,24 @@
 
 ## Установка
 
-Из клона репозитория (или копии каталога) в любом месте:
+Одной командой, без клона:
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/lav45/TTSReader/master/install.sh | bash
 ```
+
+Скрипт клонирует репозиторий в `~/.local/share/tts-player` (при повторном запуске — `git pull
+--ff-only` там же) и запускает `install.sh` из клона; ввод (пароль `sudo`) он берёт из терминала.
+Другой каталог и другие аргументы — после `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lav45/TTSReader/master/install.sh \
+    | bash -s -- --dir ~/Programs/TTSReader
+```
+
+Нужен `git`: на macOS он приходит с Command Line Tools (`xcode-select --install`, их же требует
+Homebrew), на Linux скрипт ставит его через apt. Из уже клонированного репозитория — то же самое
+без curl: `./install.sh` (`--dir` тогда не нужен).
 
 Каталог после установки не переносить: ссылки в `~/.local/bin` и хуки ведут в него.
 
