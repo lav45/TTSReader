@@ -53,6 +53,7 @@ upstream лежат правки, которых в upstream нет:
 |---|---|
 | `feat: sherpa loads Supertonic models` | загрузка модели Supertonic 3 (ru+en) для персоны `supertonic-3`; без неё воркер sherpa не стартует, и демон говорит запасным английским голосом piper |
 | `feat: a Supertonic persona's speed goes through ffmpeg atempo` | модель Supertonic синтезирует на скорости 1.0, скорость персоны задаёт `ffmpeg atempo`: на быстром синтезе Supertonic смазывает последние слова |
+| `fix: a Stop does not speak again a reply a subagent's PostToolUse took from the file` | хук `post_tool_use` субагента (у него session_id и транскрипт основной сессии), сработавший в ту же секунду, когда ответ лёг в транскрипт, озвучивал ответ из файла, а `stop` того же хода — ещё раз из своего входа: в плеере две одинаковые дорожки с разницей в секунду |
 
 Установка — с ветки клона; `uv tool upgrade` берёт её же, поэтому правки им не стираются:
 
