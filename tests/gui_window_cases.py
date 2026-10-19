@@ -3,12 +3,14 @@
 Запускает tests/test_window_gui.py: поднимает broadwayd и гоняет этот модуль в
 подпроцессе с GDK_BACKEND=broadway без DISPLAY/WAYLAND_DISPLAY — на экран пользователя
 ничего не попадает. Имя не test_*.py: discover модуль не подбирает. На настоящем
-дисплее — только вручную, с TTS_PLAYER_GUI_TESTS=1. Значок XApp в тестах не создаётся.
+дисплее — только вручную, с TTS_PLAYER_GUI_TESTS=1. Значок XApp в тестах не создаётся,
+запасной Gtk.StatusIcon — только в TrayFallbackTest.
 """
 import tests  # noqa: F401 — окружение тестов (tests/__init__.py)
 import locale
 import os
 import unittest
+from unittest import mock
 from dataclasses import replace
 
 if os.environ.get("GDK_BACKEND") != "broadway" and os.environ.get("TTS_PLAYER_GUI_TESTS") != "1":
@@ -29,7 +31,9 @@ from tts_player.player import PlayerState  # noqa: E402
 from tts_player.player_settings import Prefs  # noqa: E402
 from tts_player.sessions import Session  # noqa: E402
 from tts_player.view import play_pause_label, position_label  # noqa: E402
-from tts_player.window import EMPTY_RANGE_S, TEXT_PADDING, PlayerWindow, tray_click, tray_menu  # noqa: E402
+from tts_player import window as window_module  # noqa: E402
+from tts_player.window import (EMPTY_RANGE_S, TEXT_PADDING, PlayerWindow, TrayIcon,  # noqa: E402
+                               tray_click, tray_menu)
 
 if not Gtk.init_check(None)[0]:
     raise RuntimeError("Gtk.init_check: дисплей недоступен")
@@ -1168,6 +1172,41 @@ class TrayClickTest(unittest.TestCase):
     def test_other_button_does_nothing(self) -> None:
         tray_click(self.window, Gdk.BUTTON_SECONDARY, Gdk.CURRENT_TIME)
         self.assertFalse(self.window.get_visible())
+
+
+class MissingMechanismsTest(unittest.TestCase):
+    """Без MPRIS и без слежения за диктовкой (macOS) их поля скрыты, а значения из файла
+    «Сохранить» не теряет."""
+
+    def setUp(self) -> None:
+        self.player = FakePlayer(state("idle", None, [], 0.0))
+        self.prefs = FakePrefs(Prefs(tail=7, pause_others=False, gap_ms=1500, dictation_gap_ms=4500))
+        self.window = PlayerWindow(self.player, FakeSettings(voice_settings()), self.prefs,
+                                   FakeTextSpeaker(), pause_others_available=False,
+                                   dictation_available=False)
+        self.addCleanup(self.window.destroy)
+
+    def test_fields_are_hidden_and_values_survive_save(self) -> None:
+        w = self.window
+        for widget in (w.pause_others_check, w.gap_spin, w.dictation_gap_spin):
+            self.assertIsNone(widget.get_parent())
+        w.settings_button.clicked()
+        w.save_button.clicked()
+        self.assertEqual(("save", Prefs(tail=7, pause_others=False, gap_ms=1500,
+                                        dictation_gap_ms=4500)), self.prefs.calls[-1])
+
+
+class TrayFallbackTest(unittest.TestCase):
+    """Без XApp — Gtk.StatusIcon: левый клик поднимает окно."""
+
+    def test_status_icon_activates_window(self) -> None:
+        window = Gtk.Window()
+        self.addCleanup(window.destroy)
+        with mock.patch.object(window_module, "XApp", None):
+            tray = TrayIcon(window, lambda: None)
+        self.assertIsInstance(tray._icon, Gtk.StatusIcon)
+        tray._icon.emit("activate")
+        self.assertTrue(window.get_visible())
 
 
 if __name__ == "__main__":

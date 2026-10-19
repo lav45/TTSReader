@@ -8,8 +8,13 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-gi.require_version("XApp", "1.0")
-from gi.repository import Gdk, GLib, Gtk, Pango, XApp  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
+
+try:  # значок XApp — в Cinnamon, MATE, Xfce; без библиотеки (macOS) — Gtk.StatusIcon
+    gi.require_version("XApp", "1.0")
+    from gi.repository import XApp  # noqa: E402
+except (ValueError, ImportError):
+    XApp = None
 
 from tts_player.daemon_settings import DaemonSettings, Voice  # noqa: E402
 from tts_player.model import Message  # noqa: E402
@@ -109,7 +114,9 @@ class PlayerWindow(Gtk.Window):
     временем слева, play/pause и ⏩ автовоспроизведения справа (⏩ — крайняя справа).
     "settings": хвост очереди (PlayerSettings), голос и скорость claude-tts
     (DaemonSettings); «Сохранить» пишет их и остаётся на экране, итог — в блоке внизу; стрелка
-    назад возвращает без записи. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
+    назад возвращает без записи. Пауза других плееров и её тишина (pause_others_available) и
+    пауза на диктовку (dictation_available) показаны, только если механизм есть: MPRIS по D-Bus,
+    pactl в Linux. "text": свой текст (TextSpeaker) — поле ввода, ползунок, ошибка,
     время и play/pause; стрелка назад ставит звучащий свой текст на паузу, мусорка «Очистить»
     стирает поле.
 
@@ -125,8 +132,11 @@ class PlayerWindow(Gtk.Window):
     GAP_STEP_MS = 100
 
     def __init__(self, player, settings: DaemonSettings, prefs: PlayerSettings,
-                 text_speaker: TextSpeaker) -> None:
+                 text_speaker: TextSpeaker, *, pause_others_available: bool = True,
+                 dictation_available: bool = True) -> None:
         super().__init__(title="TTS Player")
+        self._pause_others_available = pause_others_available
+        self._dictation_available = dictation_available
         self._player = player
         self._settings = settings
         self._prefs = prefs
@@ -254,13 +264,16 @@ class PlayerWindow(Gtk.Window):
         fields.attach(self.speed_spin, 1, 1, 1, 1)
         fields.attach(Gtk.Label(label="Хвост очереди", xalign=0.0), 0, 2, 1, 1)
         fields.attach(self.tail_spin, 1, 2, 1, 1)
-        fields.attach(self.pause_others_check, 0, 3, 2, 1)
-        fields.attach(Gtk.Label(label="Пауза до и после речи, мс", xalign=0.0), 0, 4, 1, 1)
-        fields.attach(self.gap_spin, 1, 4, 1, 1)
-        dictation_gap_label = Gtk.Label(label="Продолжать после диктовки через, мс", xalign=0.0)
-        dictation_gap_label.set_line_wrap(True)  # длинная подпись не растягивает окно
-        fields.attach(dictation_gap_label, 0, 5, 1, 1)
-        fields.attach(self.dictation_gap_spin, 1, 5, 1, 1)
+        # скрытые поля не прикреплены, но значения из файла держат: «Сохранить» их не теряет
+        if self._pause_others_available:
+            fields.attach(self.pause_others_check, 0, 3, 2, 1)
+            fields.attach(Gtk.Label(label="Пауза до и после речи, мс", xalign=0.0), 0, 4, 1, 1)
+            fields.attach(self.gap_spin, 1, 4, 1, 1)
+        if self._dictation_available:
+            dictation_gap_label = Gtk.Label(label="Продолжать после диктовки через, мс", xalign=0.0)
+            dictation_gap_label.set_line_wrap(True)  # длинная подпись не растягивает окно
+            fields.attach(dictation_gap_label, 0, 5, 1, 1)
+            fields.attach(self.dictation_gap_spin, 1, 5, 1, 1)
         self.voice_combo.set_hexpand(True)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -614,20 +627,37 @@ def tray_click(window: Gtk.Window, button: int, time: int) -> None:
 
 
 class TrayIcon:
-    """Значок XApp в трее: левый клик поднимает окно поверх остальных, правый — меню с «Выход»."""
+    """Значок в трее: левый клик поднимает окно поверх остальных, правый — меню с «Выход».
+
+    XApp.StatusIcon, если библиотека есть (Cinnamon, MATE, Xfce); иначе Gtk.StatusIcon — в macOS
+    он в строке меню."""
     NAME = "tts-player"
     TOOLTIP = "TTS Player"
 
     def __init__(self, window: Gtk.Window, quit_app: Callable[[], None]) -> None:
         self._window = window
         self._menu = tray_menu(quit_app)
-        self._icon = XApp.StatusIcon()
-        self._icon.set_name(self.NAME)
-        self._icon.set_icon_name(APP_ICON)
+        if XApp is not None:
+            self._icon = XApp.StatusIcon()
+            self._icon.set_name(self.NAME)
+            self._icon.set_icon_name(APP_ICON)
+            self._icon.set_tooltip_text(self.TOOLTIP)
+            self._icon.set_secondary_menu(self._menu)
+            self._icon.connect("activate", self._on_activate)
+            self._icon.set_visible(True)
+            return
+        self._icon = Gtk.StatusIcon.new_from_icon_name(APP_ICON)
+        self._icon.set_title(self.TOOLTIP)
         self._icon.set_tooltip_text(self.TOOLTIP)
-        self._icon.set_secondary_menu(self._menu)
-        self._icon.connect("activate", self._on_activate)
+        self._icon.connect("activate", self._on_gtk_activate)
+        self._icon.connect("popup-menu", self._on_gtk_popup)
         self._icon.set_visible(True)
 
     def _on_activate(self, _icon, button: int, time: int) -> None:
         tray_click(self._window, button, time)
+
+    def _on_gtk_activate(self, _icon) -> None:
+        tray_click(self._window, Gdk.BUTTON_PRIMARY, Gtk.get_current_event_time())
+
+    def _on_gtk_popup(self, icon, button: int, time: int) -> None:
+        self._menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, time)

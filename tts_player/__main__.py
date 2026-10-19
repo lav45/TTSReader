@@ -13,6 +13,8 @@
 import argparse
 import logging
 import os
+import platform
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -116,7 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     gate = DictationGate()  # один на процесс: молчат и очередь, и свой текст
     watch = DictationWatch(dictation_changed(gate))  # слежение за диктовкой Claude Code
     try:
-        watch.start()
+        if dictation_available():
+            watch.start()
         player = Player(runtime, args.audio_sink, pause,
                         hook_tasks_dir=hook_queue_dir(runtime),
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
@@ -133,11 +136,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             text_speaker = TextSpeaker(runtime, tts_python, SYNTH_WORKER, player,
                                        args.audio_sink, output, dictation=gate)
-            run_gui(player, settings, prefs, text_speaker, args.show)
+            run_gui(player, settings, prefs, text_speaker, args.show, pause is not None)
     finally:
         watch.stop()  # процессы pactl убиты и подобраны; повторный stop безвреден
         gate.stop()  # после выхода Player и TextSpeaker ворота колбэков не зовут
     return 0
+
+
+def dictation_available() -> bool:
+    """Диктовку видно через pactl и /proc: только Linux с PulseAudio или PipeWire."""
+    return platform.system() == "Linux" and shutil.which("pactl") is not None
 
 
 def mpris_pause() -> MprisPause | None:
@@ -160,12 +168,14 @@ def gtk_ready() -> bool:
 
 
 def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings,
-            text_speaker: TextSpeaker, show: bool) -> None:
+            text_speaker: TextSpeaker, show: bool, pause_others_available: bool) -> None:
     from gi.repository import Gtk
 
     from tts_player.window import PlayerWindow, TrayIcon
 
-    window = PlayerWindow(player, settings, prefs, text_speaker)
+    window = PlayerWindow(player, settings, prefs, text_speaker,
+                          pause_others_available=pause_others_available,
+                          dictation_available=dictation_available())
     tray = TrayIcon(window, Gtk.main_quit)  # noqa: F841 — значок живёт, пока жива ссылка
     if show:
         window.present()
