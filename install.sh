@@ -161,6 +161,14 @@ print(runtime_dir() / APP_DIR)'
 step "Системные пакеты"
 if [ "$OS" = Darwin ]; then install_macos_packages; else install_linux_packages; fi
 
+# Демон наследует PATH от Claude Code, то есть от терминала пользователя. Без ffmpeg в нём демон
+# молча синтезирует Supertonic сразу на скорости персоны, без atempo, и концы слов смазываются.
+command -v ffmpeg > /dev/null || fail "ffmpeg не установился"
+if ! PATH="$ORIGINAL_PATH" command -v ffmpeg > /dev/null; then
+    printf 'ВНИМАНИЕ: ffmpeg (%s) нет в PATH терминала: демон не замедлит Supertonic через atempo, концы слов будут смазаны.\n' \
+        "$(command -v ffmpeg)"
+fi
+
 step "Python с PyGObject"
 PYTHON="$(find_python)" || fail "не нашёл python3 3.10+ с PyGObject, GTK 3 и GStreamer (import gi не прошёл)"
 echo "$PYTHON" > "$REPO/.python"

@@ -32,6 +32,9 @@ Python с PyGObject, который нашёл `install.sh`, записан в `
 не в git); `bin/tts-player` и `bin/tts-player-hook` запускаются им, без файла — `python3` из `PATH`.
 Хуки зовут `claude-tts` из `PATH`: `~/.local/bin` должен быть в `PATH` терминала, из которого
 запущен Claude Code (`uv tool update-shell`; `install.sh` предупредит, если его там нет).
+Демон наследует тот же `PATH` и ищет в нём `ffmpeg`: им скорость персоны Supertonic задаёт
+`atempo` (на быстром синтезе Supertonic смазывает концы слов). Нет `ffmpeg` в `PATH` — демон молча
+синтезирует сразу на скорости персоны; `install.sh` ставит `ffmpeg` и предупреждает, если его там не видно.
 
 На macOS нет паузы других плееров (MPRIS) и паузы на диктовку (`pactl`): эти настройки в окне
 скрыты. Значок — в строке меню (`Gtk.StatusIcon`); на Linux — XApp, если библиотека есть.
