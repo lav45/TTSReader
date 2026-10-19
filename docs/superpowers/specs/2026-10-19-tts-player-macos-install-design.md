@@ -91,7 +91,9 @@ Claude Code ──SessionStart/End──> tts-player-hook (bash): /proc, flock, 
 
 ## Ограничения
 
-- На macOS ничего не проверено: машины с macOS нет. Первый прогон у друга — проверка; что
+- На macOS ничего не проверено: машины с macOS нет. Ревью кода на совместимость (bash 3.2, BSD,
+  Python 3.10+) дефектов не нашло; самое вероятное место сбоя — меню значка `Gtk.StatusIcon`
+  в строке меню. Первый прогон у друга — проверка; что
   упадёт, видно в `player.log` и выводе `install.sh`.
 - Форк нужно отправить в GitHub после среза 1 (`git push origin lav45`), иначе `install.sh`
   у друга поставит claude-tts без `player_command`.

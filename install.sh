@@ -86,19 +86,24 @@ install_macos_packages() {
     brew install "${missing[@]}"
 }
 
-# Python, в котором есть PyGObject с GTK 3 и GStreamer: apt ставит его для системного
-# python3, brew — для своего.
+# Python 3.10+ (код плеера пишет типы как `str | None`), в котором есть PyGObject с GTK 3 и
+# GStreamer: apt ставит его для системного python3, brew — для своего python3.N, под который
+# собран pygobject3 (он может не совпадать с python3 brew по умолчанию).
 find_python() {
     local candidates=() python
     if [ "$OS" = Darwin ]; then
         candidates+=("$(brew --prefix)/bin/python3")
+        for python in "$(brew --prefix)"/bin/python3.[0-9]*; do
+            [[ "$python" == *-config ]] || candidates+=("$python")
+        done
     else
         candidates+=(/usr/bin/python3)
     fi
     candidates+=("$(command -v python3 || true)")
     for python in "${candidates[@]}"; do
         [ -n "$python" ] && [ -x "$python" ] || continue
-        if "$python" -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("Gst", "1.0")
+        if "$python" -c 'import sys; assert sys.version_info >= (3, 10)
+import gi; gi.require_version("Gtk", "3.0"); gi.require_version("Gst", "1.0")
 from gi.repository import Gtk, Gst' > /dev/null 2>&1; then
             echo "$python"
             return 0
@@ -157,7 +162,7 @@ step "Системные пакеты"
 if [ "$OS" = Darwin ]; then install_macos_packages; else install_linux_packages; fi
 
 step "Python с PyGObject"
-PYTHON="$(find_python)" || fail "не нашёл python3 с PyGObject, GTK 3 и GStreamer (import gi не прошёл)"
+PYTHON="$(find_python)" || fail "не нашёл python3 3.10+ с PyGObject, GTK 3 и GStreamer (import gi не прошёл)"
 echo "$PYTHON" > "$REPO/.python"
 echo "$PYTHON — записан в $REPO/.python"
 
