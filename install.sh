@@ -3,6 +3,11 @@
 # install.sh — установка и обновление TTS Player на Linux (apt) и macOS (Homebrew).
 #
 # Запуск из клона репозитория: ./install.sh [--claude-tts-source <источник uv>]
+# Без клона — из канала:
+#   curl -fsSL https://raw.githubusercontent.com/lav45/TTSReader/master/install.sh | bash
+#   curl -fsSL …/install.sh | bash -s -- [--dir <каталог>] [--claude-tts-source <источник uv>]
+# Тогда скрипт клонирует репозиторий в --dir (по умолчанию ~/.local/share/tts-player) или
+# обновляет уже клонированный (git pull --ff-only) и запускает install.sh из клона.
 # Повторный запуск — обновление: каждый шаг сначала смотрит, сделан ли он.
 #
 #  1. системные пакеты: GTK 3, GStreamer, PyGObject, ffmpeg;
@@ -27,7 +32,8 @@ APT_PACKAGES=(python3-gi gir1.2-gtk-3.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-
 APT_OPTIONAL=(gir1.2-xapp-1.0)  # значок трея XApp; без него — Gtk.StatusIcon
 BREW_PACKAGES=(pygobject3 gtk+3 gstreamer adwaita-icon-theme ffmpeg)
 
-REPO="$(cd "$(dirname "$0")" && pwd -P)"
+REPO_URL="https://github.com/lav45/TTSReader.git"
+DEFAULT_DIR="$HOME/.local/share/tts-player"
 ORIGINAL_PATH="$PATH"  # PATH пользователя: шаг uv дописывает в PATH скрипта ~/.local/bin
 BIN_DIR="$HOME/.local/bin"
 MODELS_DIR="$HOME/.claude-tts/sherpa-models"
@@ -35,11 +41,21 @@ MODELS_DIR="$HOME/.claude-tts/sherpa-models"
 step() { printf '\n==> %s\n' "$*"; }
 fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
+ARGS=("$@")
+TARGET_DIR=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --claude-tts-source) [ "$#" -ge 2 ] || fail "--claude-tts-source без значения"
             CLAUDE_TTS_SOURCE="$2"; shift 2 ;;
-        -h | --help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --dir) [ "$#" -ge 2 ] || fail "--dir без значения"
+            TARGET_DIR="$2"; shift 2 ;;
+        -h | --help)
+            if [ -n "${BASH_SOURCE[0]:-}" ]; then
+                sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            else
+                echo "Справка: https://github.com/lav45/TTSReader#установка"
+            fi
+            exit 0 ;;
         *) fail "неизвестный аргумент: $1 (см. --help)" ;;
     esac
 done
@@ -49,6 +65,39 @@ case "$OS" in
     Linux | Darwin) ;;
     *) fail "ОС $OS не поддерживается: только Linux и macOS" ;;
 esac
+
+# Скрипт пришёл из канала (curl … | bash): файла у него нет, BASH_SOURCE пуст. Тогда — клон
+# репозитория и его install.sh; stdin клону — терминал, а не остаток скрипта в канале.
+bootstrap() {
+    local dir="${TARGET_DIR:-$DEFAULT_DIR}"
+    if ! command -v git > /dev/null; then
+        if [ "$OS" = Darwin ]; then
+            fail "нет git: выполните xcode-select --install и запустите снова"
+        fi
+        command -v apt-get > /dev/null || fail "нет git: поставьте его и запустите снова"
+        step "git"
+        sudo apt-get install -y git < /dev/tty
+    fi
+    if [ -d "$dir/.git" ]; then
+        step "Обновление $dir"
+        git -C "$dir" pull --ff-only
+    else
+        [ ! -e "$dir" ] || [ -z "$(ls -A "$dir")" ] || fail "$dir не пуст и не клон репозитория: укажите --dir"
+        step "Клон $REPO_URL в $dir"
+        mkdir -p "$(dirname "$dir")"
+        git clone "$REPO_URL" "$dir"
+    fi
+    local tty=/dev/null
+    { : < /dev/tty; } 2> /dev/null && tty=/dev/tty
+    exec bash "$dir/install.sh" "${ARGS[@]+"${ARGS[@]}"}" < "$tty"
+}
+
+if [ -z "${BASH_SOURCE[0]:-}" ]; then
+    bootstrap
+fi
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+[ -z "$TARGET_DIR" ] || [ "$(cd "$TARGET_DIR" 2> /dev/null && pwd -P)" = "$REPO" ] ||
+    fail "--dir — только при запуске из канала; этот install.sh лежит в $REPO"
 
 install_linux_packages() {
     if ! command -v apt-get > /dev/null; then
