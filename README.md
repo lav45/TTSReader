@@ -1,197 +1,83 @@
 # TTS Player
 
-Плеер озвучки Claude Code для Linux: окно в трее с очередью и историей озвученных
+Плеер озвучки Claude Code для Linux и macOS: окно в трее с очередью и историей озвученных
 реплик, кнопками play/pause и ⏩ автовоспроизведения. Проигрывает звук, который синтезирует
 демон `claude-tts` в режиме `queue`.
 
-Дизайн: [docs/superpowers/specs/2026-10-09-tts-player-design.md](docs/superpowers/specs/2026-10-09-tts-player-design.md).
+Дизайн: [docs/superpowers/specs/2026-10-09-tts-player-design.md](docs/superpowers/specs/2026-10-09-tts-player-design.md),
+установка на двух ОС: [docs/superpowers/specs/2026-10-19-tts-player-macos-install-design.md](docs/superpowers/specs/2026-10-19-tts-player-macos-install-design.md).
+
+## Установка
+
+Из клона репозитория (или копии каталога) в любом месте:
+
+```bash
+./install.sh
+```
+
+Каталог после установки не переносить: ссылки в `~/.local/bin` и хуки ведут в него.
+
+Нужны: на Linux — apt (Debian, Ubuntu, Mint; на других дистрибутивах скрипт называет пакеты, а
+ставить их придётся самим), на macOS — [Homebrew](https://brew.sh) и macOS 12.3 или новее.
+`install.sh` ставит системные пакеты (GTK 3, GStreamer, PyGObject, ffmpeg), uv, `claude-tts` из
+форка, на чистой машине — штатный установщик `claude-tts` (Piper, голос по умолчанию,
+`~/.claude-tts/config.json`), движок sherpa-onnx и модель Supertonic 3 (русский голос). Затем он
+настраивает `claude-tts` под плеер, делает ссылки `~/.local/bin/tts-player` и `tts-player-hook`,
+вписывает хуки в `~/.claude/settings.json` (копия — `settings.json.bak-<дата>`) и перезапускает
+работающие демон и плеер. Повторный запуск — обновление: сделанные шаги пропускаются.
+`--claude-tts-source <источник uv>` ставит `claude-tts` из другого места, например из локального
+клона форка: `--claude-tts-source "git+file://$HOME/Programs/claude-code-tts@lav45"`.
+
+Python с PyGObject, который нашёл `install.sh`, записан в `.python` в корне репозитория (файл
+не в git); `bin/tts-player` и `bin/tts-player-hook` запускаются им, без файла — `python3` из `PATH`.
+Хуки зовут `claude-tts` из `PATH`: `~/.local/bin` должен быть в `PATH` терминала, из которого
+запущен Claude Code (`uv tool update-shell`; `install.sh` предупредит, если его там нет).
+
+На macOS нет паузы других плееров (MPRIS) и паузы на диктовку (`pactl`): эти настройки в окне
+скрыты. Значок — в строке меню (`Gtk.StatusIcon`); на Linux — XApp, если библиотека есть.
 
 ## Как подключается
 
 ```
-Claude Code hook -> claude-tts speak --from-hook (HOME = hook-home)
-  -> tts-player (хранит текст, пишет задачу в ~/.claude-tts/queue)
-  -> claude-tts daemon -> daemon-bin/paplay (обёртка) -> tts-player (трей, история)
+Claude Code ──хук Stop / PostToolUse──> tts-player-hook stop | post-tool-use
+   └─> claude-tts speak --from-hook  (CLAUDE_TTS_QUEUE_DIR = <runtime>/tts-player/hook-queue)
+         └─> tts-player: хранит текст, кладёт задачу в ~/.claude-tts/queue ("source": "tts-player")
+               └─> claude-tts daemon: синтез, проигрыватель из player_command
+                     └─> tts-player sink <wav> (CLAUDE_TTS_MESSAGE_ID) ─> inbox/ ─> tts-player
+Claude Code ──SessionStart / SessionEnd──> tts-player-hook start | end ─> список сессий плеера
 ```
 
-- Хуки `~/.claude/hooks/speak-response.sh` и `speak-intermediate.sh` запускают
-  `claude-tts speak --from-hook` с `HOME=$XDG_RUNTIME_DIR/tts-player/hook-home`. В очередь
-  демона хук больше не пишет: готовая задача ложится в `hook-home/.claude-tts/queue/`.
-- Плеер забирает задачу оттуда, сохраняет текст сообщения и сам кладёт задачу демону в
+- `<runtime>` — каталог состояния на время сеанса: `$XDG_RUNTIME_DIR`, на macOS — `$TMPDIR`
+  (`tts_player/runtime_dir.py`). Ниже он записан как `$XDG_RUNTIME_DIR`.
+- Хуки речи пропускаются молча, если сессии нет в списке запущенного плеера. Иначе
+  `claude-tts speak --from-hook` кладёт задачу не в очередь демона, а в `hook-queue/` плеера
+  (переменная `CLAUDE_TTS_QUEUE_DIR` форка). Если демон не жив, `speak` речь пропускает сам.
+- Плеер забирает задачу, сохраняет текст сообщения и сам кладёт задачу демону в
   `~/.claude-tts/queue` (`"source": "tts-player"`). В эту очередь пишет только плеер.
-- Демон синтезирует и вызывает `paplay`. Обёртка `daemon-bin/paplay` берёт id задачи из
-  `~/.claude-tts/playback.json` и кладёт файл в `inbox/` плеера с id в имени; по id плеер
-  находит сообщение. Файл с неизвестным или чужим id удаляется.
-- Каталог `hook-home` создаёт и чистит плеер при старте: в нём ссылки на `config.json` и
-  `sessions.d/` из `~/.claude-tts` и файл `daemon.heartbeat`, который плеер обновляет раз в 10 с,
-  пока жив настоящий демон. Если плеер не запущен, heartbeat в `hook-home` нет, и хук молча
-  пропускает речь - так задумано.
-
-Демон ищет проигрыватель `paplay` через `PATH`. `bin/tts-player-hook` запускает демон
-с `daemon-bin/` первым в `PATH` (или перезапускает, если он работает без обёртки), поэтому
-вместо системного `paplay` звук попадает в буфер плеера.
-
-## Установка
-
-Нужен `jq`: им обёртка `daemon-bin/paplay` читает id задачи демона из `~/.claude-tts/playback.json`.
-
-```bash
-ln -s ~/Programs/TTSReader/bin/tts-player ~/.local/bin/tts-player
-ln -s ~/Programs/TTSReader/bin/tts-player-hook ~/.local/bin/tts-player-hook
-```
-
-В `~/.claude/settings.json` два хука сессии (подробно - «Переход на хуки сессии» ниже):
-`SessionStart` зовёт `tts-player-hook start`, `SessionEnd` - `tts-player-hook end`.
+- Демон синтезирует и зовёт проигрыватель из `player_command` в `~/.claude-tts/config.json` —
+  `["<~/.local/bin/tts-player>", "sink"]` (настройка форка, читается на каждое предложение,
+  перезапуск демона не нужен). `tts-player sink` не играет, а кладёт файл в `inbox/` плеера с id
+  сообщения из `CLAUDE_TTS_MESSAGE_ID` в имени; по id плеер находит сообщение. Файл с неизвестным
+  или чужим id удаляется.
+- Хук `UserPromptSubmit` (`tts-player-hook prompt`) для сессии из списка добавляет в контекст тон
+  голоса: `claude-tts handy tone-context`.
 
 ### Демон из форка
 
 `claude-tts` ставится не из upstream (`melderan/claude-code-tts`), а из форка
-`lav45/claude-code-tts`, клон — `~/Programs/claude-code-tts`. В ветке `lav45` поверх тега
-upstream лежат правки, которых в upstream нет:
+`lav45/claude-code-tts`, клон — `~/Programs/claude-code-tts`. В ветке `lav45` лежат правки,
+которых в upstream нет:
 
 | Коммит | Зачем |
 |---|---|
 | `feat: sherpa loads Supertonic models` | загрузка модели Supertonic 3 (ru+en) для персоны `supertonic-3`; без неё воркер sherpa не стартует, и демон говорит запасным английским голосом piper |
 | `feat: a Supertonic persona's speed goes through ffmpeg atempo` | модель Supertonic синтезирует на скорости 1.0, скорость персоны задаёт `ffmpeg atempo`: на быстром синтезе Supertonic смазывает последние слова |
 | `fix: a Stop does not speak again a reply a subagent's PostToolUse took from the file` | хук `post_tool_use` субагента (у него session_id и транскрипт основной сессии), сработавший в ту же секунду, когда ответ лёг в транскрипт, озвучивал ответ из файла, а `stop` того же хода — ещё раз из своего входа: в плеере две одинаковые дорожки с разницей в секунду |
+| `feat: an external player takes the daemon's audio through config.json player_command` | `player_command` и `CLAUDE_TTS_MESSAGE_ID`: демон отдаёт звук плееру, а не подменённому `paplay` в `PATH` (на macOS демон ищет `afplay` и подмену не находил); `CLAUDE_TTS_QUEUE_DIR`: хук кладёт задачу в очередь плеера, а не в очередь демона |
 
-Установка — с ветки клона; `uv tool upgrade` берёт её же, поэтому правки им не стираются:
-
-```bash
-uv tool install --force "claude-code-tts @ git+file://$HOME/Programs/claude-code-tts@lav45"
-```
-
-Обновление на новый релиз upstream: правки переставляются на его тег (`rebase`, а не `merge`:
-upstream переписывает историю), затем установка и перезапуск демона с `daemon-bin` первым в
-`PATH`:
-
-```bash
-cd ~/Programs/claude-code-tts
-git fetch upstream --tags
-git rebase --onto <новый тег> <тег, от которого стоит ветка> lav45
-uv tool install --force "claude-code-tts @ git+file://$HOME/Programs/claude-code-tts@lav45"
-PATH="$HOME/Programs/TTSReader/daemon-bin:$PATH" setsid claude-tts daemon restart < /dev/null > /dev/null 2>&1 &
-```
-
-### Правка хуков речи
-
-В `~/.claude/hooks/speak-response.sh` и `speak-intermediate.sh` меняется строка запуска:
-добавляется переменная `HOOK_HOME` и префикс `HOME="$HOOK_HOME"` перед `exec`
-(остальное, включая `PATH=... exec claude-tts speak --from-hook ...`, как было):
-
-```bash
-HOOK_HOME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/tts-player/hook-home"
-HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-hook --hook-type stop
-```
-
-(`--hook-type post_tool_use` - во втором скрипте.)
-
-### Переход на новую цепочку
-
-Старый и новый порядок несовместимы в обе стороны: новый плеер со старыми хуками молчит
-(задачи без `source` дают файлы с id `unknown`, плеер их удаляет), старый плеер с новыми
-хуками молчит (без `hook-home` хук речь пропускает). Поэтому шаги идут одним заходом:
-
-1. Слить обновление в `~/Programs/TTSReader` - безопасно, пока работает старый плеер: он
-   держит старый код в памяти.
-2. Дослушать очередь: непрослушанный звук старого плеера при переходе теряется.
-3. Снять копии хуков:
-   ```bash
-   cd ~/.claude/hooks
-   cp -p speak-response.sh speak-response.sh.bak-2026-10-09
-   cp -p speak-intermediate.sh speak-intermediate.sh.bak-2026-10-09
-   ```
-4. Закрыть плеер: «Выход» в меню трея.
-5. Поправить строку запуска в обоих хуках (см. «Правка хуков речи»).
-6. Сразу запустить плеер: `tts-player --tray`.
-7. Проверить `$XDG_RUNTIME_DIR/tts-player/player.log` после ответа Claude: есть строки
-   `task …` и `playing …`, нет `чужое предложение … (задача unknown)`.
-
-Откат - в таком порядке:
-
-1. Закрыть плеер: «Выход» в меню трея.
-2. Вернуть хуки из копий:
-   ```bash
-   cd ~/.claude/hooks
-   cp -p speak-response.sh.bak-2026-10-09 speak-response.sh
-   cp -p speak-intermediate.sh.bak-2026-10-09 speak-intermediate.sh
-   ```
-3. Вернуть прежний код плеера в `~/Programs/TTSReader` (коммит до слияния).
-4. Удалить сохранённые сообщения нового формата:
-   `rm "$XDG_RUNTIME_DIR/tts-player/messages.json"`.
-5. Запустить плеер: `tts-player --tray`.
-
-### Переход на сессии (история)
-
-Раздел описывает прежний переход: команды `/tts-on` и `/tts-off` сняты, см. «Переход на хуки
-сессии» ниже. Озвучка включалась не флагом `/tmp/claude-tts.on`, а списком сессий плеера (см. «Список сессий»):
-гейт хука спрашивает `tts-player session has`. Файлы вне репозитория правятся так:
-
-- `~/.claude/hooks/tts-gate.sh`: вместо проверки флага `/tmp/claude-tts.on` и сравнения с ним
-  `session_id` - `tts-player session has <session_id>` (выход 0 - озвучивать, иначе хук молча
-  выходит; так же при пустом `session_id`); иначе гейт запускает хук как
-  `CLAUDE_TTS_SESSION=<session_id> exec <скрипт хука>` (настройки сессий `claude-tts` ведутся по
-  UUID), вход хука идёт в скрипт без изменений;
-- `~/.claude/hooks/tts-toggle.sh` (`/tts-on`, `/tts-off`): добавлял сессию в список и убирал из него,
-  флаг `/tmp/claude-tts.on` не писал и не снимал;
-- `~/.claude/hooks/tts-command.sh`: на `/tts-on` речь предыдущего ответа сразу, с
-  `CLAUDE_TTS_SESSION=<UUID>` сессии из входа хука;
-- описания `~/.claude/commands/tts-on.md` и `tts-off.md` говорили «сессия добавляется в список
-  плеера» и «убирается из него».
-
-Порядок:
-
-1. Слить обновление в `~/Programs/TTSReader`.
-2. Убедиться, что плеер запущен после слияния среза (14) (есть `control/` в
-   `$XDG_RUNTIME_DIR/tts-player`); иначе перезапустить. Список сессий перезапуск переживает.
-3. Поправить хуки по списку выше (`tts-player-hook` и `tts-player` - в `PATH`) и удалить старый
-   флаг: `rm -f /tmp/claude-tts.on` (его мог записать прежний `/tts-on`).
-4. В каждой сессии, которую нужно озвучивать, выполнить `/tts-on`: пока сессии нет в списке,
-   её хуки молчат.
-
-### Переход на хуки сессии
-
-Сессия попадает в плеер сама: хук `SessionStart` зовёт `tts-player-hook start`, хук `SessionEnd` -
-`tts-player-hook end`. Команды `/tts-on` и `/tts-off` убраны. Файлы вне репозитория правятся так:
-
-1. Слить обновление в `~/Programs/TTSReader`. Старого `tts-player-hook on` после слияния нет.
-2. Снять копию `settings.json`, пока в нём ничего не тронуто:
-   ```bash
-   cd ~/.claude
-   cp -p settings.json settings.json.bak-2026-10-09-auto
-   ```
-3. В `~/.claude/settings.json` добавить в `hooks`:
-   ```json
-   "SessionStart": [{"hooks": [{"type": "command", "command": "/home/lav45/.local/bin/tts-player-hook start", "timeout": 5}]}],
-   "SessionEnd": [{"hooks": [{"type": "command", "command": "/home/lav45/.local/bin/tts-player-hook end", "timeout": 5}]}]
-   ```
-   и убрать из `UserPromptSubmit` запись `/home/lav45/.claude/hooks/tts-command.sh`; запись
-   `tts-gate.sh voice-context.sh` остаётся.
-4. Только теперь, когда `settings.json` больше не зовёт `tts-command.sh`, переименовать четыре файла
-   в `*.bak-2026-10-09-auto`: `hooks/tts-command.sh`, `hooks/tts-toggle.sh`, `commands/tts-on.md`,
-   `commands/tts-off.md` (`mv tts-toggle.sh tts-toggle.sh.bak-2026-10-09-auto` и так далее). Раньше
-   нельзя: пока запись жива, каждый запрос запускает отсутствующий файл (код 127).
-5. Перезапустить сессии, которые нужно озвучивать. Сессии, запущенные до перехода, в списке
-   плеера не появятся и молчат до перезапуска.
-
-Что делает `SessionEnd`: он срабатывает и на `/clear`, и на интерактивном `/resume`; при `reason`
-не `clear` сессию снимает любую, активную тоже (звук останавливается, её тексты и файлы удаляются).
-Возобновлённая сессия возвращается в список своим `SessionStart`. При
-`reason` = `clear` хук зовёт `session clear`: открытая сессия передаётся новой (см. «Список сессий»).
-
-Откат: закрыть плеер; в `~/Programs/TTSReader` на master вернуть коммит до слияния
-(`git reset --hard <коммит до слияния>` или `git revert -m 1 <коммит слияния>`): прежнего
-`tts-player-hook on` после слияния в master нет. Четыре переименованных файла вернуть так:
-`mv X.bak-2026-10-09-auto X`; `settings.json` - `cp -p settings.json.bak-2026-10-09-auto settings.json`
-(записи `SessionStart` и `SessionEnd` уходят вместе с ним). Затем запустить плеер: `tts-player --tray`.
-
-Гейт режима: `start` работает, только когда в `~/.claude-tts/config.json` `mode` равен `queue` (нет
-файла или поля - считается `direct`, как у прежнего `tts-toggle.sh`). Иначе в `hook.log` одна строка
-«режим claude-tts не queue - плеер не участвует, сессия не добавлена», код 0, ничего не запускается.
-У `end` гейта нет.
-
-Команды остановки и продолжения звука из CLI удалены: у них не осталось вызывающих. Звук ставит
-на паузу кнопка окна.
+`install.sh` берёт ветку `lav45` с GitHub, поэтому новые правки форка доходят до других машин
+только после `git push origin lav45`. Обновление на новый релиз upstream — слиянием тега в
+`lav45`, затем `install.sh` (с `--claude-tts-source` локального клона, пока правки не отправлены).
 
 ## Команды
 
@@ -205,12 +91,20 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
   новая сессия из того же каталога (см. «Список сессий»);
 - `tts-player session has UUID` - спросить, в списке ли сессия запущенного плеера (см.
   «Список сессий»): выход 0 - да, 1 - нет; вывода нет; неверные аргументы - usage в stderr, выход 2;
-- `tts-player-hook start | end` - вход хука `SessionStart` | `SessionEnd`: JSON хука приходит на stdin.
-  `start` поднимает демон и плеер, если их нет, и зовёт `tts-player session add UUID CWD`; `end` зовёт
-  `tts-player session remove UUID`; при `reason` = `clear` (`/clear`) `end` зовёт
-  `tts-player session clear UUID CWD` (без `cwd` - ошибка, выход 1). Вывода в stdout нет, статус - в
+- `tts-player sink [опции] WAV` - проигрыватель демона (`player_command`): кладёт файл в `inbox/`
+  плеера и сразу выходит; опции (`afplay -r` на macOS) не читаются; сбой - stderr и syslog
+  (`journalctl -t tts-player-sink`), выход 1;
+- `tts-player-hook start | end | stop | post-tool-use | prompt` - хуки Claude Code `SessionStart`,
+  `SessionEnd`, `Stop`, `PostToolUse`, `UserPromptSubmit`; JSON хука приходит на stdin
+  (`tts_player/hook_command.py`). `start`: гейт режима - в `~/.claude-tts/config.json` `mode` не
+  `queue` (нет файла или поля - `direct`), тогда одна строка в `hook.log` и больше ничего; иначе
+  поднимает демон (`claude-tts daemon start`) и плеер (`tts-player --tray`), если их нет, и добавляет
+  сессию в список. `end` убирает сессию; при `reason` = `clear` (`/clear`) - `session clear` (без
+  `cwd` - ошибка, выход 1). Вывода в stdout у `start` и `end` нет, статус - в
   `$XDG_RUNTIME_DIR/tts-player/hook.log` (первой строкой каждого вызова - событие:
-  `<дата время> start|end <UUID> source=… reason=… cwd=…`), ошибка - в stderr с выходом 1;
+  `<дата время> start|end <UUID> source=… reason=… cwd=…`), ошибка - в stderr с выходом 1.
+  `stop`, `post-tool-use`, `prompt` для сессии не из списка запущенного плеера молча выходят с 0,
+  иначе зовут `claude-tts` (см. «Как подключается») и отдают его stdout и код;
 - меню трея «Выход» - закрыть плеер.
 
 ## Список сессий
@@ -350,8 +244,8 @@ HOME="$HOOK_HOME" PATH="$(dirname "$0")/bin:$PATH" exec claude-tts speak --from-
   автопереход их озвучивает, как отложенные (первое предложение - заранее, пока играет
   предыдущее), и не пропускает; непрослушанные - с файлами. Сообщение, прерванное выходом,
   при следующем проигрывании продолжается с недоигранного предложения.
-- Предложение с id задачи `unknown` (обёртка `paplay` не нашла `current_message` в
-  `~/.claude-tts/playback.json` демона) относится к задаче своего прохода синтеза: у прохода
+- Предложение с id задачи `unknown` (демон не передал `CLAUDE_TTS_MESSAGE_ID`: текущего
+  сообщения не было) относится к задаче своего прохода синтеза: у прохода
   случайная метка в имени файла (`…_<метка>_sN.wav`), и если у сообщения уже есть предложение с
   ней, плеер добавляет туда же (в журнале `предложение без id задачи отнесено к задаче …`).
   Без такой метки - чужое, файл удаляется.
@@ -549,6 +443,7 @@ stderr плеера (`player.log`), в `~/.claude-tts/daemon.log` и в
   Файлы громкости прежней версии в `$XDG_RUNTIME_DIR/tts-player` плеер не читает и не удаляет,
   они уходят с выходом из сеанса;
 - нужны сессионная шина D-Bus и плееры с MPRIS; звуковой сервер и его утилиты не требуются.
+  Шины нет (macOS) - флажок и «Пауза до и после речи» на экране настроек скрыты.
 
 ## Диктовка Claude Code
 
@@ -566,6 +461,7 @@ TTS Player молчал или стоял на ⏸ (тишины перед зв
 пауза: после диктовки озвучка ждёт ▶, а другие плееры стоят до конца диктовки и её времени, потом продолжают через
 «Пауза до и после речи». Флажок «Ставить другие плееры на паузу» снят - диктовка других плееров не трогает. Нужны `pactl` в PATH и PipeWire; нет
 `pactl` или слежение оборвалось - одна строка WARNING, диктовка считается неидущей, плеер работает как обычно.
+Не на Linux или без `pactl` слежение не запускается, а поле «Продолжать после диктовки через» скрыто.
 
 ## Тишина перед звуком
 
@@ -593,16 +489,12 @@ python3 -m unittest discover -s tests
 python3 -m unittest discover -s tests
 command -v tts-player tts-player-hook
 # в сессии Claude Code:
-# запустить новую сессию Claude Code: SessionStart - демон перезапущен с обёрткой, плеер в трее,
-# сессия в списке
+# запустить новую сессию Claude Code: SessionStart - демон и плеер запущены, сессия в списке
 # выйти из неё (или /clear): SessionEnd - сессия убрана из списка, её хуки молчат
 # /resume: сессия снова в списке
 ```
 
-- Первый `SessionStart` перезапускает демон, если он работал без обёртки: ответ, пришедший во время
-  перезапуска (до 15 с), может прозвучать мимо плеера; следующие ответы идут через плеер, повторять
-  ничего не нужно. Начинать сессию заново нельзя: `SessionEnd` удалит её тексты.
-- Перезапуск занимает до 15 с и нужен только занятому демону; демон с обёрткой первым в `PATH` не трогается.
+- Начинать сессию заново ради проверки нельзя: `SessionEnd` удалит её тексты.
 - `tts-player session has "$CLAUDE_CODE_SESSION_ID"; echo $?` - 0 после `SessionStart`, 1 после `SessionEnd`.
 - Плеер стартует в трее с закрытым окном; чтобы открыть окно, щёлкните по значку в трее
   (`tts-player --show` показывает окно только при запуске нового экземпляра).
@@ -611,6 +503,7 @@ command -v tts-player tts-player-hook
 ## Логи
 
 - `$XDG_RUNTIME_DIR/tts-player/player.log` - вывод плеера;
-- `$XDG_RUNTIME_DIR/tts-player/daemon-restart.log` - перезапуск демона;
-- `journalctl -t tts-player-paplay` - обёртка `paplay`;
+- `$XDG_RUNTIME_DIR/tts-player/hook.log` - хуки сессии;
+- `~/.claude-tts/daemon-restart.log` - перезапуск демона из `install.sh`;
+- `journalctl -t tts-player-sink` - сбои `tts-player sink` (на macOS - Console.app, поиск по `tts-player-sink`);
 - `~/.claude-tts/daemon.log` - демон.

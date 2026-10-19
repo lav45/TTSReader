@@ -10,7 +10,7 @@ time.time_ns(), поэтому порядок имён совпадает с п�
 
 Выход 1: нет аргумента, нет каталога состояния, копия не удалась; в буфере не остаётся ни
 файла, ни .part. Демон не читает ни код, ни stderr, поэтому сбой идёт и в stderr, и в syslog
-(journalctl -t tts-player-sink; на macOS — log show --predicate 'process == "syslog"').
+(journalctl -t tts-player-sink; на macOS — Console.app, поиск по tts-player-sink).
 """
 import os
 import re

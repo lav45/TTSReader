@@ -4,6 +4,8 @@
 # этого процесса, не в PYTHONPATH: claude-tts, которого зовёт хук, его не наследует.
 set -euo pipefail
 root="$(dirname "$(dirname "$(readlink -f "$0")")")"
-exec python3 -c 'import sys; sys.path.insert(0, sys.argv.pop(1))
+# Python, найденный install.sh; без файла — python3 из PATH (хуку хватает стандартной библиотеки).
+python="$(cat "$root/.python" 2> /dev/null || true)"
+exec "${python:-python3}" -c 'import sys; sys.path.insert(0, sys.argv.pop(1))
 from tts_player.hook_command import main
 sys.exit(main(sys.argv[1:]))' "$root" "$@"
