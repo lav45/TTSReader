@@ -11,11 +11,12 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gio  # noqa: E402
 
 from tts_player.model import UNKNOWN_TASK, Sentence  # noqa: E402
+from tts_player.runtime_dir import APP_DIR, inbox_dir  # noqa: E402
 
 log = logging.getLogger("tts_player.inbox")
 
-# Имя файла от обёртки paplay (контракт (13)): <recv_ns>_<task_id>_<имя WAV демона>.
-# Без <task_id>_ — имя обёртки прежнего вида (файл пережил обновление в inbox/): id "unknown".
+# Имя файла от приёмника `tts-player sink` (контракт (13)): <recv_ns>_<task_id>_<имя WAV демона>.
+# Без <task_id>_ — имя приёмника прежнего вида (файл пережил обновление в inbox/): id "unknown".
 NAME_PATTERN = re.compile(
     r"^(?P<recv_ns>\d{19})_(?:(?P<task_id>[0-9a-f]{1,64}|" + UNKNOWN_TASK + r")_)?"
     r"tts_queue_(?P<session_id>.+)_(?P<token>[0-9a-f]+)_s(?P<index>\d+)\.wav$"
@@ -41,7 +42,7 @@ class Inbox:
     """Следит за inbox/ и отдаёт предложения в on_sentence по порядку приёма.
 
     Файл переносится в store/ (rename на одной tmpfs) под тем же именем.
-    Имена с точкой в начале (.part обёртки) не читаются; имя не по NAME_PATTERN остаётся
+    Имена с точкой в начале (.part приёмника) не читаются; имя не по NAME_PATTERN остаётся
     в inbox/ с WARNING. Имя прежнего вида, без id задачи, забирается с id "unknown".
 
     store/ принадлежит запущенному плееру: start() удаляет остатки прошлого запуска, кроме
@@ -53,9 +54,8 @@ class Inbox:
     """
 
     def __init__(self, runtime_dir: Path, on_sentence: Callable[[Sentence], None]) -> None:
-        base = Path(runtime_dir) / "tts-player"
-        self._inbox = base / "inbox"
-        self._store = base / "store"
+        self._inbox = inbox_dir(Path(runtime_dir))
+        self._store = Path(runtime_dir) / APP_DIR / "store"
         self._on_sentence = on_sentence
         self._monitor: Gio.FileMonitor | None = None
 

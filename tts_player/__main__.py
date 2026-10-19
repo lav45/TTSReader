@@ -5,6 +5,7 @@
                               [--no-gui] [--show] [--tray]
        python3 -m tts_player session add UUID CWD | remove UUID | clear UUID CWD | has UUID
                                   (подкоманда — в tts_player.session_command; has: выход 0 — сессия в списке)
+Каталог состояния — tts_player.runtime_dir: $XDG_RUNTIME_DIR, на macOS $TMPDIR.
 Без --no-gui — Gtk.main, значок в трее и окно (tts_player.window) с экраном «Свой текст»
 (tts_player.text_speaker); нет графической сессии — выход 1. С --no-gui — GLib.MainLoop без Gtk
 и XApp (e2e).
@@ -23,16 +24,17 @@ gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+from tts_player.claude_tts_python import claude_tts_python  # noqa: E402
 from tts_player.daemon_queue import DaemonQueue  # noqa: E402
 from tts_player.daemon_settings import DaemonSettings  # noqa: E402
 from tts_player.dictation_gate import DictationGate  # noqa: E402
 from tts_player.dictation_watch import DictationWatch  # noqa: E402
-from tts_player.hook_home import HookHome  # noqa: E402
 from tts_player.instance import Instance  # noqa: E402
 from tts_player.mpris_pause import MprisPause  # noqa: E402
 from tts_player.output_idle import OutputIdle  # noqa: E402
 from tts_player.player import Player  # noqa: E402
 from tts_player.player_settings import PlayerSettings  # noqa: E402
+from tts_player.runtime_dir import MISSING, hook_queue_dir, runtime_dir  # noqa: E402
 from tts_player.sentence_counter import SentenceCounter  # noqa: E402
 from tts_player.sessions import Sessions, control_dir, sessions_path  # noqa: E402
 from tts_player import session_command  # noqa: E402
@@ -65,10 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settings-file",
                         default=str(PlayerSettings.default_path(os.environ)),
                         help="файл настроек плеера: хвост, автовоспроизведение")
-    parser.add_argument("--tts-python",
-                        default="~/.local/share/uv/tools/claude-code-tts/bin/python",
+    parser.add_argument("--tts-python", default=None,
                         help="интерпретатор окружения claude-tts: синтез своего текста и"
-                             " счёт предложений сообщения")
+                             " счёт предложений сообщения; по умолчанию — из скрипта"
+                             " claude-tts в PATH")
     parser.add_argument("--no-gui", action="store_true",
                         help="без окна и трея: только плеер в цикле GLib")
     parser.add_argument("--show", action="store_true", help="показать окно сразу при запуске")
@@ -81,14 +83,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--show не сочетается с --no-gui")
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if not runtime:
-        print("tts_player: XDG_RUNTIME_DIR не задан", file=sys.stderr)
+    runtime = runtime_dir()
+    if runtime is None:
+        print(f"tts_player: {MISSING}", file=sys.stderr)
+        return 1
+    tts_python = Path(args.tts_python).expanduser() if args.tts_python else claude_tts_python()
+    if tts_python is None:
+        print("tts_player: claude-tts не найден в PATH (или его скрипт не от uv) —"
+              " задайте --tts-python", file=sys.stderr)
         return 1
 
-    instance = Instance.acquire(Path(runtime))  # до Player(): второй экземпляр store/ не трогает
+    instance = Instance.acquire(runtime)  # до Player(): второй экземпляр store/ не трогает
     if instance is None:
-        pid = Instance.holder_pid(Path(runtime))
+        pid = Instance.holder_pid(runtime)
         shown = "ещё стартует" if pid is None else f"PID {pid}"
         print(f"tts-player уже запущен ({shown})", file=sys.stderr)
         return 0
@@ -99,26 +106,22 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     pause = mpris_pause()
-    # подменённый HOME хука: его queue/ плеер забирает, heartbeat держит HookHome
     tts_config_dir = Path(args.tts_config_dir).expanduser()
-    hook_home = HookHome(Path(runtime) / "tts-player", tts_config_dir)
-    hook_home.start()  # до player.start(): к первой задаче хука hook-home уже готов
     # голос и скорость: экран настроек и переозвучка сообщений с устаревшим кэшем;
-    # очередь демона и ссылки hook-home — в том же каталоге claude-tts, чтобы не разошлись
+    # очередь демона — в том же каталоге claude-tts, чтобы не разошлись
     settings = DaemonSettings(tts_config_dir)
-    sessions = Sessions(sessions_path(Path(runtime)))
+    sessions = Sessions(sessions_path(runtime))
     sessions.load()  # сессии прошлого запуска — до player.start()
-    tts_python = Path(args.tts_python).expanduser()
     output = OutputIdle()  # один на процесс: звук очереди и своего текста будит вывод для обоих
     gate = DictationGate()  # один на процесс: молчат и очередь, и свой текст
     watch = DictationWatch(dictation_changed(gate))  # слежение за диктовкой Claude Code
     try:
         watch.start()
-        player = Player(Path(runtime), args.audio_sink, pause,
-                        hook_tasks_dir=hook_home.queue_dir,
+        player = Player(runtime, args.audio_sink, pause,
+                        hook_tasks_dir=hook_queue_dir(runtime),
                         daemon_queue=DaemonQueue(tts_config_dir / "queue"),
                         daemon_settings=settings, sessions=sessions,
-                        control_dir=control_dir(Path(runtime)),
+                        control_dir=control_dir(runtime),
                         # процесс — с первым запросом, остановит Player.shutdown
                         sentence_counter=SentenceCounter(tts_python, SENTENCE_COUNT_WORKER),
                         output=output, dictation=gate)
@@ -126,15 +129,14 @@ def main(argv: list[str] | None = None) -> int:
         player.apply_prefs(prefs.load())  # до start(): накопленное в inbox/ играет по настройкам
         if args.no_gui:
             loop = GLib.MainLoop()
-            run(player, loop.run, loop.quit, hook_home=hook_home)
+            run(player, loop.run, loop.quit)
         else:
-            text_speaker = TextSpeaker(Path(runtime), tts_python, SYNTH_WORKER, player,
+            text_speaker = TextSpeaker(runtime, tts_python, SYNTH_WORKER, player,
                                        args.audio_sink, output, dictation=gate)
-            run_gui(player, settings, prefs, text_speaker, args.show, hook_home)
+            run_gui(player, settings, prefs, text_speaker, args.show)
     finally:
         watch.stop()  # процессы pactl убиты и подобраны; повторный stop безвреден
         gate.stop()  # после выхода Player и TextSpeaker ворота колбэков не зовут
-        hook_home.stop()  # и когда Player или окно не построились; повторный stop безвреден
     return 0
 
 
@@ -158,7 +160,7 @@ def gtk_ready() -> bool:
 
 
 def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings,
-            text_speaker: TextSpeaker, show: bool, hook_home: HookHome) -> None:
+            text_speaker: TextSpeaker, show: bool) -> None:
     from gi.repository import Gtk
 
     from tts_player.window import PlayerWindow, TrayIcon
@@ -167,17 +169,16 @@ def run_gui(player: Player, settings: DaemonSettings, prefs: PlayerSettings,
     tray = TrayIcon(window, Gtk.main_quit)  # noqa: F841 — значок живёт, пока жива ссылка
     if show:
         window.present()
-    run(player, Gtk.main, Gtk.main_quit, text_speaker, hook_home)
+    run(player, Gtk.main, Gtk.main_quit, text_speaker)
 
 
 def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], None],
-        text_speaker: TextSpeaker | None = None, hook_home: HookHome | None = None) -> None:
+        text_speaker: TextSpeaker | None = None) -> None:
     """Плеер в главном цикле; SIGTERM/SIGINT/SIGHUP — выход, сообщения сохраняются в
     messages.json для следующего запуска (Player.shutdown).
 
     Свой текст (только с окном): остатки прошлых запусков удаляются до player.start(), выход
-    TextSpeaker — до player.shutdown(), иначе его release() пришёл бы в остановленный плеер.
-    HookHome (запущен до run) останавливается последним, после player.shutdown()."""
+    TextSpeaker — до player.shutdown(), иначе его release() пришёл бы в остановленный плеер."""
     def on_signal() -> bool:
         quit_loop()
         return GLib.SOURCE_REMOVE
@@ -193,14 +194,10 @@ def run(player: Player, main_loop: Callable[[], None], quit_loop: Callable[[], N
         main_loop()
     finally:
         try:
-            try:
-                if text_speaker is not None:
-                    text_speaker.shutdown()
-            finally:
-                player.shutdown()
+            if text_speaker is not None:
+                text_speaker.shutdown()
         finally:
-            if hook_home is not None:
-                hook_home.stop()
+            player.shutdown()
 
 
 if __name__ == "__main__":

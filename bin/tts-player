@@ -8,4 +8,9 @@ if [ "${1:-}" = session ]; then
     shift
     exec python3 -m tts_player.session_command "$@"
 fi
+# sink зовёт демон claude-tts на каждое предложение (player_command): тоже без gi и плеера.
+if [ "${1:-}" = sink ]; then
+    shift
+    exec python3 -m tts_player.sink_command "$@"
+fi
 exec python3 -m tts_player "$@"

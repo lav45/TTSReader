@@ -1,4 +1,5 @@
-"""Забор задач хука claude-tts из hook-home/.claude-tts/queue/ (контракт (11))."""
+"""Забор задач хука claude-tts из hook-queue/ (контракт (11)): туда их кладёт `claude-tts speak`
+хука с CLAUDE_TTS_QUEUE_DIR (tts_player.hook_command)."""
 import json
 import logging
 from collections.abc import Callable
@@ -11,7 +12,8 @@ log = logging.getLogger("tts_player.hook_tasks")
 
 
 class HookTasks:
-    """Следит за queue/ (Mailbox) и отдаёт задачи в on_task по порядку имён.
+    """Следит за hook-queue/ (Mailbox) и отдаёт задачи в on_task по порядку имён; *.tmp,
+    брошенные убитым писателем, убирает при старте (Mailbox clean_leftovers).
 
     Битый файл (не JSON, не объект, нет строковых id и text; негодные timestamp и speed —
     значения по умолчанию) удаляется со строкой в журнал (stderr).
@@ -19,7 +21,7 @@ class HookTasks:
 
     def __init__(self, queue_dir: Path, on_task: Callable[[HookTask], None]) -> None:
         self._on_task = on_task
-        self._mailbox = Mailbox(queue_dir, self._handle, log, "hook-tasks")
+        self._mailbox = Mailbox(queue_dir, self._handle, log, "hook-tasks", clean_leftovers=True)
 
     def start(self) -> None:
         self._mailbox.start()

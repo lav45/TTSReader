@@ -1,17 +1,17 @@
 """Подкоманда `tts-player session add|remove|clear|has`: гейт хука Claude Code зовёт её на каждом хуке,
 поэтому модуль не импортирует плеер и gi — только instance, sessions и стандартную библиотеку.
 
-add, remove и clear не трогают sessions.json: кладут запрос в $XDG_RUNTIME_DIR/tts-player/control/<ns>.json
+add, remove и clear не трогают sessions.json: кладут запрос в <runtime>/tts-player/control/<ns>.json (tts_player.runtime_dir)
 (atomic_json.write_json: временный *.tmp рядом, затем rename; сбой убирает его);
 список меняет плеер. has только читает sessions.json.
 """
-import os
 import sys
 import time
 from pathlib import Path
 
 from tts_player.atomic_json import write_json
 from tts_player.instance import is_locked
+from tts_player.runtime_dir import MISSING, runtime_dir
 from tts_player.sessions import control_dir, read_sessions, sessions_path
 
 SESSION_USAGE = "usage: tts-player session add <uuid> <cwd> | remove <uuid> | clear <uuid> <cwd> | has <uuid>"
@@ -28,11 +28,6 @@ def main(args: list[str]) -> int:
         return session_has(args[1])
     print(SESSION_USAGE, file=sys.stderr)
     return 2
-
-
-def runtime_dir() -> Path | None:
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    return Path(runtime) if runtime else None
 
 
 def session_has(session_id: str) -> int:
@@ -93,7 +88,7 @@ def submit(session_id: str, request: dict, noop_text: str, sent_text: str, offli
     (add, remove и clear в плеере идемпотентны)."""
     runtime = runtime_dir()
     if runtime is None:
-        print("tts-player: XDG_RUNTIME_DIR не задан", file=sys.stderr)
+        print(f"tts-player: {MISSING}", file=sys.stderr)
         return 1
     if not has_pending_requests(runtime) and is_listed(runtime, session_id) == noop_when_listed:
         print(noop_text)

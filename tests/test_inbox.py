@@ -14,7 +14,7 @@ from gi.repository import GLib  # noqa: E402
 from tts_player.inbox import Inbox, parse_sentence  # noqa: E402
 from tts_player.model import Sentence  # noqa: E402
 
-WRAPPER = Path(__file__).resolve().parent.parent / "daemon-bin" / "paplay"
+SINK = (str(Path(__file__).resolve().parent.parent / "bin" / "tts-player"), "sink")
 TIMEOUT_MS = 5000
 QUIET_MS = 500
 
@@ -37,12 +37,14 @@ class InboxTest(unittest.TestCase):
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
         (self.inbox_dir / name).write_bytes(data)
 
-    def run_paplay(self, name):
+    def run_sink(self, name, task_id=None):
         src = self.root / name
         src.write_bytes(b"wav")
         env = {"PATH": os.environ.get("PATH", ""), "XDG_RUNTIME_DIR": str(self.runtime),
                "HOME": str(self.root)}
-        result = subprocess.run([str(WRAPPER), str(src)], env=env,
+        if task_id is not None:
+            env["CLAUDE_TTS_MESSAGE_ID"] = task_id
+        result = subprocess.run([*SINK, str(src)], env=env,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -70,7 +72,7 @@ class InboxTest(unittest.TestCase):
 
     def test_file_from_wrapper_arrives_in_main_loop(self):
         self.inbox.start()
-        self.run_paplay("tts_queue_sess-1_ab12_s3.wav")
+        self.run_sink("tts_queue_sess-1_ab12_s3.wav")
         self.spin(until=lambda: self.got)
         self.assertEqual(len(self.got), 1)
         self.assertEqual(self.got[0].index, 3)
@@ -136,13 +138,9 @@ class InboxTest(unittest.TestCase):
         self.assertTrue((self.inbox_dir / name).exists())
         self.assertEqual(self.got, [])
 
-    def test_file_from_wrapper_carries_task_id_from_playback_json(self):
-        claude_tts = self.root / ".claude-tts"
-        claude_tts.mkdir()
-        (claude_tts / "playback.json").write_text(
-            '{"current_message": {"id": "0123abcd", "source": "tts-player"}}')
+    def test_file_from_sink_carries_task_id_from_daemon(self):
         self.inbox.start()
-        self.run_paplay("tts_queue_sess-1_ab12_s3.wav")
+        self.run_sink("tts_queue_sess-1_ab12_s3.wav", task_id="0123abcd")
         self.spin(until=lambda: self.got)
         self.assertEqual([("0123abcd", "sess-1", "ab12", 3)],
                          [(s.task_id, s.session_id, s.token, s.index) for s in self.got])
@@ -150,7 +148,7 @@ class InboxTest(unittest.TestCase):
     def test_store_removed_at_runtime_is_recreated(self):
         self.inbox.start()
         self.store_dir.rmdir()
-        self.run_paplay("tts_queue_S_ab_s0.wav")
+        self.run_sink("tts_queue_S_ab_s0.wav")
         self.spin(until=lambda: self.got)
         self.assertEqual(len(self.got), 1)
         self.assertTrue(self.got[0].path.exists())

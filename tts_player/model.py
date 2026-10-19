@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 UNKNOWN_TASK = "unknown"
-"""id задачи, когда обёртка paplay не нашла текущую задачу демона (контракт (13))."""
+"""id задачи, когда демон не назвал приёмнику текущую задачу (контракт (13))."""
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class Message:
 
 @dataclass(frozen=True)
 class HookTask:
-    """Задача хука claude-tts из hook-home/.claude-tts/queue/ (контракт (11)).
+    """Задача хука claude-tts из очереди хука hook-queue/ (контракт (11)).
 
     fields — вся задача как есть: из неё берут остальное (голос, метод скорости и т.д.)."""
     id: str
