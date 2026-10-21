@@ -1691,6 +1691,56 @@ class PlayerHoldTest(PlayerCase):
         self.assertEqual("playing", self.state().status)
 
 
+class PlayerTextScreenTest(PlayerCase):
+    """Экран своего текста (open_text/close_text) — как переход в другую сессию: главный
+    плеер на паузе и сам ничего не начинает, даже когда свой текст молчит; возврат — та же
+    активная сессия на той же позиции, статус не меняется."""
+
+    def test_open_while_playing_pauses_at_position(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.at = 0.2
+        self.player.open_text()
+        state = self.state()
+        self.assertEqual("paused", state.status)
+        self.assertAlmostEqual(0.2, state.position_s)
+        self.assertIsNone(self.playback.playing)
+        self.assertEqual(self.states[-1], state)
+
+    def test_new_message_does_not_start_while_open_and_text_silent(self) -> None:
+        self.player.start()
+        self.player.open_text()
+        self.arrive(A0)
+        self.assertEqual("idle", self.state().status)
+        self.assertEqual([], self.playback.played)
+
+    def test_release_of_own_text_does_not_start_while_open(self) -> None:
+        self.player.start()
+        self.player.open_text()
+        self.player.hold()
+        self.player.release()
+        self.arrive(A0)
+        self.assertEqual("idle", self.state().status)
+
+    def test_close_keeps_active_session_and_position(self) -> None:
+        self.start_with(A0, B0)
+        self.playback.at = 0.2
+        active = self.state().active
+        self.player.open_text()
+        self.player.close_text()
+        state = self.state()
+        self.assertIsNotNone(active)
+        self.assertEqual(active, state.active)
+        self.assertEqual("paused", state.status)
+        self.assertAlmostEqual(0.2, state.position_s)
+
+    def test_new_message_after_close_starts_in_idle(self) -> None:
+        self.player.start()
+        self.player.open_text()
+        self.player.close_text()
+        self.arrive(A0)
+        self.assertEqual("playing", self.state().status)
+
+
 class PlayerDictationTest(PlayerCase):
     """Ворота диктовки (DictationGate, gap_ms=0: открываются сразу с концом диктовки): пока
     закрыты, звук плеера молчит, статус playing; открылись — с начала прерванного

@@ -96,6 +96,12 @@ class FakePlayer:
     def close_session(self) -> None:
         self.calls.append(("close_session",))
 
+    def open_text(self) -> None:
+        self.calls.append(("open_text",))
+
+    def close_text(self) -> None:
+        self.calls.append(("close_text",))
+
     def remove_session(self, session_id: str) -> None:
         self.calls.append(("remove_session", session_id))
 
@@ -1101,6 +1107,13 @@ class TextScreenTest(unittest.TestCase):
         self.assertEqual([], self.calls("seek"))
         w.text_slider.release()
         self.assertEqual([("seek", 6.0)], self.calls("seek"))
+
+    def test_text_screen_sets_main_player_aside_and_back(self) -> None:
+        w = self.window
+        w.text_button.clicked()
+        self.assertEqual([("open_text",)], self.player.calls)
+        w.text_back_button.clicked()
+        self.assertEqual([("open_text",), ("close_text",)], self.player.calls)
 
     def test_back_pauses_playing_text(self) -> None:
         w = self.window

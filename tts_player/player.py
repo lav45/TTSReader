@@ -219,6 +219,7 @@ class Player:
         self._output_down = False
         self._retry_id = 0
         self._held = False  # звучит свой текст: сам ничего не начинаю (hold/release)
+        self._text_open = False  # открыт экран своего текста: сам ничего не начинаю
         self._autoplay = defaults.autoplay  # кнопка автовоспроизведения (apply_prefs)
         self._due = False  # _file запомнен, Playback.play ещё не звали (ворота звука)
         self._pause = pause
@@ -273,6 +274,24 @@ class Player:
     def release(self) -> None:
         """Свой текст замолчал: удержание снято, статус не меняется."""
         self._held = False
+        self._changed()
+
+    def open_text(self) -> None:
+        """Переход на экран своего текста — как в другую сессию: playing → paused с
+        запомненной позицией; пока экран открыт, плеер сам не начинает ни следующее, ни новое
+        сообщение, даже когда свой текст молчит. Активная сессия и курсор остаются, другим
+        плеерам плеер на паузе не звучит (в отличие от hold)."""
+        self._text_open = True
+        if self._status == "playing":
+            self._position = self._now()
+            self._halt()
+            self._status = "paused"
+        self._changed()
+
+    def close_text(self) -> None:
+        """Возврат к списку сессий: активна та же сессия на той же позиции, статус не
+        меняется; плеер снова ведёт сам."""
+        self._text_open = False
         self._changed()
 
     def start(self) -> None:
@@ -748,10 +767,11 @@ class Player:
         return self._leads_itself()
 
     def _leads_itself(self) -> bool:
-        """Плеер ведёт сам, новое отдаётся демону сразу: кнопка автовоспроизведения нажата и
-        свой текст не звучит (нет удержания). Единственное место этого условия: по нему
-        _starts_by_itself решает переходы, а _on_hook_task — отправку или отсрочку задачи."""
-        return self._autoplay and not self._held
+        """Плеер ведёт сам, новое отдаётся демону сразу: кнопка автовоспроизведения нажата,
+        свой текст не звучит (нет удержания) и экран своего текста закрыт. Единственное место
+        этого условия: по нему _starts_by_itself решает переходы, а _on_hook_task — отправку
+        или отсрочку задачи."""
+        return self._autoplay and not self._held and not self._text_open
 
     def _stop_after(self, message: Message) -> None:
         """Конец сообщения, когда плеер сам не начинает (кнопка автовоспроизведения отжата
