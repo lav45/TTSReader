@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Хуки Claude Code: tts-player-hook start|end|stop|post-tool-use|prompt, JSON хука — на stdin.
+# Хуки Claude Code: tts-player-hook start|end|stop|post-tool-use|pre-tool-use|prompt, JSON хука — на stdin.
 # Устройство — в tts_player/hook_command.py. Каталог репозитория попадает в sys.path только
 # этого процесса, не в PYTHONPATH: claude-tts, которого зовёт хук, его не наследует.
 set -euo pipefail

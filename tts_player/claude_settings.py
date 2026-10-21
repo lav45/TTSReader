@@ -23,6 +23,8 @@ EVENTS: dict[str, tuple[str, int, bool, str | None]] = {
     "SessionEnd": ("end", 5, False, None),
     "Stop": ("stop", 180, True, "*"),
     "PostToolUse": ("post-tool-use", 30, True, "*"),
+    # PostToolUse вопроса приходит только после ответа: текст перед вопросом озвучивается до него
+    "PreToolUse": ("pre-tool-use", 30, True, "AskUserQuestion"),
     "UserPromptSubmit": ("prompt", 5, False, "*"),
 }
 MARKERS = (

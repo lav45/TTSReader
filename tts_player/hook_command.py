@@ -6,6 +6,8 @@
   end            SessionEnd: `session clear` при reason clear (/clear), иначе `session remove`;
   stop           Stop: речь ответа — `claude-tts speak --from-hook --hook-type stop`;
   post-tool-use  PostToolUse: промежуточная речь — то же с --hook-type post_tool_use;
+  pre-tool-use   PreToolUse вопроса (AskUserQuestion): та же промежуточная речь до показа вопроса —
+                 PostToolUse вопроса приходит только после ответа;
   prompt         UserPromptSubmit: тон голоса в контекст — `claude-tts handy tone-context`.
 
 start. Гейт режима: в ~/.claude-tts/config.json mode не queue (нет файла, нечитаемый файл или
@@ -16,9 +18,9 @@ config.json: его читают на каждое предложение, пе�
 (проба блокировки экземпляра) — `tts-player --tray` из этого же репозитория отвязанным процессом
 (новая сессия процессов, вывод в player.log); хук его не ждёт. Затем сессия — в список плеера.
 
-stop, post-tool-use, prompt. Гейт сессии: нет session_id или сессии нет в списке запущенного
-плеера — выход 0 молча. Иначе команда claude-tts получает вход хука как есть, её stdout — stdout
-хука (prompt добавляет в контекст тон), код — код хука. CLAUDE_TTS_SESSION — UUID сессии Claude
+stop, post-tool-use, pre-tool-use, prompt. Гейт сессии: нет session_id или сессии нет в списке
+запущенного плеера — выход 0 молча. Иначе команда claude-tts получает вход хука как есть, её
+stdout — stdout хука (prompt добавляет в контекст тон), код — код хука. CLAUDE_TTS_SESSION — UUID сессии Claude
 Code (настройки сессий claude-tts ведутся по нему); у речи ещё CLAUDE_TTS_QUEUE_DIR — очередь хука
 плеера: задачу забирает плеер, хранит текст и сам кладёт её демону.
 
@@ -43,9 +45,9 @@ from tts_player import session_command
 from tts_player.instance import is_locked
 from tts_player.runtime_dir import APP_DIR, MISSING, hook_queue_dir, runtime_dir
 
-USAGE = "Usage: tts-player-hook start|end|stop|post-tool-use|prompt (JSON хука на stdin)"
+USAGE = "Usage: tts-player-hook start|end|stop|post-tool-use|pre-tool-use|prompt (JSON хука на stdin)"
 PLAYER_BIN = Path(__file__).resolve().parent.parent / "bin" / "tts-player"
-SPEECH = {"stop": "stop", "post-tool-use": "post_tool_use"}
+SPEECH = {"stop": "stop", "post-tool-use": "post_tool_use", "pre-tool-use": "post_tool_use"}
 DAEMON_MARKS = ("claude-tts", "claude_code_tts")
 
 
@@ -180,7 +182,7 @@ def session_request(log: "Log", what: str, request: Callable[..., int], *args: s
 
 
 def voiced_event(event: str, raw: str) -> int:
-    """stop, post-tool-use, prompt: команда claude-tts, только для сессии из списка плеера."""
+    """stop, post-tool-use, pre-tool-use, prompt: команда claude-tts, только для сессии из списка плеера."""
     try:
         data = json.loads(raw)
     except ValueError:

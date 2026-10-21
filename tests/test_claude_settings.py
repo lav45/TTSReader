@@ -26,6 +26,13 @@ class InstallHooksTest(unittest.TestCase):
             {"type": "command", "command": f"{HOOK} stop", "timeout": 180, "async": True}]}, stop)
         self.assertNotIn("matcher", result["hooks"]["SessionStart"][0])
 
+    def test_question_speaks_text_before_it(self) -> None:
+        """PostToolUse вопроса приходит после ответа: текст перед вопросом озвучивает PreToolUse."""
+        result = install_hooks({}, HOOK)
+        self.assertEqual([{"matcher": "AskUserQuestion", "hooks": [
+            {"type": "command", "command": f"{HOOK} pre-tool-use", "timeout": 30, "async": True}]}],
+            result["hooks"]["PreToolUse"])
+
     def test_previous_voice_entries_are_replaced(self) -> None:
         """Прежняя установка плеера (гейт) и установщик claude-tts: их записей не остаётся."""
         settings = {"hooks": {
@@ -50,7 +57,9 @@ class InstallHooksTest(unittest.TestCase):
         }}
         result = install_hooks(settings, HOOK)
         self.assertEqual("opus", result["model"])
-        self.assertEqual(settings["hooks"]["PreToolUse"], result["hooks"]["PreToolUse"])
+        self.assertEqual([*settings["hooks"]["PreToolUse"], {"matcher": "AskUserQuestion", "hooks": [
+            {"type": "command", "command": f"{HOOK} pre-tool-use", "timeout": 30, "async": True}]}],
+            result["hooks"]["PreToolUse"])
         self.assertEqual(["notify-send done", f"{HOOK} stop"], commands(result, "Stop"))
         self.assertEqual(2, len(settings["hooks"]["Stop"][0]["hooks"]), "исходный dict не меняется")
 

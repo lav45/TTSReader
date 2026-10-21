@@ -55,7 +55,7 @@ Python с PyGObject, который нашёл `install.sh`, записан в `
 ## Как подключается
 
 ```
-Claude Code ──хук Stop / PostToolUse──> tts-player-hook stop | post-tool-use
+Claude Code ──хук Stop / PostToolUse / PreToolUse──> tts-player-hook stop | post-tool-use | pre-tool-use
    └─> claude-tts speak --from-hook  (CLAUDE_TTS_QUEUE_DIR = <runtime>/tts-player/hook-queue)
          └─> tts-player: хранит текст, кладёт задачу в ~/.claude-tts/queue ("source": "tts-player")
                └─> claude-tts daemon: синтез, проигрыватель из player_command
@@ -110,8 +110,10 @@ Claude Code ──SessionStart / SessionEnd──> tts-player-hook start | end �
 - `tts-player sink [опции] WAV` - проигрыватель демона (`player_command`): кладёт файл в `inbox/`
   плеера и сразу выходит; опции (`afplay -r` на macOS) не читаются; сбой - stderr и syslog
   (`journalctl -t tts-player-sink`), выход 1;
-- `tts-player-hook start | end | stop | post-tool-use | prompt` - хуки Claude Code `SessionStart`,
-  `SessionEnd`, `Stop`, `PostToolUse`, `UserPromptSubmit`; JSON хука приходит на stdin
+- `tts-player-hook start | end | stop | post-tool-use | pre-tool-use | prompt` - хуки Claude Code
+  `SessionStart`, `SessionEnd`, `Stop`, `PostToolUse`, `PreToolUse` (только `AskUserQuestion`: его
+  `PostToolUse` приходит после ответа, а текст перед вопросом нужен до него), `UserPromptSubmit`;
+  JSON хука приходит на stdin
   (`tts_player/hook_command.py`). `start`: гейт режима - в `~/.claude-tts/config.json` `mode` не
   `queue` (нет файла или поля - `direct`), тогда одна строка в `hook.log` и больше ничего; иначе
   поднимает демон (`claude-tts daemon start`) и плеер (`tts-player --tray`), если их нет, и добавляет
@@ -119,7 +121,7 @@ Claude Code ──SessionStart / SessionEnd──> tts-player-hook start | end �
   `cwd` - ошибка, выход 1). Вывода в stdout у `start` и `end` нет, статус - в
   `$XDG_RUNTIME_DIR/tts-player/hook.log` (первой строкой каждого вызова - событие:
   `<дата время> start|end <UUID> source=… reason=… cwd=…`), ошибка - в stderr с выходом 1.
-  `stop`, `post-tool-use`, `prompt` для сессии не из списка запущенного плеера молча выходят с 0,
+  `stop`, `post-tool-use`, `pre-tool-use`, `prompt` для сессии не из списка запущенного плеера молча выходят с 0,
   иначе зовут `claude-tts` (см. «Как подключается») и отдают его stdout и код;
 - меню трея «Выход» - закрыть плеер.
 

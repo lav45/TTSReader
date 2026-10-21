@@ -287,7 +287,7 @@ class VoicedTest(HookCase):
 
     def test_session_not_listed_is_silent(self) -> None:
         self.hold_player()
-        for event in ("stop", "post-tool-use", "prompt"):
+        for event in ("stop", "post-tool-use", "pre-tool-use", "prompt"):
             with self.subTest(event=event):
                 self.assertEqual((0, "", ""), self.hook(event, self.PAYLOAD))
         self.assertIsNone(self.record("claude-tts.args", wait=0.2))
@@ -316,6 +316,13 @@ class VoicedTest(HookCase):
         self.hold_player()
         self.list_session("u1")
         self.hook("post-tool-use", self.PAYLOAD)
+        self.assertEqual("speak --from-hook --hook-type post_tool_use", self.record("claude-tts.args"))
+
+    def test_pre_tool_use_speaks_as_intermediate(self) -> None:
+        """Текст перед вопросом — та же промежуточная речь, что после инструмента."""
+        self.hold_player()
+        self.list_session("u1")
+        self.hook("pre-tool-use", self.PAYLOAD)
         self.assertEqual("speak --from-hook --hook-type post_tool_use", self.record("claude-tts.args"))
 
     def test_prompt_passes_tone_to_stdout_without_queue(self) -> None:
