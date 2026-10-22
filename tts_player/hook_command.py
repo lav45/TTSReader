@@ -7,7 +7,8 @@
   stop           Stop: речь ответа — `claude-tts speak --from-hook --hook-type stop`;
   post-tool-use  PostToolUse: промежуточная речь — то же с --hook-type post_tool_use;
   pre-tool-use   PreToolUse вопроса (AskUserQuestion): та же промежуточная речь до показа вопроса —
-                 PostToolUse вопроса приходит только после ответа;
+                 PostToolUse вопроса приходит только после ответа; следом — вопросы и варианты
+                 из tool_input (`claude-tts speak <текст>`);
   prompt         UserPromptSubmit: тон голоса в контекст — `claude-tts handy tone-context`.
 
 start. Гейт режима: в ~/.claude-tts/config.json mode не queue (нет файла, нечитаемый файл или
@@ -20,7 +21,13 @@ config.json: его читают на каждое предложение, пе�
 
 stop, post-tool-use, pre-tool-use, prompt. Гейт сессии: нет session_id или сессии нет в списке
 запущенного плеера — выход 0 молча. Иначе команда claude-tts получает вход хука как есть, её
-stdout — stdout хука (prompt добавляет в контекст тон), код — код хука. CLAUDE_TTS_SESSION — UUID сессии Claude
+stdout — stdout хука (prompt добавляет в контекст тон), код — код хука. pre-tool-use сначала ждёт, пока в
+transcript ляжет строка с tool_use_id из входа, не дольше TOOL_USE_WAIT: хук приходит раньше,
+чем Claude Code допишет сообщение с вопросом (замер 2026-10-22: строки нет при +0,2 с, есть при
++0,5 с), а claude-tts без новых строк ждёт лишь 0,6 с и, найдя чужие новые строки, не ждёт вовсе.
+Не дождался — речь отдаётся как есть, текст прозвучит в PostToolUse после ответа. Повтора нет:
+claude-tts двигает водяной знак transcript за прочитанное, а вопросы читает только pre-tool-use.
+CLAUDE_TTS_SESSION — UUID сессии Claude
 Code (настройки сессий claude-tts ведутся по нему); у речи ещё CLAUDE_TTS_QUEUE_DIR — очередь хука
 плеера: задачу забирает плеер, хранит текст и сам кладёт её демону.
 
@@ -49,6 +56,8 @@ USAGE = "Usage: tts-player-hook start|end|stop|post-tool-use|pre-tool-use|prompt
 PLAYER_BIN = Path(__file__).resolve().parent.parent / "bin" / "tts-player"
 SPEECH = {"stop": "stop", "post-tool-use": "post_tool_use", "pre-tool-use": "post_tool_use"}
 DAEMON_MARKS = ("claude-tts", "claude_code_tts")
+TOOL_USE_WAIT = 10.0
+TOOL_USE_POLL = 0.05
 
 
 class HookError(Exception):
@@ -195,12 +204,58 @@ def voiced_event(event: str, raw: str) -> int:
     if claude_tts is None:
         raise HookError("claude-tts не найден в PATH")
     env = {**os.environ, "CLAUDE_TTS_SESSION": session_id}
-    if event in SPEECH:
-        command = [claude_tts, "speak", "--from-hook", "--hook-type", SPEECH[event]]
-        env["CLAUDE_TTS_QUEUE_DIR"] = str(hook_queue_dir(runtime))
-    else:
-        command = [claude_tts, "handy", "tone-context"]
-    return subprocess.run(command, input=raw, text=True, env=env).returncode
+    if event not in SPEECH:
+        return subprocess.run([claude_tts, "handy", "tone-context"], input=raw, text=True, env=env).returncode
+    env["CLAUDE_TTS_QUEUE_DIR"] = str(hook_queue_dir(runtime))
+    if event == "pre-tool-use":
+        wait_for_tool_use(field(data, "transcript_path"), field(data, "tool_use_id"))
+    command = [claude_tts, "speak", "--from-hook", "--hook-type", SPEECH[event]]
+    code = subprocess.run(command, input=raw, text=True, env=env).returncode
+    questions = questions_text(data.get("tool_input")) if event == "pre-tool-use" else ""
+    if questions:
+        subprocess.run([claude_tts, "speak", questions], input="", text=True, env=env)
+    return code
+
+
+def wait_for_tool_use(transcript_path: str, tool_use_id: str) -> None:
+    """Ждёт строку с tool_use_id в transcript, читая только дописанное после входа в хук."""
+    if not transcript_path or not tool_use_id:
+        return
+    needle = tool_use_id.encode()
+    deadline = time.monotonic() + TOOL_USE_WAIT
+    try:
+        with open(transcript_path, "rb") as transcript:
+            # хвост на случай, если строка легла до открытия файла
+            transcript.seek(max(0, transcript.seek(0, os.SEEK_END) - 65536))
+            seen = b""
+            while True:
+                seen = seen[-len(needle):] + transcript.read()
+                if needle in seen or time.monotonic() >= deadline:
+                    return
+                time.sleep(TOOL_USE_POLL)
+    except OSError:
+        return
+
+
+def questions_text(tool_input: object) -> str:
+    """Вопросы AskUserQuestion с вариантами: «Вопрос? Варианты: А, Б.» подряд."""
+    questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
+    if not isinstance(questions, list):
+        return ""
+    parts = []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        options = question.get("options")
+        labels = [field(option, "label") for option in options if isinstance(option, dict)] \
+            if isinstance(options, list) else []
+        labels = [label for label in labels if label]
+        text = field(question, "question")
+        if labels:
+            text += f" Варианты: {', '.join(labels)}."
+        if text:
+            parts.append(text)
+    return " ".join(parts)
 
 
 class Log:

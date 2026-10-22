@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -324,6 +325,59 @@ class VoicedTest(HookCase):
         self.list_session("u1")
         self.hook("pre-tool-use", self.PAYLOAD)
         self.assertEqual("speak --from-hook --hook-type post_tool_use", self.record("claude-tts.args"))
+
+    def question_payload(self, transcript: Path) -> dict:
+        return {"session_id": "u1", "transcript_path": str(transcript), "tool_name": "AskUserQuestion",
+                "tool_use_id": "toolu_Q1", "tool_input": {"questions": [
+                    {"question": "Какой вариант?", "options": [{"label": "Первый"}, {"label": "Второй"}]}]}}
+
+    def test_pre_tool_use_waits_for_question_in_transcript(self) -> None:
+        """PreToolUse приходит раньше, чем сообщение с вопросом ляжет в transcript (замер
+        2026-10-22: +0,2..0,5 с): claude-tts зовётся, когда строка с tool_use_id уже в файле."""
+        transcript = self.root / "t.jsonl"
+        transcript.write_text('{"type": "user"}\n')
+        self.stub_claude_tts(body=f'grep -q toolu_Q1 "{transcript}" && echo "$*" >> "{self.records}/seen"\n')
+        self.hold_player()
+        self.list_session("u1")
+        writer = threading.Timer(0.3, lambda: transcript.open("a").write(
+            '{"type": "assistant", "id": "toolu_Q1"}\n'))
+        writer.start()
+        self.addCleanup(writer.cancel)
+        self.assertEqual(0, self.hook("pre-tool-use", self.question_payload(transcript))[0])
+        self.assertEqual("speak --from-hook --hook-type post_tool_use", self.record("seen").splitlines()[0])
+
+    def test_pre_tool_use_gives_up_waiting_after_timeout(self) -> None:
+        """Строка не появилась за отведённое время — речь всё равно отдаётся claude-tts."""
+        transcript = self.root / "t.jsonl"
+        transcript.write_text('{"type": "user"}\n')
+        self.hold_player()
+        self.list_session("u1")
+        with mock.patch.object(hook_command, "TOOL_USE_WAIT", 0.2):
+            self.assertEqual(0, self.hook("pre-tool-use", self.question_payload(transcript))[0])
+        self.assertEqual("speak --from-hook --hook-type post_tool_use",
+                         self.record("claude-tts.args").splitlines()[0])
+
+    def test_pre_tool_use_speaks_question_and_options_after_text(self) -> None:
+        transcript = self.root / "t.jsonl"
+        transcript.write_text('{"id": "toolu_Q1"}\n')
+        self.hold_player()
+        self.list_session("u1")
+        self.hook("pre-tool-use", self.question_payload(transcript))
+        self.assertEqual(["speak --from-hook --hook-type post_tool_use",
+                          "speak Какой вариант? Варианты: Первый, Второй."],
+                         self.record("claude-tts.args").splitlines())
+        queue = self.runtime / "tts-player" / "hook-queue"
+        self.assertEqual(f"session=u1 queue={queue}", self.record("claude-tts.env"))
+
+    def test_post_tool_use_does_not_speak_question(self) -> None:
+        """После ответа вопрос не повторяется: его читает только pre-tool-use."""
+        transcript = self.root / "t.jsonl"
+        transcript.write_text('{"id": "toolu_Q1"}\n')
+        self.hold_player()
+        self.list_session("u1")
+        self.hook("post-tool-use", self.question_payload(transcript))
+        self.assertEqual(["speak --from-hook --hook-type post_tool_use"],
+                         self.record("claude-tts.args").splitlines())
 
     def test_prompt_passes_tone_to_stdout_without_queue(self) -> None:
         """stdout tone-context — контекст запроса: хук отдаёт его как есть."""

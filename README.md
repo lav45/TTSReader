@@ -122,7 +122,11 @@ Claude Code ──SessionStart / SessionEnd──> tts-player-hook start | end �
   `$XDG_RUNTIME_DIR/tts-player/hook.log` (первой строкой каждого вызова - событие:
   `<дата время> start|end <UUID> source=… reason=… cwd=…`), ошибка - в stderr с выходом 1.
   `stop`, `post-tool-use`, `pre-tool-use`, `prompt` для сессии не из списка запущенного плеера молча выходят с 0,
-  иначе зовут `claude-tts` (см. «Как подключается») и отдают его stdout и код;
+  иначе зовут `claude-tts` (см. «Как подключается») и отдают его stdout и код. `pre-tool-use` перед
+  этим ждёт (до 10 с), пока в transcript ляжет строка с `tool_use_id` вопроса: хук приходит раньше, чем
+  Claude Code допишет сообщение. После текста он озвучивает сам вопрос и варианты из `tool_input`
+  (`claude-tts speak "<вопрос> Варианты: …"`). Повтора после ответа нет: текст закрыт водяным знаком
+  claude-tts, а вопрос читает только `pre-tool-use`;
 - меню трея «Выход» - закрыть плеер.
 
 ## Список сессий
